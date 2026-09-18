@@ -1,6 +1,6 @@
 // Package installer wires Mnemos into agent clients (Claude Code, Claude
-// Desktop, Cursor, Windsurf, Codex CLI) by editing their MCP config files
-// idempotently. It also powers `mnemos doctor` for self-diagnosis.
+// Desktop, Cursor, Windsurf, Codex CLI, pi) by editing their MCP config
+// files idempotently. It also powers `mnemos doctor` for self-diagnosis.
 package installer
 
 import (
@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -39,6 +40,43 @@ type ServerEntry struct {
 	Env     map[string]string `json:"env,omitempty"`
 }
 
+// piAgentDirEnv overrides the pi agent directory, mirroring how
+// CLAUDE_CONFIG_DIR relocates Claude Code's. pi itself resolves its agent
+// dir from a package manifest's `piConfig.configDir` plus an uppercased
+// app-name env var, and only the host knows its own app name, so mnemos
+// honours the documented generic override and the default path rather
+// than reimplementing that rebranding logic.
+const piAgentDirEnv = "PI_CODING_AGENT_DIR"
+
+// piTarget describes pi's MCP config location. pi reads MCP servers from
+// several files with a defined precedence; the agent-dir one is the
+// Pi-owned global override, which makes it the right target for a tool
+// that must not rewrite a user's shared or project config.
+//
+// piMCPConfigPath returns the path to pi's agent-dir MCP config.
+func piMCPConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if d := os.Getenv(piAgentDirEnv); d != "" {
+		return filepath.Join(d, "mcp.json")
+	}
+	return filepath.Join(home, ".pi", "agent", "mcp.json")
+}
+
+// piTarget returns pi's MCP config target. The server key stays "mnemos":
+// the tool names pi ends up exposing do not depend on choosing a key that
+// spells a particular prefix, because the pi-side guardrail matches on the
+// tool-name suffix. See the change's design.md, D6.
+func piTarget() (Target, bool) {
+	p := piMCPConfigPath()
+	if p == "" {
+		return Target{}, false
+	}
+	return Target{Name: "pi", Path: p, Key: "mnemos"}, true
+}
+
 // DetectTargets returns the MCP client config files that exist for the
 // current user. Non-existent files are still returned if their parent
 // directory is present, so `init` can create them idempotently.
@@ -52,6 +90,9 @@ func DetectTargets() []Target {
 		{Name: "Cursor", Path: filepath.Join(home, ".cursor", "mcp.json"), Key: "mnemos"},
 		{Name: "Windsurf", Path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), Key: "mnemos"},
 		{Name: "OpenAI Codex CLI", Path: filepath.Join(home, ".codex", "config.toml"), Group: "mcp_servers", Key: "mnemos", Format: FormatTOML},
+	}
+	if t, ok := piTarget(); ok {
+		candidates = append(candidates, t)
 	}
 	if p := claudeDesktopPath(); p != "" {
 		candidates = append(candidates, Target{Name: "Claude Desktop", Path: p, Key: "mnemos"})
@@ -120,11 +161,17 @@ func Install(t Target, entry ServerEntry) (bool, error) {
 	servers := asStringMap(cfg[t.Group])
 	desired := desiredEntry(entry)
 
+	// Merge over the existing entry instead of replacing it. A pi user
+	// routinely adds adapter-only keys to this entry — `directTools`,
+	// `toolPrefix`, `lifecycle` — and a later `mnemos init` must not strip
+	// them. Only the fields mnemos owns are overwritten; anything else the
+	// client or the user put there is left in place.
 	existing, _ := servers[t.Key].(map[string]any)
-	if equalMaps(existing, desired) {
+	merged := mergeEntry(existing, desired)
+	if equalMaps(existing, merged) {
 		return false, nil
 	}
-	servers[t.Key] = desired
+	servers[t.Key] = merged
 	cfg[t.Group] = servers
 
 	data, err := encodeConfig(t.Format, cfg)
@@ -251,8 +298,7 @@ func asStringMap(v any) map[string]any {
 	return map[string]any{}
 }
 
-func desiredEntry(entry ServerEntry) map[string]any {
-	out := map[string]any{"command": entry.Command}
+func desiredEntry(entry ServerEntry) map[string]any {	out := map[string]any{"command": entry.Command}
 	if len(entry.Args) > 0 {
 		args := make([]any, len(entry.Args))
 		for i, a := range entry.Args {
@@ -266,6 +312,31 @@ func desiredEntry(entry ServerEntry) map[string]any {
 			env[k] = v
 		}
 		out["env"] = env
+	}
+	return out
+}
+
+// mergeEntry overlays the keys mnemos owns onto whatever the entry
+// already held, so client- or user-added keys survive an install. A nil
+// existing entry yields exactly the desired entry.
+func mergeEntry(existing, desired map[string]any) map[string]any {
+	if len(existing) == 0 {
+		return desired
+	}
+	out := make(map[string]any, len(existing)+len(desired))
+	for k, v := range existing {
+		out[k] = v
+	}
+	for k, v := range desired {
+		out[k] = v
+	}
+	// A field mnemos owns but no longer needs must not linger: if the
+	// previous install wrote args and this one does not, the stale args
+	// would keep pointing at an argument list we no longer intend.
+	for _, owned := range []string{"command", "args", "env"} {
+		if _, keep := desired[owned]; !keep {
+			delete(out, owned)
+		}
 	}
 	return out
 }
@@ -296,4 +367,60 @@ func equalMaps(a, b map[string]any) bool {
 	aj, _ := json.Marshal(a)
 	bj, _ := json.Marshal(b)
 	return string(aj) == string(bj)
+}
+
+// PiPackageInstalled reports whether the mnemos pi package is registered
+// with pi, and the settings file it was found in.
+//
+// pi package registration lives in pi's own settings, not in the MCP
+// config, so this is a read-only observation rather than something mnemos
+// writes: the package is installed with pi's own package command. Both pi
+// settings scopes are checked, since a project-scope install is as valid
+// as a global one.
+func PiPackageInstalled() (bool, string) {
+	candidates := []string{}
+	if d := os.Getenv(piAgentDirEnv); d != "" {
+		candidates = append(candidates, filepath.Join(d, "settings.json"))
+	} else if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".pi", "agent", "settings.json"))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(wd, ".pi", "settings.json"))
+	}
+	for _, path := range candidates {
+		if piSettingsReferenceMnemos(path) {
+			return true, path
+		}
+	}
+	return false, ""
+}
+
+// piSettingsReferenceMnemos reports whether a pi settings file lists a
+// mnemos package. Matching is on the package source string containing
+// "mnemos", which covers a local path, a git URL, and an npm name without
+// pinning any of them.
+func piSettingsReferenceMnemos(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		Packages []any `json:"packages"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false
+	}
+	for _, entry := range cfg.Packages {
+		switch v := entry.(type) {
+		case string:
+			if strings.Contains(v, "mnemos") {
+				return true
+			}
+		case map[string]any:
+			if s, ok := v["source"].(string); ok && strings.Contains(s, "mnemos") {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -319,3 +319,131 @@ func TestRunDoctorFailsWithoutHook(t *testing.T) {
 		t.Error("doctor must fail when the SessionStart hook is missing")
 	}
 }
+
+// setupPiHomeForInit builds an isolated $HOME plus a pi agent dir and
+// points PI_CODING_AGENT_DIR at it, so `mnemos init` writes into the temp
+// tree rather than the developer's real pi configuration.
+func setupPiHomeForInit(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	agentDir := filepath.Join(home, ".pi", "agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
+	// Point CLAUDE_CONFIG_DIR at a non-existent path so DetectTargets does
+	// not match Claude Code (user): its parent-dir heuristic otherwise
+	// matches any extant $HOME, and the hook gate would fire.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "no", "such", "dir"))
+	return agentDir
+}
+
+func TestRunInitRegistersPiAndLeavesClaudeGateAlone(t *testing.T) {
+	agentDir := setupPiHomeForInit(t)
+
+	out := captureStdout(t, func() {
+		if err := runInit(context.Background(), nil); err != nil {
+			t.Fatalf("init: %v", err)
+		}
+	})
+	if !strings.Contains(out, "pi registered") {
+		t.Errorf("expected a pi registration line, got: %s", out)
+	}
+	// No Claude Code config dir was seeded, so the hook block must not fire.
+	if strings.Contains(out, "hook wired") {
+		t.Errorf("Claude Code hooks must stay gated on Claude Code being present, got: %s", out)
+	}
+
+	mcpPath := filepath.Join(agentDir, "mcp.json")
+	data, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("pi MCP config not written: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg["mcpServers"].(map[string]any)["mnemos"]; !ok {
+		t.Errorf("mnemos entry missing from %s: %s", mcpPath, data)
+	}
+}
+
+func TestRunInitTwiceIsIdempotentForPi(t *testing.T) {
+	agentDir := setupPiHomeForInit(t)
+	captureStdout(t, func() {
+		if err := runInit(context.Background(), nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	mcpPath := filepath.Join(agentDir, "mcp.json")
+	first, _ := os.ReadFile(mcpPath)
+
+	out := captureStdout(t, func() {
+		if err := runInit(context.Background(), nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "already up to date") {
+		t.Errorf("second init must report no change, got: %s", out)
+	}
+	second, _ := os.ReadFile(mcpPath)
+	if string(first) != string(second) {
+		t.Error("a second init must not rewrite the pi config")
+	}
+}
+
+// TestRunDoctorReportsPiHost pins that a machine with pi gets a pi line in
+// the health check, and that the missing pi package is reported as an
+// advisory rather than a failure. MCP-only is a legitimate configuration
+// (it is the Codex parity level), so failing the whole check over an
+// optional capability would be misleading.
+func TestRunDoctorReportsPiHost(t *testing.T) {
+	setupPiHomeForInit(t)
+	// Register first, so the registration line is the success case and the
+	// only thing under test is how the missing package is reported.
+	captureStdout(t, func() {
+		if err := runInit(context.Background(), nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	out := captureStdout(t, func() {
+		_ = runDoctor(context.Background(), nil)
+	})
+	if !strings.Contains(out, "✓ pi ") {
+		t.Errorf("expected a passing pi registration line, got: %s", out)
+	}
+	if !strings.Contains(out, "pi hooks:") {
+		t.Errorf("expected the pi hook advisory, got: %s", out)
+	}
+	if strings.Contains(out, "✗ pi") {
+		t.Errorf("a missing pi package must not be reported as a failure, got: %s", out)
+	}
+}
+
+// TestRunDoctorRecognizesInstalledPiPackage covers the other branch: when
+// pi settings list a mnemos package, the advisory becomes a presence line.
+func TestRunDoctorRecognizesInstalledPiPackage(t *testing.T) {
+	agentDir := setupPiHomeForInit(t)
+	settings := `{"packages": ["npm:pi-mcp-adapter", "git:github.com/polyxmedia/mnemos@v1"]}`
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		if err := runInit(context.Background(), nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	out := captureStdout(t, func() {
+		_ = runDoctor(context.Background(), nil)
+	})
+	if !strings.Contains(out, "mnemos package present") {
+		t.Errorf("expected the package-present line, got: %s", out)
+	}
+	if strings.Contains(out, "not installed") {
+		t.Errorf("an installed package must not be reported as absent, got: %s", out)
+	}
+}

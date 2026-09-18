@@ -1,0 +1,36 @@
+{
+  "name": "mnemos-pi",
+  "version": "0.11.0",
+  "private": true,
+  "type": "module",
+  "description": "pi integration for mnemos: MCP tools plus the harness-side push (prewarm, prompt recall, capture directive, write guardrail, file touches, session close).",
+  "keywords": [
+    "pi-package",
+    "mnemos",
+    "memory",
+    "mcp",
+    "persistent-memory"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "André Figueira",
+    "email": "andre@polyxmedia.com",
+    "url": "https://polyxmedia.com"
+  },
+  "repository": "https://github.com/polyxmedia/mnemos",
+  "homepage": "https://github.com/polyxmedia/mnemos",
+  "engines": {
+    "node": ">=20"
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"],
+    "mcp": "./mcp.json"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

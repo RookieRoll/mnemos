@@ -12,3 +12,5 @@ coverage.html
 coverage.out
 /mnemos
 .claude/scheduled_tasks.lock
+/graphify-out
+/mnemos.exe

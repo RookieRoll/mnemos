@@ -9,7 +9,7 @@
 
 arm:
   cmd:
-    - /Users/andrefigueira/Code/mnemos/verify/runners/on.sh
+    - {{verify_dir}}/verify/runners/on.sh
     - "{{trigger}}"
 
 scenarios:

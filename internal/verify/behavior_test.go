@@ -2,6 +2,9 @@ package verify
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -143,4 +146,78 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestSubstituteWithResolvesVerifyDir pins the token that lets a fixture
+// name a script in this checkout without hardcoding the absolute path of
+// whoever wrote it. A fixture written on one machine has to be runnable on
+// another, and the arms are the only place a path appears.
+func TestSubstituteWithResolvesVerifyDir(t *testing.T) {
+	cmd := []string{"{{verify_dir}}/verify/runners/on.sh", "{{trigger}}"}
+	got := substituteWith(cmd, "a trigger", "/repo")
+	want := []string{"/repo/verify/runners/on.sh", "a trigger"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("token %d: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestSubstituteWithLeavesTokenWhenDirUnknown keeps a fixture that does
+// not use {{verify_dir}} — or one loaded without a source path, as the
+// in-memory test fixtures are — from silently acquiring a rewrite.
+func TestSubstituteWithLeavesTokenWhenDirUnknown(t *testing.T) {
+	got := substituteWith([]string{"{{verify_dir}}/x.sh"}, "trig", "")
+	if got[0] != "{{verify_dir}}/x.sh" {
+		t.Errorf("unknown dir must leave the token alone, got %q", got[0])
+	}
+}
+
+// TestRunBehaviorResolvesVerifyDirFromFixturePath is the end-to-end half:
+// the directory comes from where the fixture was loaded, so a fixture in
+// a temp dir drives a script next to it.
+func TestRunBehaviorResolvesVerifyDirFromFixturePath(t *testing.T) {
+	dir := t.TempDir()
+	fixturePath := filepath.Join(dir, "behavior.yaml")
+	body := `arms:
+  on:
+    cmd: ["{{verify_dir}}/verify/runners/on.sh", "{{trigger}}"]
+  off:
+    cmd: ["{{verify_dir}}/verify/runners/off.sh", "{{trigger}}"]
+scenarios:
+  - name: s
+    trigger: "trig"
+    runs: 1
+    pass_when:
+      contains_any: ["x"]
+`
+	if err := os.WriteFile(fixturePath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fix, err := LoadBehaviorFixture(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := &recordingExecutor{}
+	if _, err := RunBehavior(context.Background(), exe, fix); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range exe.calls {
+		if strings.Contains(c[0], "{{verify_dir}}") {
+			t.Errorf("token must be resolved before execution, got %q", c[0])
+		}
+		if !strings.HasPrefix(c[0], dir) {
+			t.Errorf("expected a path under the fixture's dir %q, got %q", dir, c[0])
+		}
+	}
+}
+
+type recordingExecutor struct{ calls [][]string }
+
+func (r *recordingExecutor) Run(_ context.Context, cmd []string) (string, error) {
+	r.calls = append(r.calls, cmd)
+	return "x", nil
 }

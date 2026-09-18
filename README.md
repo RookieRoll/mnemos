@@ -183,6 +183,91 @@ command = "/full/path/to/mnemos"
 args    = ["serve"]
 ```
 
+### pi
+
+Two parts, and they are separable. `mnemos init` wires the MCP server, which gets you the tools. The pi package adds the hooks — session prewarm, per-prompt recall, the capture directive, the write guardrail, and passive file touches. For parity with Claude Code you want both.
+
+**1. The MCP server.** `mnemos init` writes pi's agent-dir config, and `mnemos doctor` reports it:
+
+```bash
+mnemos init && mnemos doctor
+```
+
+**2. The package.** Published to npm, so pi resolves and updates it for you:
+
+```bash
+pi install npm:mnemos-pi
+```
+
+From a checkout, or to run a local build:
+
+```bash
+pi install ./pi                                    # relative to the repo root
+pi install /absolute/path/to/mnemos/pi             # after copying the tree elsewhere
+```
+
+The extension shells out to the `mnemos` executable, so it needs to be findable. Either put it on `PATH`, or point `MNEMOS_BIN` at it — which is what the Windows install below does, since the binary lives outside any standard bin directory there:
+
+```powershell
+[Environment]::SetEnvironmentVariable('MNEMOS_BIN', 'D:\software\mnemos\mnemos.exe', 'User')
+```
+
+`pi install` writes the package source into `~/.pi/agent/settings.json` (add `-l` for a project-local `.pi/settings.json` instead). Relative paths resolve against the settings file that names them, so a project-local `./pi` stays valid only while the checkout stays put.
+
+MCP config is separate, at `~/.pi/agent/mcp.json` (override the directory with `PI_CODING_AGENT_DIR`):
+
+```json
+{
+  "mcpServers": {
+    "mnemos": {
+      "command": "/full/path/to/mnemos",
+      "args": ["serve"],
+      "directTools": true,
+      "toolPrefix": "mcp"
+    }
+  }
+}
+```
+
+`directTools` registers the tools directly instead of behind the adapter's single proxy tool, so the model can call them without a discovery step. Neither `directTools` nor `toolPrefix` is load-bearing for the guardrail, and the name the adapter actually derives is not always the one these settings imply — routing through a package manifest prefixes the package name as well. The guardrail therefore matches on the tool-name **suffix**, so it keeps covering mnemos writes under every naming scheme.
+
+What pi gets, and what it does not yet have measured:
+
+- Three of the four pushes mnemos delivers to Claude Code are delivered here: session prewarm, per-prompt memory recall plus the capture directive, and passive file touches. The fourth — memory relevant to the file about to be edited — is retrieved and logged, but pi's `tool_call` event accepts only a block/reason return, so it cannot reach the model from there. The write-boundary guardrail on that same event works unchanged.
+- **pi's effect is not measured by `mnemos verify`.** The published A/B numbers come from `claude -p`; there is no pi runner yet, so no effect figure is claimed. A one-run-per-scenario observation of the five README behavior scenarios in pi is recorded in `openspec/changes/archive/2026-09-18-add-pi-hook-parity/pi-verification.md`, with its limitations stated there.
+- One thing worth knowing before reading those numbers: the capture directive already rides in on the Claude Code on-arm (`verify/runners/on.sh` passes `mnemos hook user-prompt` output through `--append-system-prompt`), so the published capture rates are *with* the directive present, not without it. pi restores that same precondition.
+
+#### Windows: a self-contained install
+
+This is the layout mnemos is developed and verified against on Windows: the binary and the pi package side by side, in one directory that is neither the repository nor a standard bin path. Nothing here depends on the repository, so the checkout can be moved or deleted.
+
+```powershell
+# 1. Build (from the repo root)
+$env:CGO_ENABLED = '0'
+go build -ldflags "-s -w -X github.com/polyxmedia/mnemos/internal/version.Version=$(git describe --tags --always --dirty)" `
+  -o bin/mnemos.exe ./cmd/mnemos
+
+# 2. Install the binary
+New-Item -ItemType Directory -Force D:\software\mnemos | Out-Null
+Copy-Item bin/mnemos.exe D:\software\mnemos\mnemos.exe -Force
+
+# 3. Publish the pi package next to it
+New-Item -ItemType Directory -Force D:\software\mnemos\pi\extensions, D:\software\mnemos\pi\skills\mnemos | Out-Null
+Copy-Item pi\package.json, pi\mcp.json D:\software\mnemos\pi\
+Copy-Item pi\extensions\index.ts, pi\extensions\hook-transport.ts, pi\extensions\tool-match.ts D:\software\mnemos\pi\extensions\
+Copy-Item pi\skills\mnemos\SKILL.md D:\software\mnemos\pi\skills\mnemos\
+
+# 4. Point pi at the copy, not the checkout
+pi install D:\software\mnemos\pi
+
+# 5. Tell the extension where the binary is
+[Environment]::SetEnvironmentVariable('MNEMOS_BIN', 'D:\software\mnemos\mnemos.exe', 'User')
+```
+
+Only the three product `.ts` files are copied — the package's `*.test.ts` files are development-only. Step 5 matters because the package's own `mcp.json` and the extension both use the bare command name `mnemos`; `MNEMOS_BIN` is what resolves it. Open a new shell after step 5 so the variable is visible.
+
+To undo: `pi remove D:\software\mnemos\pi`, then delete the directory.
+
 ### Any MCP-compatible client
 
 Stdio: point the client at `mnemos serve`. The server advertises 17 tools and 4 resources on the `initialize` handshake (21 tools when rumination is enabled).

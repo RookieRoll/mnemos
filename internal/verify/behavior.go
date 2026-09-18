@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -55,13 +56,17 @@ func (s ScenarioOutcome) Lift() float64 {
 }
 
 // RunBehavior executes every scenario in both arms and tallies passes.
-// Substitutes {{trigger}} in each command template. Stops only on context
-// cancellation; subprocess errors per run are recorded but don't abort the
-// run — a flaky single invocation shouldn't kill the whole report.
+// Substitutes {{trigger}} and {{verify_dir}} in each command template,
+// where {{verify_dir}} resolves relative to the fixture's own location so
+// a fixture can name a script in this checkout without hardcoding an
+// absolute path. Stops only on context cancellation; subprocess errors
+// per run are recorded but don't abort the run — a flaky single
+// invocation shouldn't kill the whole report.
 func RunBehavior(ctx context.Context, exe Executor, fix *BehaviorFixture) (*BehaviorReport, error) {
 	if fix == nil {
 		return nil, fmt.Errorf("nil fixture")
 	}
+	verifyDir := filepath.Dir(fix.SourcePath)
 	rep := &BehaviorReport{}
 	for _, sc := range fix.Scenarios {
 		out := ScenarioOutcome{Scenario: sc, Runs: sc.Runs}
@@ -69,8 +74,8 @@ func RunBehavior(ctx context.Context, exe Executor, fix *BehaviorFixture) (*Beha
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			onCmd := substitute(fix.Arms.On.Cmd, sc.Trigger)
-			offCmd := substitute(fix.Arms.Off.Cmd, sc.Trigger)
+			onCmd := substituteWith(fix.Arms.On.Cmd, sc.Trigger, verifyDir)
+			offCmd := substituteWith(fix.Arms.Off.Cmd, sc.Trigger, verifyDir)
 
 			onTr, onErr := exe.Run(ctx, onCmd)
 			if onErr != nil {
@@ -117,12 +122,26 @@ func Evaluate(transcript string, a Assertions) bool {
 	return true
 }
 
-// substitute swaps {{trigger}} in every cmd token. Done per token so a
-// trigger containing spaces stays a single argv entry.
+// substitute swaps {{trigger}} and {{verify_dir}} in every cmd token.
+// Done per token so a trigger containing spaces stays a single argv entry.
+//
+// {{verify_dir}} is how a fixture names a script in this checkout without
+// hardcoding the absolute path of whoever wrote it: the directory is
+// derived from the fixture's own location at load time.
 func substitute(cmd []string, trigger string) []string {
+	return substituteWith(cmd, trigger, "")
+}
+
+// substituteWith is substitute with an explicit verify directory. An
+// empty dir leaves {{verify_dir}} untouched, which keeps a fixture that
+// does not use the token unaffected.
+func substituteWith(cmd []string, trigger, verifyDir string) []string {
 	out := make([]string, len(cmd))
 	for i, tok := range cmd {
 		out[i] = strings.ReplaceAll(tok, "{{trigger}}", trigger)
+		if verifyDir != "" {
+			out[i] = strings.ReplaceAll(out[i], "{{verify_dir}}", verifyDir)
+		}
 	}
 	return out
 }

@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 )
 
 // CaptureFixture exercises the WRITE side of mnemos: do agents record
@@ -10,8 +11,11 @@ import (
 // arm by design — the off-arm has no save/correct/convention tools so the
 // comparison is uninformative; the metric that matters is the on-arm rate.
 type CaptureFixture struct {
-	Arm       ArmCmd            `yaml:"arm"`
-	Scenarios []CaptureScenario `yaml:"scenarios"`
+	// SourcePath is the file the fixture was loaded from; see
+	// BehaviorFixture.SourcePath. Not part of the YAML.
+	SourcePath string             `yaml:"-"`
+	Arm        ArmCmd             `yaml:"arm"`
+	Scenarios  []CaptureScenario `yaml:"scenarios"`
 }
 
 // CaptureScenario embeds a user correction (or convention, or decision) in
@@ -53,6 +57,9 @@ func (c CaptureOutcome) Rate() float64 {
 // Substring match looks for the precise `"name":"<tool>"` shape so the
 // system-init available-tools listing doesn't trivially pass the assertion
 // (same trick as the behavior harness).
+// RunCapture executes every capture scenario in the single arm and counts
+// how often an expected tool fired. Substitutes {{trigger}} and
+// {{verify_dir}}; see RunBehavior for the {{verify_dir}} rule.
 func RunCapture(ctx context.Context, exe Executor, fix *CaptureFixture) (*CaptureReport, error) {
 	if fix == nil {
 		return nil, fmt.Errorf("nil fixture")
@@ -60,6 +67,7 @@ func RunCapture(ctx context.Context, exe Executor, fix *CaptureFixture) (*Captur
 	if len(fix.Arm.Cmd) == 0 {
 		return nil, fmt.Errorf("arm.cmd is required")
 	}
+	verifyDir := filepath.Dir(fix.SourcePath)
 	rep := &CaptureReport{}
 	for _, sc := range fix.Scenarios {
 		out := CaptureOutcome{Scenario: sc, Runs: sc.Runs}
@@ -67,7 +75,7 @@ func RunCapture(ctx context.Context, exe Executor, fix *CaptureFixture) (*Captur
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			cmd := substitute(fix.Arm.Cmd, sc.Trigger)
+			cmd := substituteWith(fix.Arm.Cmd, sc.Trigger, verifyDir)
 			tr, runErr := exe.Run(ctx, cmd)
 			if runErr != nil {
 				out.Errors = append(out.Errors, fmt.Sprintf("run %d: %v", i+1, runErr))

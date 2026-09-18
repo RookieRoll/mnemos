@@ -18,9 +18,9 @@ mnemos doctor
 
 You should see green checkmarks for binary, config, storage, and any agent clients it detected.
 
-## 3. Install the Claude Code skill (recommended)
+## 3. Install the agent skill (recommended)
 
-The skill nudges the agent to actually call `mnemos_*` tools on save / remember / correct signals. Without it, agents tend to silently edit on plain tasks and the store goes empty. One-time copy:
+The skill nudges the agent to actually call `mnemos_*` tools on save / remember / correct signals. Without it, agents tend to silently edit on plain tasks and the store goes empty. One-time copy for Claude Code:
 
 ```bash
 mkdir -p ~/.claude/skills/mnemos
@@ -28,7 +28,18 @@ curl -fsSL https://raw.githubusercontent.com/polyxmedia/mnemos/main/.claude/skil
   -o ~/.claude/skills/mnemos/SKILL.md
 ```
 
-(Cursor, Windsurf, and other MCP clients don't have an equivalent skill system yet. You can keep the same instructions in a project `CLAUDE.md`, `.cursorrules`, or a system prompt preset.)
+On pi, the package in this repo ships the same skill plus the harness hooks, so there is nothing to copy:
+
+```bash
+pi install ./pi          # from a checkout
+```
+
+That gets you session prewarm, per-prompt memory recall, the capture directive, the write-boundary guardrail, and passive file touches. One thing Claude Code has that pi does not: memory relevant to the file about to be edited. pi's `tool_call` event can only block or allow, so that memory is retrieved but has nowhere to go. Three things to know:
+
+- **pi's effect is not measured.** The published A/B numbers come from `claude -p`; there is no pi runner in the verify harness yet, so no effect figure is claimed for pi. A hand-run observation of the five README scenarios, limitations included, lives in `openspec/changes/archive/2026-09-18-add-pi-hook-parity/pi-verification.md`.
+- The published capture numbers were measured with the capture directive already in context — `verify/runners/on.sh` passes `mnemos hook user-prompt` output through `--append-system-prompt`. pi restores that same precondition, not something better.
+
+(Cursor, Windsurf, Codex CLI, and other MCP clients don't have an equivalent hook system yet — they get the tools. You can keep the skill's instructions in a project `CLAUDE.md`, `.cursorrules`, or a system prompt preset.)
 
 ## 4. Restart your agent
 

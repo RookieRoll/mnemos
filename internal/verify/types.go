@@ -28,8 +28,13 @@ type RetrievalProbe struct {
 // hold the on/off command templates so the harness stays dumb — the
 // fixture decides what "with mnemos" and "without mnemos" mean.
 type BehaviorFixture struct {
-	Arms      BehaviorArms       `yaml:"arms"`
-	Scenarios []BehaviorScenario `yaml:"scenarios"`
+	// SourcePath is the file the fixture was loaded from. Renderers use its
+	// directory to resolve {{verify_dir}}, so a fixture can name a script in
+	// this checkout without hardcoding the absolute path of whoever wrote
+	// it. Not part of the YAML.
+	SourcePath string             `yaml:"-"`
+	Arms       BehaviorArms       `yaml:"arms"`
+	Scenarios  []BehaviorScenario `yaml:"scenarios"`
 }
 
 // BehaviorArms supplies the two command templates compared per scenario.

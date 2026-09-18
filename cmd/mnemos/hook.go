@@ -2,10 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -51,7 +50,7 @@ func runHook(ctx context.Context, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return errors.New("usage: mnemos hook <user-prompt|stop|post-tool>")
+		return errors.New("usage: mnemos hook <user-prompt|post-tool|session-end|pre-tool|pre-compact|post-compact> [--payload JSON] [--format json]")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -73,9 +72,11 @@ func runHook(ctx context.Context, args []string) error {
 	}
 }
 
-// maxAutoGoalChars caps the goal we backfill from a user prompt. Goals are
-// shown in prewarm output and session lists, so we keep them one-line.
-const maxAutoGoalChars = 120
+// hookFlagSet builds the flag set every hook leaf shares.
+func hookFlagSet(sub string) (*flag.FlagSet, hookFlags) {
+	fs := flag.NewFlagSet("hook "+sub, flag.ContinueOnError)
+	return fs, newHookFlags(fs)
+}
 
 // runHookUserPrompt handles Claude Code's UserPromptSubmit event. Two
 // invisible side effects:
@@ -89,16 +90,63 @@ const maxAutoGoalChars = 120
 //
 // Both effects degrade silently. UserPromptSubmit stdout is injected into
 // the model context, so a failed search must produce zero stdout.
-func runHookUserPrompt(ctx context.Context, _ []string) error {
-	in := readHookStdin(os.Stdin)
+func runHookUserPrompt(ctx context.Context, args []string) error {
+	fs, flags := hookFlagSet("user-prompt")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	in := flags.resolve()
+	result := collectUserPrompt(ctx, in)
+	flags.write(hookResult{
+		SessionID: result.SessionID,
+		Context:   result.context(),
+	}, func() {
+		writeClaudePromptOutput(os.Stdout, result.MemoryBlock, result.Directive)
+	})
+	return nil
+}
+
+// promptResultText joins the memory block and the capture directive into
+// the single context blob the neutral envelope carries. They are two
+// paragraphs of one injection, so a harness that consumes the envelope
+// does not need to reassemble them.
+func (r userPromptResult) context() string {
+	parts := make([]string, 0, 2)
+	if r.MemoryBlock != "" {
+		parts = append(parts, strings.TrimRight(r.MemoryBlock, "\n"))
+	}
+	if r.Directive != "" {
+		parts = append(parts, r.Directive)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// userPromptResult is the decided outcome of a prompt hook. Everything
+// that goes to the store happened during the decision; rendering only
+// turns these strings into bytes.
+//
+// SessionID is carried even when no session is open, so the envelope
+// reports nothing rather than an empty string.
+type userPromptResult struct {
+	SessionID   string
+	MemoryBlock string
+	Directive   string
+}
+
+// collectUserPrompt performs every prompt-time decision and side effect:
+// goal backfill, memory retrieval with the relevance floor and the
+// suppression window, the injection-log write, and the surfaced counter.
+// It holds no writer, so a second harness can consume the same decisions
+// without reimplementing any of them.
+func collectUserPrompt(ctx context.Context, in hookInput) userPromptResult {
 	if in.Prompt == "" {
-		return nil
+		return userPromptResult{}
 	}
 
 	d, err := loadDeps(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mnemos hook user-prompt:", err)
-		return nil
+		return userPromptResult{}
 	}
 	defer d.close()
 
@@ -116,14 +164,21 @@ func runHookUserPrompt(ctx context.Context, _ []string) error {
 	if sess != nil {
 		sessID, agentID = sess.ID, sess.AgentID
 	}
-	emitPromptMemoryBlock(ctx, os.Stdout, d, in.Prompt, agentID, projectFromHook(in), sessID)
-	emitCaptureDirective(os.Stdout, in.Prompt)
-	return nil
+	m := collectPromptMemory(ctx, d, in.Prompt, agentID, projectFromHook(in), sessID)
+	return userPromptResult{
+		SessionID:   sessID,
+		MemoryBlock: formatPromptMemory(m),
+		Directive:   captureDirectiveText(detectCaptureShape(in.Prompt)),
+	}
 }
+
+// maxAutoGoalChars caps the goal we backfill from a user prompt. Goals are
+// shown in prewarm output and session lists, so we keep them one-line.
+const maxAutoGoalChars = 120
 
 // captureSignal names what kind of write tool the user's phrasing is
 // asking for. Returned by detectCaptureShape; consumed by
-// emitCaptureDirective.
+// captureDirectiveText.
 type captureSignal int
 
 const (
@@ -193,31 +248,6 @@ func detectCaptureShape(prompt string) captureSignal {
 	return captureNone
 }
 
-// emitCaptureDirective writes a strong-language block to w when the
-// user's prompt looks like a correction, convention, or save request.
-// The block sits in the agent's system prompt context (UserPromptSubmit
-// stdout is concatenated in by Claude Code) and tells the agent which
-// tool to call before doing anything else.
-//
-// We do NOT call the tool ourselves — the agent owns the structured
-// arguments (tried/wrong_because/fix), and we want the agent to learn
-// the pattern, not be replaced by it. The directive raises capture from
-// "optional" to "non-optional in this turn."
-func emitCaptureDirective(w io.Writer, prompt string) {
-	signal := detectCaptureShape(prompt)
-	if signal == captureNone {
-		return
-	}
-	switch signal {
-	case captureCorrection:
-		fmt.Fprintln(w, "[mnemos: capture required] The user's prompt contains correction-shaped phrasing (\"we tried X\", \"going forward\", \"don't do Y\", or similar). BEFORE answering the rest of the prompt, call mnemos_correct with: tried = the failed approach, wrong_because = why it failed, fix = what to do instead, trigger_context = a phrase that should resurface this in future. Do this even if it interrupts the task — the next session will repeat the mistake otherwise.")
-	case captureConvention:
-		fmt.Fprintln(w, "[mnemos: capture required] The user's prompt declares a project convention (\"we always X\", \"the rule here is Y\", or similar). BEFORE answering the rest of the prompt, call mnemos_convention with title = short label, rule = the rule itself, rationale = why. The next agent on this project should not have to be told this twice.")
-	case captureSave:
-		fmt.Fprintln(w, "[mnemos: capture required] The user explicitly asked you to remember or save something, OR narrated an architectural decision (\"we just decided X\", \"going with Y\"). BEFORE answering the rest of the prompt, search mnemos first; if not already recorded, call mnemos_save with type = decision (or convention if it's a project rule), title = short label, content = the substance.")
-	}
-}
-
 // promptMemoryMinScore is the BM25-after-ranker score under which we
 // suppress injection. Tuned empirically against the seed store: hits at
 // 1.5+ are clearly on-topic; below that we'd be force-feeding noise into
@@ -229,14 +259,14 @@ const promptMemoryMinScore = 1.5
 // catch the "convention + correction + decision" cluster around a topic.
 const promptMemoryMaxHits = 3
 
-// emitPromptMemoryBlock searches mnemos for the user's prompt and writes a
-// compact context block to w when at least one hit clears the score floor.
-// Best-effort: every error path produces zero stdout so a hook bug never
-// poisons the agent's context. Kept hits are recorded in the injection log
-// (channel prompt_hook) so surfaced-vs-used ratios cover this path too.
-func emitPromptMemoryBlock(ctx context.Context, w io.Writer, d *deps, prompt, agentID, project, sessionID string) {
+// collectPromptMemory searches mnemos for the user's prompt and keeps the
+// hits worth surfacing. Best-effort: every error path yields no hits, so
+// a hook bug never poisons the agent's context. Kept hits are recorded
+// in the injection log (channel prompt_hook) so surfaced-vs-used ratios
+// cover this path too.
+func collectPromptMemory(ctx context.Context, d *deps, prompt, agentID, project, sessionID string) promptMemory {
 	if prompt == "" || d == nil {
-		return
+		return promptMemory{}
 	}
 	// PreferProject, not Project: a hard filter would drop project-less
 	// global conventions. Soft affinity downranks other projects' memories
@@ -247,7 +277,7 @@ func emitPromptMemoryBlock(ctx context.Context, w io.Writer, d *deps, prompt, ag
 		Limit:         promptMemoryMaxHits,
 	})
 	if err != nil || len(hits) == 0 {
-		return
+		return promptMemory{}
 	}
 	// Suppress memories already surfaced into this project's context in the
 	// last window. Without this the same three memories ride along on every
@@ -267,28 +297,16 @@ func emitPromptMemoryBlock(ctx context.Context, w io.Writer, d *deps, prompt, ag
 		kept = append(kept, h)
 	}
 	if len(kept) == 0 {
-		return
+		return promptMemory{}
 	}
-	fmt.Fprintln(w, "[mnemos: prior memory relevant to this prompt — apply or address]")
 	refs := make([]injection.Ref, 0, len(kept))
 	for _, h := range kept {
-		title := h.Observation.Title
-		if title == "" {
-			title = h.Observation.ID
-		}
-		snippet := strings.TrimSpace(h.Snippet)
-		if snippet == "" {
-			snippet = strings.TrimSpace(h.Observation.Content)
-		}
-		if len(snippet) > 240 {
-			snippet = snippet[:237] + "…"
-		}
-		fmt.Fprintf(w, "- [%s] %s — %s\n", h.Observation.Type, title, snippet)
 		refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: h.Observation.ID})
 	}
 	_ = injection.NewLogger(injStore, nil).
 		Log(ctx, injection.ChannelPromptHook, agentID, project, sessionID, refs)
 	_ = d.mem.RecordSurfaced(ctx, refIDs(refs))
+	return promptMemory{Hits: kept}
 }
 
 // refIDs projects injection refs down to their bare IDs for RecordSurfaced.
@@ -319,9 +337,17 @@ func truncateGoal(s string) string {
 // The matcher we install (`Edit|Write|MultiEdit|NotebookEdit`) is an exact
 // alternation — the schema documents this as the format when the string has
 // no regex metacharacters but contains pipes.
-func runHookPostTool(ctx context.Context, _ []string) error {
-	in := readHookStdin(os.Stdin)
-	if !isFileEditTool(in.ToolName) {
+func runHookPostTool(ctx context.Context, args []string) error {
+	fs, flags := hookFlagSet("post-tool")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	in := flags.resolve()
+	// Side-effect only: the envelope is emitted for transport symmetry so a
+	// harness can parse one shape for every hook, and always reports "no
+	// context, no block".
+	flags.write(hookResult{}, func() {})
+	if !isFileEditToolFor(in.ToolName, flags.neutral()) {
 		return nil
 	}
 	path := filePathFromToolInput(in.ToolInput)
@@ -362,21 +388,50 @@ func runHookPostTool(ctx context.Context, _ []string) error {
 // to record as a file touch. Kept as a set so adding new editing tools is
 // a one-liner.
 func isFileEditTool(name string) bool {
-	switch name {
-	case "Edit", "Write", "MultiEdit", "NotebookEdit":
-		return true
+	return isFileEditToolFor(name, false)
+}
+
+// isFileEditToolFor is isFileEditTool with control over case sensitivity.
+//
+// The strict form matches the Claude Code matcher's names exactly, which is
+// correct there because the installed matcher already dispatched only
+// those. A neutral-format caller matches case-insensitively because pi
+// registers its built-in editing tools lowercase (`edit`, `write`) while
+// the Claude Code matcher uses `Edit` and `Write`. Without this the
+// pre-tool hook returns no context for every pi edit — the same silent
+// failure the write-tool match had, one branch over.
+func isFileEditToolFor(name string, foldCase bool) bool {
+	if !foldCase {
+		switch name {
+		case "Edit", "Write", "MultiEdit", "NotebookEdit":
+			return true
+		}
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, base := range []string{"edit", "write", "multiedit", "notebookedit"} {
+		if lower == base || strings.HasSuffix(lower, "_"+base) {
+			return true
+		}
 	}
 	return false
 }
 
-// filePathFromToolInput extracts the file_path field common to Edit, Write,
-// MultiEdit, and NotebookEdit. Returns "" if absent or not a string.
+// filePathFromToolInput extracts the file path from a tool_input map.
+// Returns "" if absent or not a string.
+//
+// Two field names are accepted deliberately. Claude Code's editing tools
+// and mnemos' own MCP tools use `file_path`; pi's built-in `edit` and
+// `write` use `path`. Reading only one of them would make every edit on the
+// other harness query for an empty path and surface nothing.
 func filePathFromToolInput(m map[string]any) string {
 	if m == nil {
 		return ""
 	}
-	if v, ok := m["file_path"].(string); ok {
-		return v
+	for _, key := range []string{"file_path", "path", "notebook_path"} {
+		if v, ok := m[key].(string); ok && v != "" {
+			return v
+		}
 	}
 	return ""
 }
@@ -389,8 +444,13 @@ func filePathFromToolInput(m map[string]any) string {
 // mnemos_session_end properly — session.Close guards on ended_at IS NULL.
 // Finishes with a stale sweep so sessions orphaned by killed terminals
 // (no SessionEnd ever fires) don't stay open forever.
-func runHookSessionEnd(ctx context.Context, _ []string) error {
-	in := readHookStdin(os.Stdin)
+func runHookSessionEnd(ctx context.Context, args []string) error {
+	fs, flags := hookFlagSet("session-end")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	in := flags.resolve()
+	flags.write(hookResult{}, func() {})
 
 	d, err := loadDeps(ctx)
 	if err != nil {
@@ -530,16 +590,35 @@ func sanitizeReason(r string) string {
 //     conventions relevant to the file about to be written and returns
 //     them as PreToolUse additionalContext — the memory arrives at the
 //     decision point, not 40 turns earlier in the session-start block.
-func runHookPreTool(ctx context.Context, _ []string) error {
-	in := readHookStdin(os.Stdin)
-	msg, block := decidePreTool(in)
+func runHookPreTool(ctx context.Context, args []string) error {
+	fs, flags := hookFlagSet("pre-tool")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	in := flags.resolve()
+	// The prefixed match is enabled only for the neutral format: that
+	// caller has no dispatch matcher narrowing the call, so the tool name
+	// is the only signal it can offer. The default path keeps the strict
+	// Claude Code match.
+	msg, block := decidePreToolFor(in, flags.neutral())
 	if block {
-		fmt.Fprintln(os.Stderr, msg)
-		os.Exit(2)
+		flags.writeBlocked(msg)
+		return nil
 	}
-	if isFileEditTool(in.ToolName) {
-		emitPreToolMemory(ctx, os.Stdout, in)
+	// The guardrail ran first and let the call through, so a refused edit
+	// never reaches the memory push and a blocked invocation carries no
+	// context.
+	if !isFileEditToolFor(in.ToolName, flags.neutral()) {
+		flags.write(hookResult{}, func() {})
+		return nil
 	}
+	context := formatPreToolMemory(collectPreToolMemory(ctx, in))
+	// No session_id in this envelope: a pre-tool invocation neither
+	// establishes nor reuses a session, it only observes one. The session
+	// identifier a harness scopes its writes to comes from prewarm.
+	flags.write(hookResult{Context: context}, func() {
+		writeClaudePreToolOutput(os.Stdout, context)
+	})
 	return nil
 }
 
@@ -548,29 +627,31 @@ func runHookPreTool(ctx context.Context, _ []string) error {
 // enough to carry the correction + convention cluster around a file.
 const preToolMemoryMaxHits = 3
 
-// emitPreToolMemory searches the store for corrections and conventions
-// relevant to the file a PreToolUse(Edit|Write) event is about to touch
-// and emits them as hookSpecificOutput.additionalContext JSON on stdout.
-// No permissionDecision is ever emitted — this surface must never
-// auto-approve or block a write, only inform it. Memories already
-// surfaced in the current session (any channel, read from the injection
-// log) are skipped, so repeated edits to the same file don't spam the
-// context with the same warning. Best-effort: every failure path emits
-// nothing.
-func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
+// collectPreToolMemory searches the store for corrections and conventions
+// relevant to the file a PreToolUse(Edit|Write) event is about to touch.
+// Memories already surfaced in the current session (any channel, read
+// from the injection log) are skipped, so repeated edits to the same file
+// don't spam the context with the same warning. Best-effort: every
+// failure path yields no hits.
+//
+// This never blocks and never auto-approves — blocking is the guardrail's
+// job, decided separately in decidePreTool. The caller only reaches here
+// when the guardrail let the call through, which is why a blocked edit
+// carries no memory: the call was refused, so there is nothing to inform.
+func collectPreToolMemory(ctx context.Context, in hookInput) preToolMemory {
 	path := filePathFromToolInput(in.ToolInput)
 	if path == "" {
-		return
+		return preToolMemory{}
 	}
 	query := pathQueryTokens(path)
 	if query == "" {
-		return
+		return preToolMemory{}
 	}
 
 	d, err := loadDeps(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mnemos hook pre-tool:", err)
-		return
+		return preToolMemory{}
 	}
 	defer d.close()
 
@@ -580,7 +661,7 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 		Limit:   preToolMemoryMaxHits * 2,
 	})
 	if err != nil || len(hits) == 0 {
-		return
+		return preToolMemory{}
 	}
 
 	var sessID, agentID string
@@ -609,36 +690,17 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 		}
 	}
 	if len(kept) == 0 {
-		return
+		return preToolMemory{}
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "[mnemos: memory relevant to %s — apply before editing]\n", filepath.Base(path))
 	refs := make([]injection.Ref, 0, len(kept))
 	for _, h := range kept {
-		snippet := strings.TrimSpace(h.Snippet)
-		if snippet == "" {
-			snippet = strings.TrimSpace(h.Observation.Content)
-		}
-		if len(snippet) > 240 {
-			snippet = snippet[:237] + "…"
-		}
-		fmt.Fprintf(&b, "- [%s] %s — %s\n", h.Observation.Type, h.Observation.Title, snippet)
 		refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: h.Observation.ID})
-	}
-
-	out := map[string]any{
-		"hookSpecificOutput": map[string]any{
-			"hookEventName":     "PreToolUse",
-			"additionalContext": strings.TrimRight(b.String(), "\n"),
-		},
-	}
-	if err := json.NewEncoder(w).Encode(out); err != nil {
-		return
 	}
 	_ = injection.NewLogger(injStore, nil).
 		Log(ctx, injection.ChannelPreTool, agentID, proj, sessID, refs)
 	_ = d.mem.RecordSurfaced(ctx, refIDs(refs))
+	return preToolMemory{Path: path, Hits: kept}
 }
 
 // pathQueryTokens turns a file path into a search query: the last few
@@ -665,11 +727,31 @@ func pathQueryTokens(p string) string {
 }
 
 // decidePreTool is the pure-function core of the PreToolUse guardrail.
-// Returns the stderr message to emit and whether Claude Code should be
-// told to block (exit 2). Extracted so tests can assert both paths
-// without spawning the binary just to observe an exit code.
+// Returns the stderr message to emit and whether the harness should be
+// told to block. Extracted so tests can assert both paths without
+// spawning the binary just to observe an exit status.
 func decidePreTool(in hookInput) (string, bool) {
-	if !isMnemosWriteTool(in.ToolName) {
+	return decidePreToolFor(in, false)
+}
+
+// decidePreToolFor is decidePreTool with control over how the tool name is
+// matched.
+//
+// strict matches only the exact Claude Code names, which is correct on
+// that path because the installed PreToolUse matcher already narrowed the
+// dispatch to mnemos' write tools. It is also the safe default: widening a
+// guardrail's match is a safety-relevant change and should not happen
+// incidentally.
+//
+// allowPrefixed additionally accepts any `<something>_<tool>` spelling.
+// A neutral-format caller asks for this because it has no matcher: pi's
+// MCP adapter derives tool names from the configured server key, the
+// prefix mode, and — through a package manifest — the package name, so
+// the Claude literal is only one of several spellings the same tool can
+// arrive under. Without this the guardrail silently stops scanning every
+// pi write, which is the failure this whole change exists to prevent.
+func decidePreToolFor(in hookInput, allowPrefixed bool) (string, bool) {
+	if !matchesMnemosWriteTool(in.ToolName, allowPrefixed) {
 		return "", false
 	}
 	text := gatherStringsFromToolInput(in.ToolInput)
@@ -687,23 +769,62 @@ func decidePreTool(in hookInput) (string, bool) {
 	), true
 }
 
+// mnemosWriteToolNames are mnemos' write tools without any prefix. The
+// bare names are the matching unit for the prefixed path below, and the
+// Claude-literal table is derived from them so the two spellings cannot
+// drift apart.
+var mnemosWriteToolNames = []string{"mnemos_save", "mnemos_correct", "mnemos_convention"}
+
 // isMnemosWriteTool matches the MCP-namespaced names Claude Code assigns
 // to our write tools. The PreToolUse matcher we install already narrows
 // Claude's invocation, but the defensive check keeps this command safe
 // to invoke from elsewhere (tests, future shared guardrails).
-func isMnemosWriteTool(name string) bool {
-	switch name {
-	case "mcp__mnemos__mnemos_save",
-		"mcp__mnemos__mnemos_correct",
-		"mcp__mnemos__mnemos_convention":
-		return true
+func isMnemosWriteTool(name string) bool { return matchesMnemosWriteTool(name, false) }
+
+// matchesMnemosWriteTool reports whether a tool name identifies one of
+// mnemos' write tools. With allowPrefixed it accepts any
+// `<prefix>_<tool>` form, which is what a harness without a dispatch
+// matcher needs; otherwise only the exact Claude Code spellings match.
+func matchesMnemosWriteTool(name string, allowPrefixed bool) bool {
+	for _, base := range mnemosWriteToolNames {
+		if name == "mcp__mnemos__"+base {
+			return true
+		}
+		if allowPrefixed && hasToolSuffix(name, base) {
+			return true
+		}
 	}
 	return false
 }
 
-// shortToolName strips the mcp__mnemos__ prefix for user-facing messages.
+// hasToolSuffix reports whether name ends in `_base` (case-insensitive),
+// or is base itself.
+//
+// The cost of matching on a suffix is that a foreign server exposing the
+// same trailing name — `other_mnemos_save` — is also treated as a mnemos
+// write. That is accepted deliberately rather than overlooked: the two
+// failure modes are not symmetric. Over-matching scans, and possibly
+// refuses, a foreign write whose content already tripped a high-risk
+// injection pattern; under-matching stops scanning every real mnemos
+// write. The scanner only blocks on high-risk patterns, so the practical
+// cost is a mnemos-flavoured reason on a refused foreign write. See the
+// change's design.md, D6.
+func hasToolSuffix(name, base string) bool {
+	lower := strings.ToLower(name)
+	base = strings.ToLower(base)
+	return lower == base || strings.HasSuffix(lower, "_"+base)
+}
+
+// shortToolName strips any harness prefix for user-facing messages, so a
+// reason reads "blocked mnemos_save" whatever the adapter named the tool.
 func shortToolName(name string) string {
-	return strings.TrimPrefix(name, "mcp__mnemos__")
+	lower := strings.ToLower(name)
+	for _, base := range mnemosWriteToolNames {
+		if hasToolSuffix(lower, base) {
+			return base
+		}
+	}
+	return name
 }
 
 // gatherStringsFromToolInput flattens every string value in the tool_input
@@ -758,8 +879,18 @@ func walkStrings(v any, dst *[]string) {
 // instead of being silently dropped. Without this, the agent keeps
 // working for at least one more turn on context that has lost all
 // mnemos observations, touches, and session goal.
-func runHookPreCompact(ctx context.Context, _ []string) error {
-	emitCompactionRecoveryBlock(ctx, os.Stderr, "PreCompact")
+func runHookPreCompact(ctx context.Context, args []string) error {
+	fs, flags := hookFlagSet("pre-compact")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	in := flags.resolve()
+	block := compactionRecoveryBlock(ctx, in, "PreCompact")
+	flags.write(hookResult{Context: block}, func() {
+		if block != "" {
+			fmt.Fprintln(os.Stderr, block)
+		}
+	})
 	return nil
 }
 
@@ -769,22 +900,34 @@ func runHookPreCompact(ctx context.Context, _ []string) error {
 // The side effect a future Claude Code release might surface it; today
 // the primary value is a transcript-level record that compaction
 // happened and what mnemos looked like at that moment.
-func runHookPostCompact(ctx context.Context, _ []string) error {
-	emitCompactionRecoveryBlock(ctx, os.Stderr, "PostCompact")
+func runHookPostCompact(ctx context.Context, args []string) error {
+	fs, flags := hookFlagSet("post-compact")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	in := flags.resolve()
+	block := compactionRecoveryBlock(ctx, in, "PostCompact")
+	flags.write(hookResult{Context: block}, func() {
+		if block != "" {
+			fmt.Fprintln(os.Stderr, block)
+		}
+	})
 	return nil
 }
 
-// emitCompactionRecoveryBlock composes a prewarm block in the compaction-
-// recovery mode and writes it to w with a header naming the event. w is
-// injected so tests can capture the output without going through stderr.
-// Failure is always silent at the caller: a hook must not fail loudly.
-func emitCompactionRecoveryBlock(ctx context.Context, w io.Writer, event string) {
-	in := readHookStdin(os.Stdin)
-
+// compactionRecoveryBlock composes a prewarm block in the compaction-
+// recovery mode and returns it with a header naming the event. It returns
+// "" when there is nothing to say. Failure is always silent at the
+// caller: a hook must not fail loudly.
+//
+// It takes the already-resolved payload so the payload flag and stdin
+// share one path, and it holds no writer so the neutral format can carry
+// the same text as data.
+func compactionRecoveryBlock(ctx context.Context, in hookInput, event string) string {
 	d, err := loadDeps(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mnemos hook "+strings.ToLower(event)+":", err)
-		return
+		return ""
 	}
 	defer d.close()
 
@@ -811,10 +954,10 @@ func emitCompactionRecoveryBlock(ctx context.Context, w io.Writer, event string)
 		SessionID: sessID,
 	})
 	if err != nil || block == nil || block.Text == "" {
-		return
+		return ""
 	}
 
-	fmt.Fprintf(w, "[mnemos %s — recovery block]\n%s\n", event, block.Text)
+	return fmt.Sprintf("[mnemos %s — recovery block]\n%s", event, block.Text)
 }
 
 // uniqueRuleNames deduplicates the rule names from the findings while

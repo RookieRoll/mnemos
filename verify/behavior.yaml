@@ -11,11 +11,11 @@
 arms:
   on:
     cmd:
-      - /Users/andrefigueira/Code/mnemos/verify/runners/on.sh
+      - {{verify_dir}}/verify/runners/on.sh
       - "{{trigger}}"
   off:
     cmd:
-      - /Users/andrefigueira/Code/mnemos/verify/runners/off.sh
+      - {{verify_dir}}/verify/runners/off.sh
       - "{{trigger}}"
 
 scenarios:

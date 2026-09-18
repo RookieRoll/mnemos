@@ -44,6 +44,7 @@ func LoadCaptureFixture(path string) (*CaptureFixture, error) {
 	if err := yaml.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	f.SourcePath = path
 	if len(f.Arm.Cmd) == 0 {
 		return nil, fmt.Errorf("arm.cmd is required")
 	}
@@ -74,6 +75,7 @@ func LoadBehaviorFixture(path string) (*BehaviorFixture, error) {
 	if err := yaml.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	f.SourcePath = path
 	if len(f.Arms.On.Cmd) == 0 || len(f.Arms.Off.Cmd) == 0 {
 		return nil, fmt.Errorf("both arms.on.cmd and arms.off.cmd are required")
 	}

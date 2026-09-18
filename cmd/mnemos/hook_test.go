@@ -740,7 +740,8 @@ func TestEmitCompactionRecoveryBlockIncludesSessionContext(t *testing.T) {
 
 	var buf bytes.Buffer
 	withStdin(t, `{"hook_event_name":"PreCompact"}`, func() {
-		emitCompactionRecoveryBlock(ctx, &buf, "PreCompact")
+		block := compactionRecoveryBlock(ctx, readHookStdin(os.Stdin), "PreCompact")
+		buf.WriteString(block)
 	})
 
 	got := buf.String()
@@ -760,7 +761,7 @@ func TestEmitCompactionRecoveryBlockSilentWhenNothingToSay(t *testing.T) {
 	// hook should stay silent rather than emit a bare header.
 	var buf bytes.Buffer
 	withStdin(t, `{"hook_event_name":"PreCompact"}`, func() {
-		emitCompactionRecoveryBlock(ctx, &buf, "PreCompact")
+		buf.WriteString(compactionRecoveryBlock(ctx, readHookStdin(os.Stdin), "PreCompact"))
 	})
 	if buf.Len() != 0 {
 		t.Errorf("empty store must produce no output, got: %q", buf.String())

@@ -349,7 +349,7 @@ func runInit(_ context.Context, _ []string) error {
 
 	targets := installer.DetectTargets()
 	if len(targets) == 0 {
-		fmt.Println("no agent clients detected (Claude Code, Claude Desktop, Cursor, Windsurf, Codex CLI).")
+		fmt.Println("no agent clients detected (Claude Code, Claude Desktop, Cursor, Windsurf, Codex CLI, pi).")
 		fmt.Println("install one of them first, then run `mnemos init` again.")
 		return nil
 	}
@@ -501,10 +501,28 @@ func runDoctor(ctx context.Context, _ []string) error {
 		check(false, "no agent clients detected")
 	}
 	hasClaudeCode := false
+	hasPi := false
 	for _, t := range targets {
 		check(installer.IsInstalled(t), "%s %s", t.Name, t.Path)
-		if t.Name == "Claude Code (user)" {
+		switch t.Name {
+		case "Claude Code (user)":
 			hasClaudeCode = true
+		case "pi":
+			hasPi = true
+		}
+	}
+
+	// pi's hooks live in the mnemos pi package, not in a settings file
+	// mnemos writes, so the check is whether that package is registered with
+	// pi. It is reported rather than failed on: MCP-only is a legitimate
+	// configuration (it is the Codex parity level), and failing the whole
+	// health check over an optional capability would be misleading.
+	if hasPi {
+		installed, path := installer.PiPackageInstalled()
+		if installed {
+			fmt.Printf("  • pi hooks: mnemos package present in %s\n", path)
+		} else {
+			fmt.Printf("  • pi hooks: not installed — mnemos MCP tools work, but the pi package adds prewarm, prompt recall, the capture directive, and the write guardrail\n")
 		}
 	}
 

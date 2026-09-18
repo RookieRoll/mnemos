@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -50,6 +49,9 @@ func runPrewarm(ctx context.Context, args []string) error {
 		mode        = fs.String("mode", "session_start", "session_start | compaction_recovery")
 		format      = fs.String("format", "text", "text | json")
 		openSession = fs.Bool("open-session", true, "open a mnemos session (session_start mode only)")
+		// payload mirrors the hook subcommands' flag so a harness that
+		// cannot pipe stdin can still supply cwd and source.
+		payload = fs.String("payload", "", "hook payload as JSON (overrides stdin)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -63,7 +65,7 @@ func runPrewarm(ctx context.Context, args []string) error {
 		return fmt.Errorf("invalid format: %s", *format)
 	}
 
-	in := readHookStdin(os.Stdin)
+	in := resolveHookPayload(*payload)
 	cwd := in.CWD
 	if cwd == "" {
 		if wd, err := os.Getwd(); err == nil {
@@ -203,10 +205,9 @@ func readHookStdin(r io.Reader) hookInput {
 	if err != nil || len(data) == 0 {
 		return in
 	}
-	// Ignore unmarshal errors: a non-JSON stdin is a legitimate shell use.
-	var decodeErr *json.SyntaxError
-	if err := json.Unmarshal(data, &in); err != nil && !errors.As(err, &decodeErr) {
-		return in
-	}
+	// Ignore unmarshal errors: a non-JSON stdin is a legitimate shell use, and
+	// whatever did parse is kept. The error is deliberately not inspected —
+	// every failure mode lands on the same "use what we got" answer.
+	_ = json.Unmarshal(data, &in)
 	return in
 }
