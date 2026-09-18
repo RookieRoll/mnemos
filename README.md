@@ -193,18 +193,18 @@ Two parts, and they are separable. `mnemos init` wires the MCP server, which get
 mnemos init && mnemos doctor
 ```
 
-**2. The package.** Published to npm, so pi resolves and updates it for you:
+**2. The package.** The `pi/` directory in this repository is a pi package, installed by path:
 
 ```bash
-pi install npm:mnemos-pi
-```
-
-From a checkout, or to run a local build:
-
-```bash
-pi install ./pi                                    # relative to the repo root
+pi install ./pi                                    # from the repo root
 pi install /absolute/path/to/mnemos/pi             # after copying the tree elsewhere
 ```
+
+It is named `kls-mnemos-pi` and is **not published to npm** — the unscoped `mnemos-pi` name on the registry belongs to an unrelated fork (`Korrnals/mnemos`) whose extension spawns `mnemos mcp-server`, a different command than this project's `mnemos serve`. Installing `npm:mnemos-pi` gets you that one, not this. Publish under a scope first if you want registry installs.
+
+The name is not cosmetic: the adapter derives tool names from it, so a package install exposes `mcp__kls-mnemos-pi__mnemos_mnemos_save` rather than `mcp__mnemos_mnemos_save`. The guardrail matches on the tool-name suffix, so it covers the write boundary under either. The shipped skill names mnemos tools without a prefix for the same reason.
+
+For a self-contained install that does not depend on the checkout, copy the package next to the binary and install the copy — see the Windows section below.
 
 The extension shells out to the `mnemos` executable, so it needs to be findable. Either put it on `PATH`, or point `MNEMOS_BIN` at it — which is what the Windows install below does, since the binary lives outside any standard bin directory there:
 
@@ -251,7 +251,7 @@ go build -ldflags "-s -w -X github.com/polyxmedia/mnemos/internal/version.Versio
 New-Item -ItemType Directory -Force D:\software\mnemos | Out-Null
 Copy-Item bin/mnemos.exe D:\software\mnemos\mnemos.exe -Force
 
-# 3. Publish the pi package next to it
+# 3. Copy the pi package next to it
 New-Item -ItemType Directory -Force D:\software\mnemos\pi\extensions, D:\software\mnemos\pi\skills\mnemos | Out-Null
 Copy-Item pi\package.json, pi\mcp.json D:\software\mnemos\pi\
 Copy-Item pi\extensions\index.ts, pi\extensions\hook-transport.ts, pi\extensions\tool-match.ts D:\software\mnemos\pi\extensions\

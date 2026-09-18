@@ -11,6 +11,8 @@ dist/
 coverage.html
 coverage.out
 /mnemos
+/mnemos.exe
 .claude/scheduled_tasks.lock
 /graphify-out
-/mnemos.exe
+# pi project-local state: package settings and per-extension caches.
+/.pi
