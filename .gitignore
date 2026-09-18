@@ -16,3 +16,6 @@ coverage.out
 /graphify-out
 # pi project-local state: package settings and per-extension caches.
 /.pi
+
+# pi package tarballs (npm pack output, not a source artifact).
+/pi/*.tgz
