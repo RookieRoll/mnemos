@@ -22,12 +22,13 @@ import (
 // deps bundles the services a CLI subcommand typically needs. Returned by
 // loadDeps so callers take exactly what they use.
 type deps struct {
-	db   *storage.DB
-	mem  *memory.Service
-	sess *session.Service
-	skl  *skills.Service
-	rum  *rumination.Service
-	cfg  config.Config
+	db       *storage.DB
+	mem      *memory.Service
+	sess     *session.Service
+	skl      *skills.Service
+	rum      *rumination.Service
+	embedder memory.Embedder
+	cfg      config.Config
 }
 
 func (d *deps) close() { _ = d.db.Close() }
@@ -42,10 +43,18 @@ func loadDeps(ctx context.Context) (*deps, error) {
 		return nil, fmt.Errorf("open storage: %w", err)
 	}
 	skl := skills.NewService(skills.Config{Store: db.Skills()})
+	// Resolve the embedder here rather than at each call site. When this was
+	// omitted the memory service came up with a nil embedder, so every CLI
+	// command silently ran FTS-only while `mnemos serve` ran hybrid — and the
+	// two failure modes, "no embedder wired" and "no provider reachable", look
+	// identical from the outside. Only `serve` had it.
+	embedder := selectEmbedder(ctx, cfg.Embedding)
 	return &deps{
-		db: db,
+		db:       db,
+		embedder: embedder,
 		mem: memory.NewService(memory.Config{
 			Store:      db.Observations(),
+			Embedder:   embedder,
 			Injections: injection.NewLogger(db.Injections(), nil),
 		}),
 		sess: session.NewService(session.Config{Store: db.Sessions()}),
