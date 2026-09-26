@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
+	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/verify"
 )
 
@@ -13,16 +16,19 @@ import (
 //	mnemos verify retrieval [fixture]   — cheap, runs against live store
 //	mnemos verify behavior  [fixture]   — expensive, claude A/B (read side)
 //	mnemos verify capture   [fixture]   — expensive, single-arm capture rate (write side)
+//	mnemos verify calibrate [fixture]   — cheap, sweeps gate params (score contract)
 //	mnemos verify all                   — retrieval + behavior + capture
 func runVerify(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mnemos verify <retrieval|behavior|capture|all> [fixture]")
+		return fmt.Errorf("usage: mnemos verify <retrieval|behavior|capture|calibrate|all> [fixture]")
 	}
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
 	case "retrieval":
 		return runVerifyRetrieval(ctx, rest)
+	case "calibrate":
+		return runVerifyCalibrate(ctx, rest)
 	case "behavior":
 		return runVerifyBehavior(ctx, rest)
 	case "capture":
@@ -66,6 +72,55 @@ func runVerifyRetrieval(ctx context.Context, args []string) error {
 		return fmt.Errorf("retrieval: %d/%d probes failed", rep.Total-rep.Passed, rep.Total)
 	}
 	return nil
+}
+
+// runVerifyCalibrate sweeps the injection floor and the cross-project
+// penalty over the retrieval fixture plus injection-log usage history and
+// prints the parameter report. Read-only: it searches and reads the
+// injection log, nothing else. The report's values are what the gate
+// constants should carry; record the basis in docs/ARCHITECTURE.md.
+func runVerifyCalibrate(ctx context.Context, args []string) error {
+	path := "verify/retrieval.yaml"
+	if len(args) > 0 {
+		path = args[0]
+	}
+	fix, err := verify.LoadRetrievalFixture(path)
+	if err != nil {
+		return err
+	}
+	d, err := loadDeps(ctx)
+	if err != nil {
+		return err
+	}
+	defer d.close()
+
+	// Surfacing counts come from the injection log; a memory accessed more
+	// often than it was surfaced was deliberately fetched at least once,
+	// which is the surfaced-vs-used signal the sweep weighs double.
+	surfaced := func(ctx context.Context, id string) int {
+		evts, err := d.db.Injections().ListByRef(ctx, injection.KindObservation, id, 10000)
+		if err != nil {
+			return 0
+		}
+		return len(evts)
+	}
+
+	rep, _, err := verify.CalibrateGate(ctx, d.mem, fix, surfaced)
+	if err != nil {
+		return fmt.Errorf("calibrate: %w", err)
+	}
+	printCalibrationReport(os.Stdout, rep)
+	return nil
+}
+
+// printCalibrationReport renders the gate parameter report on the
+// composite score contract scale.
+func printCalibrationReport(w io.Writer, rep memory.SweepReport) {
+	fmt.Fprintf(w, "Gate calibration — composite score contract scale (ceiling %.1f)\n", memory.ScoreCeiling)
+	fmt.Fprintf(w, "  samples:       %d (on-topic %d, used %d)\n", rep.Samples, rep.OnTopic, rep.Used)
+	fmt.Fprintf(w, "  floor:         %.2f\n", rep.Floor)
+	fmt.Fprintf(w, "  penalty:       %.2f  (cross-project multiplier)\n", rep.Penalty)
+	fmt.Fprintf(w, "  balanced acc:  %.3f\n", rep.BalancedAcc)
 }
 
 func runVerifyBehavior(ctx context.Context, args []string) error {

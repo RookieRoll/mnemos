@@ -248,11 +248,16 @@ func detectCaptureShape(prompt string) captureSignal {
 	return captureNone
 }
 
-// promptMemoryMinScore is the BM25-after-ranker score under which we
-// suppress injection. Tuned empirically against the seed store: hits at
-// 1.5+ are clearly on-topic; below that we'd be force-feeding noise into
-// every prompt's context window.
-const promptMemoryMinScore = 1.5
+// promptMemoryMinScore is the composite-score-contract floor under which
+// we suppress injection. The contract scale is Score = relevance x policy,
+// ceiling 1.2 (see docs/ARCHITECTURE.md) — the same scale in keyword and
+// hybrid retrieval, which is what keeps this floor meaningful in both.
+// Calibrated by the gate sweep (mnemos verify calibrate) over the seeded
+// calibration corpus, corroborated by translating the old empirically
+// tuned BM25-scale floor of 1.5 onto the contract scale (~0.15). Below the
+// floor we'd be force-feeding weak-batch noise into every prompt's context
+// window; the suppression window and promptMemoryMaxHits handle repeats.
+const promptMemoryMinScore = 0.10
 
 // promptMemoryMaxHits caps how many memories we inject per prompt. Three
 // is small enough to stay invisible on routine prompts but large enough to

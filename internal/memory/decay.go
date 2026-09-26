@@ -40,10 +40,11 @@ func DefaultRankParams() RankParams {
 // NewRanker constructs a Ranker with the given params.
 func NewRanker(p RankParams) *Ranker { return &Ranker{Params: p} }
 
-// Score computes the composite rank for an observation at time now.
-//
-//	score = bm25 * importance_weight * recency_factor * access_factor
-func (r *Ranker) Score(o Observation, bm25 float64, now time.Time) float64 {
+// PolicyFactor returns the non-relevance multiplier for an observation at
+// time now: importance x recency x access. The composite score contract
+// multiplies fused relevance by this factor; keeping it separate lets the
+// result carry its own score breakdown and keeps relevance free of policy.
+func (r *Ranker) PolicyFactor(o Observation, now time.Time) float64 {
 	age := now.Sub(o.CreatedAt).Hours() / 24.0
 	if age < 0 {
 		age = 0
@@ -61,5 +62,16 @@ func (r *Ranker) Score(o Observation, bm25 float64, now time.Time) float64 {
 
 	access := 1 + r.Params.AccessBoost*math.Log1p(float64(o.AccessCount))
 
-	return bm25 * importance * recency * access
+	return importance * recency * access
+}
+
+// Score computes the composite rank for an observation at time now.
+//
+//	score = base * importance_weight * recency_factor * access_factor
+//
+// base is whatever relevance signal the caller holds (raw BM25 in legacy
+// call sites). The search path uses PolicyFactor directly against fused
+// relevance instead; see the score contract in docs/ARCHITECTURE.md.
+func (r *Ranker) Score(o Observation, base float64, now time.Time) float64 {
+	return base * r.PolicyFactor(o, now)
 }

@@ -60,7 +60,7 @@ func runServe(ctx context.Context, args []string) error {
 			ImportanceWeight: 0.5,
 			AccessBoost:      0.1,
 		},
-		Hybrid: memory.HybridParams{Alpha: cfg.Search.HybridAlpha, K: 60},
+		Hybrid: memory.HybridParams{Alpha: cfg.Search.HybridAlpha},
 	})
 	sess := session.NewService(session.Config{Store: db.Sessions()})
 	skl := skills.NewService(skills.Config{Store: db.Skills()})

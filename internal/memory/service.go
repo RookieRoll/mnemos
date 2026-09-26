@@ -70,6 +70,7 @@ func NewService(cfg Config) *Service {
 	if hybrid == (HybridParams{}) {
 		hybrid = DefaultHybridParams()
 	}
+	hybrid = hybrid.fillDefaults()
 	return &Service{
 		store:      cfg.Store,
 		ranker:     NewRanker(params),
@@ -329,31 +330,40 @@ func (s *Service) Promote(ctx context.Context, in PromoteInput) error {
 	return s.store.SetTrustTier(ctx, in.ID, in.ToTier)
 }
 
-// crossProjectPenalty is the score multiplier applied to a hit whose project
-// differs from SearchInput.PreferProject. Calibrated against real BM25
-// magnitudes, not intuition: ftsEscape ORs every prompt token with prefix
-// match, so on conversational prompts even irrelevant memories score raw
-// 4-14 (stopwords match everything). At 0.1, a cross-project hit needs raw
-// BM25 ~20+ — a near-exact multi-token match — to clear the prompt hook's
-// 1.5 floor; keyword collisions land near 1.0 and are suppressed.
-// Motivated by the injection log through 2026-07-13: 83% of prompt_hook
-// surfacings (4982 of 6016) were cross-project noise.
-const crossProjectPenalty = 0.1
+// crossProjectPenalty is the policy-factor multiplier applied to a hit
+// whose project differs from SearchInput.PreferProject. It is one of the
+// factors of the composite score contract, so a cross-project hit must be
+// materially relevant to clear any consumer's gate. The 2026-07-13
+// injection log motivated it (83% of prompt_hook surfacings — 4982 of
+// 6016 — were cross-project noise); the gate sweep (mnemos verify
+// calibrate) re-derived 0.05 on the contract scale, stricter than the
+// original BM25-calibrated 0.1 but in the same crush-the-noise regime.
+// Re-tune by re-running the sweep against a live corpus.
+const crossProjectPenalty = 0.05
 
-// Search runs BM25 retrieval, optionally fuses with vector similarity via
-// Reciprocal Rank Fusion, and applies the recency/importance/access ranker
-// on top. Hybrid mode activates automatically when an embedder is
-// configured and observations have stored vectors.
+// Search runs the recall sources (keyword and, when an embedder is
+// configured, vector) unioned before ranking, and applies the composite
+// score contract: Score = fused relevance x policy factors (importance,
+// recency, access, project affinity), bounded to (0, ScoreCeiling]. See
+// docs/ARCHITECTURE.md and the memory-retrieval spec for the contract.
 func (s *Service) Search(ctx context.Context, in SearchInput) ([]SearchResult, error) {
 	res, _, err := s.SearchWithMode(ctx, in)
 	return res, err
 }
 
-// SearchWithMode is Search plus the retrieval mode that actually ran for this
-// query. The mode is derived from the real per-call outcome (did the query
-// embed and did fusion find any vector to mix in), not from HybridEnabled():
-// a hybrid-capable store reports RetrievalFTS when the embedder fails open or
-// no candidate carries a vector, so the signal never overstates what happened.
+// SearchWithMode is Search plus the retrieval mode that actually ran for
+// this query. The mode is derived from the real per-call outcome (did the
+// query embed and did any candidate carry a vector signal), not from
+// HybridEnabled(): a hybrid-capable store reports RetrievalFTS when the
+// embedder fails open or no candidate carries a vector, so the signal
+// never overstates what happened. The mode never changes what Score means.
+//
+// The score contract (docs/ARCHITECTURE.md, memory-retrieval spec):
+// each recall source normalises to absolute relevance in [0,1]; relevance
+// is the weighted mean over available signals (missing signals are
+// renormalised away, never penalised); Score = relevance x policy, clamped
+// to ScoreCeiling; hits with zero relevance are dropped, keeping the bound
+// (0, ScoreCeiling] honest.
 func (s *Service) SearchWithMode(ctx context.Context, in SearchInput) ([]SearchResult, RetrievalMode, error) {
 	limit := in.Limit
 	if limit <= 0 {
@@ -363,84 +373,117 @@ func (s *Service) SearchWithMode(ctx context.Context, in SearchInput) ([]SearchR
 	// re-order. This is the cheap part; network/context cost is downstream.
 	in.Limit = limit * 3
 
+	// Recall source 1: keyword (FTS5 BM25).
 	raw, err := s.store.Search(ctx, in)
 	if err != nil {
 		return nil, RetrievalFTS, err
 	}
 
-	now := s.clock().UTC()
-	mode := RetrievalFTS
+	// Recall source 2: vector cosine over the whole scoped set, unioned in
+	// before ranking. The old path only re-ranked keyword candidates, so a
+	// memory sharing no keywords with the query could never surface at any
+	// alpha. With no embedder configured (Noop: Dimension 0, HybridEnabled
+	// false) this source is skipped entirely and relevance comes from the
+	// keyword signal alone. Query embed failures fail open the same way.
+	var qvec []float32
 	if s.HybridEnabled() && in.Query != "" {
-		var fused bool
-		raw, fused = s.fuseWithVectors(ctx, in.Query, raw)
-		if fused {
-			mode = RetrievalHybrid
-		}
+		qvec, _ = s.embedder.Embed(ctx, in.Query)
 	}
+	if len(qvec) > 0 {
+		raw = s.unionVectorRecall(ctx, in, qvec, raw, limit*3)
+	}
+
+	now := s.clock().UTC()
+	vectorSignal := false
+	kept := raw[:0] // filter in place: no signal, no result
 	for i := range raw {
-		raw[i].Score = s.ranker.Score(raw[i].Observation, raw[i].Score, now)
-		if in.PreferProject != "" && raw[i].Observation.Project != "" &&
-			raw[i].Observation.Project != in.PreferProject {
-			raw[i].Score *= crossProjectPenalty
+		var nBM25 *float64
+		if raw[i].BM25 > 0 {
+			v := normBM25(raw[i].BM25, s.hybrid.BM25K)
+			nBM25 = &v
 		}
-	}
-	sort.SliceStable(raw, func(i, j int) bool { return raw[i].Score > raw[j].Score })
-
-	if len(raw) > limit {
-		raw = raw[:limit]
-	}
-	return raw, mode, nil
-}
-
-// fuseWithVectors embeds the query and re-ranks BM25 candidates via RRF,
-// mixing the two ranks according to HybridParams. Candidates missing
-// embeddings get their cosine rank set to infinity (no semantic signal,
-// BM25 alone carries them). The bool return reports whether fusion actually
-// contributed: true only when the query embedded AND at least one candidate
-// had a stored vector. When it is false the cosine term is a flat constant
-// and BM25 alone decided the ordering, so the caller should report
-// RetrievalFTS rather than overstate hybrid retrieval.
-func (s *Service) fuseWithVectors(ctx context.Context, query string, cands []SearchResult) ([]SearchResult, bool) {
-	qvec, err := s.embedder.Embed(ctx, query)
-	if err != nil || len(qvec) == 0 {
-		// Fail open: BM25-only re-rank keeps search working.
-		return cands, false
-	}
-
-	// Score each candidate by cosine against the query.
-	type ranked struct {
-		idx      int
-		cosine   float64
-		bm25Rank int
-		cosRank  int
-	}
-	items := make([]ranked, len(cands))
-	for i := range cands {
-		items[i] = ranked{
-			idx:      i,
-			cosine:   cosine(cands[i].Observation.Embedding, qvec),
-			bm25Rank: i + 1, // BM25 list is already sorted best-first
+		var nCos *float64
+		if len(qvec) > 0 && vecHasSignal(raw[i].Observation.Embedding) {
+			v := normCos(cosine(raw[i].Observation.Embedding, qvec), s.hybrid.CosLow, s.hybrid.CosHigh)
+			nCos = &v
+			vectorSignal = true
 		}
-	}
-	// Sort a copy by cosine desc to compute cos ranks; observations without
-	// an embedding land at the bottom with cosRank = 0 (treated as "miss").
-	cosSorted := append([]ranked(nil), items...)
-	sort.SliceStable(cosSorted, func(i, j int) bool { return cosSorted[i].cosine > cosSorted[j].cosine })
-	embedded := false
-	for rank, item := range cosSorted {
-		if len(cands[item.idx].Observation.Embedding) == 0 {
+		rel := combineRelevance(nBM25, nCos, s.hybrid.Alpha)
+		if rel <= 0 {
 			continue
 		}
-		items[item.idx].cosRank = rank + 1
-		embedded = true
+		policy := s.ranker.PolicyFactor(raw[i].Observation, now)
+		if in.PreferProject != "" && raw[i].Observation.Project != "" &&
+			raw[i].Observation.Project != in.PreferProject {
+			policy *= crossProjectPenalty
+		}
+		raw[i].Relevance = rel
+		raw[i].PolicyFactor = policy
+		raw[i].Score = rel * policy
+		if raw[i].Score > ScoreCeiling {
+			raw[i].Score = ScoreCeiling
+		}
+		kept = append(kept, raw[i])
 	}
 
-	// Write RRF score into BM25 field so the downstream Ranker multiplier
-	// treats the fused rank-signal as the "relevance base".
-	for _, it := range items {
-		cands[it.idx].Score = rrfScore(it.bm25Rank, it.cosRank, s.hybrid)
+	mode := RetrievalFTS
+	if vectorSignal {
+		mode = RetrievalHybrid
 	}
-	return cands, embedded
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
+
+	if len(kept) > limit {
+		kept = kept[:limit]
+	}
+	return kept, mode, nil
+}
+
+// unionVectorRecall runs the vector recall source: cosine over every
+// embedded row in scope, appending the top cap hits that keyword recall
+// did not already surface. The two sources union before ranking, so a
+// memory sharing no keywords with the query is retrievable at all. Store
+// errors fail open: the keyword candidates pass through unchanged.
+func (s *Service) unionVectorRecall(ctx context.Context, in SearchInput, qvec []float32, cands []SearchResult, cap int) []SearchResult {
+	rows, err := s.store.ListEmbeddings(ctx, in)
+	if err != nil || len(rows) == 0 {
+		return cands
+	}
+	seen := make(map[string]bool, len(cands))
+	for _, c := range cands {
+		seen[c.Observation.ID] = true
+	}
+	type scored struct {
+		o   Observation
+		cos float64
+	}
+	recall := make([]scored, 0, len(rows))
+	for _, o := range rows {
+		if seen[o.ID] {
+			continue
+		}
+		recall = append(recall, scored{o: o, cos: cosine(o.Embedding, qvec)})
+	}
+	sort.SliceStable(recall, func(i, j int) bool { return recall[i].cos > recall[j].cos })
+	if len(recall) > cap {
+		recall = recall[:cap]
+	}
+	for _, r := range recall {
+		cands = append(cands, SearchResult{
+			Observation: r.o,
+			Snippet:     snippetFrom(r.o.Content),
+		})
+	}
+	return cands
+}
+
+// snippetFrom renders a one-line preview for vector-recall hits, which —
+// unlike keyword hits — have no FTS5 snippet to show.
+func snippetFrom(content string) string {
+	s := strings.Join(strings.Fields(content), " ")
+	if len(s) > 200 {
+		s = s[:200] + "…"
+	}
+	return s
 }
 
 // Context returns a pre-budgeted block of memory ready for injection into

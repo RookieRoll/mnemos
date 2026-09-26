@@ -112,6 +112,7 @@ Commands:
   verify retrieval       Probe the store with fixture queries (precision@K)
   verify behavior        A/B replay scenarios with mnemos on vs off (lift)
   verify capture         Single-arm: do agents record corrections handed to them?
+  verify calibrate       Sweep gate parameters on the score contract scale
   verify all             Run all three
   config                 Print the current configuration
   version                Print the binary version

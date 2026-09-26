@@ -255,9 +255,22 @@ type SearchInput struct {
 
 // SearchResult is a ranked hit with a content snippet and score breakdown.
 // Agents receive these from Search; Get returns the full Observation.
+//
+// Score is the composite score contract: relevance x policy, bounded to
+// (0, ScoreCeiling], identical in meaning and scale across retrieval modes.
+// Relevance and PolicyFactor are its breakdown: Score = Relevance *
+// PolicyFactor (clamped to ScoreCeiling), so a consumer can always answer
+// "why did this pass the gate". BM25 stays on its raw magnitude scale —
+// it is the source signal, not the contract, and existing consumers that
+// reason about magnitudes keep reading it unchanged.
 type SearchResult struct {
 	Observation Observation
 	Score       float64
+	// Relevance is the fused absolute relevance to the query, in [0,1].
+	Relevance float64
+	// PolicyFactor is the non-relevance multiplier (importance x recency
+	// x access x project affinity).
+	PolicyFactor float64
 	BM25        float64
 	Snippet     string
 }
@@ -273,7 +286,8 @@ type RetrievalMode string
 const (
 	// RetrievalFTS means BM25/FTS5 alone decided the ranking.
 	RetrievalFTS RetrievalMode = "fts"
-	// RetrievalHybrid means vector cosine was fused into the ranking via RRF.
+	// RetrievalHybrid means the vector source contributed candidates and/or
+	// a cosine signal to the ranking.
 	RetrievalHybrid RetrievalMode = "hybrid"
 )
 

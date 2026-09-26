@@ -42,21 +42,46 @@ Key design calls:
 - **Bi-temporal**. Observations carry `valid_from`/`valid_until` (fact time) and `created_at`/`invalidated_at` (system time). Supersession invalidates rather than deletes. Historical queries work via `SearchInput.AsOf`.
 - **FTS5 external-content virtual table** mirrors observations for BM25 search. Triggers keep it in sync on insert/update/delete.
 - **Content hash on insert** powers dedup-on-save: identical content in the same `(agent, project)` bumps access count instead of duplicating.
-- **Embeddings as BLOB**. `sqlite-vec` is a C extension that modernc.org/sqlite can't load; cosine similarity runs in pure Go over top-N BM25 candidates. Zero-CGO, zero dependency cost.
+- **Embeddings as BLOB**. `sqlite-vec` is a C extension that modernc.org/sqlite can't load; cosine similarity runs in pure Go over every embedded row in scope (recall benchmark: ~9 ms for 10k rows × dim 64 — no index needed). Zero-CGO, zero dependency cost.
 
 ## Memory service
 
-Ranking formula:
+**Score contract** (spec: `memory-retrieval`). Every search result's `Score` is
 
 ```
-score = bm25 × importance_weight × recency_factor × access_factor
+Score = relevance × policy,  bounded to (0, 1.2]
 
-importance_weight = 0.5 + 0.5 × (importance / 10)       # 0.55..1.0
-recency_factor    = (1 + age_days)^(-decay_rate)        # default 0.05
-access_factor     = 1 + 0.1 × ln(1 + access_count)      # ACT-R base-level activation
+relevance = weighted mean of per-source [0,1] relevance over available signals
+            n_bm25 = b / (b + 8)                     # saturating; b = raw BM25 magnitude
+            n_cos  = clip((cos − 0.2) / 0.6, 0, 1)   # calibrated similarity window
+policy    = importance_weight × recency_factor × access_factor × cross_project_penalty
+
+importance_weight     = 0.5 + 0.5 × (importance / 10)   # 0.55..1.0
+recency_factor        = (1 + age_days)^(-decay_rate)    # default 0.05
+access_factor         = 1 + 0.1 × ln(1 + access_count)  # ACT-R base-level activation
+cross_project_penalty = 0.05                            # other-project hits (PreferProject)
 ```
 
-`Save` returns a `SaveResult` indicating fresh insert vs dedup. Search pulls `limit × 3` raw hits, re-ranks, truncates to `limit`. Default filters to live-now; `IncludeStale` and `AsOf` opt into historical queries.
+The scale is identical in keyword-only and hybrid retrieval — that is the
+contract's whole point: a consumer threshold (the prompt hook's floor) means
+the same thing in every mode, and a weak result set scores low even for its
+top hit. Recall runs keyword (FTS5 BM25) **unioned with** vector cosine over
+every embedded row in scope before ranking, so a memory sharing no keywords
+with the query is retrievable at all. A missing embedding is renormalised
+away, never penalised; zero-relevance hits are dropped. `retrieval_mode`
+reports which sources contributed and never changes what `Score` means.
+
+**Calibration basis.** The gate floor (`promptMemoryMinScore = 0.10`, used by
+the per-prompt and pre-tool hooks) and the cross-project penalty came from
+the deterministic sweep (`mnemos verify calibrate`) over the seeded
+calibration corpus, corroborated by translating the old empirically tuned
+BM25-scale floor (1.5) onto the contract scale (~0.15). The sweep is pure
+and deterministic; re-run `mnemos verify calibrate [fixture]` against a live
+corpus to retune. Each result carries its breakdown (`Relevance`,
+`PolicyFactor`, raw `BM25`) so "why did this pass the gate" is answerable
+per hit.
+
+`Save` returns a `SaveResult` indicating fresh insert vs dedup. Search pulls `limit × 3` raw hits per source, re-ranks, truncates to `limit`. Default filters to live-now; `IncludeStale` and `AsOf` opt into historical queries.
 
 ## Pre-warm
 

@@ -69,10 +69,15 @@ type Exportable interface {
 	MarkExported(ctx context.Context, id string, at time.Time) error
 }
 
-// Vectorable is the embedding-specific surface used by the backfill path.
+// Vectorable is the embedding-specific surface used by the backfill and
+// vector-recall paths.
 type Vectorable interface {
 	UpdateEmbedding(ctx context.Context, id, model string, vec []float32) error
 	ListMissingEmbeddings(ctx context.Context, limit int) ([]Observation, error)
+	// ListEmbeddings is the vector-recall scan: live rows in scope that
+	// carry an embedding, deterministic order, unbounded by count because
+	// cosine ranking needs the whole scoped set (see the store impl).
+	ListEmbeddings(ctx context.Context, in SearchInput) ([]Observation, error)
 }
 
 // Store is the union satisfied by the SQLite implementation. Most

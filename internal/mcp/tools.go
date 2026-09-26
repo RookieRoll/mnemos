@@ -292,6 +292,8 @@ func (s *Server) handleSearch(ctx context.Context, _ *mcpsdk.CallToolRequest, a 
 			"tags":         r.Observation.Tags,
 			"importance":   r.Observation.Importance,
 			"score":        r.Score,
+			"relevance":    r.Relevance,
+			"policy_factor": r.PolicyFactor,
 			"snippet":      r.Snippet,
 			"created_at":   r.Observation.CreatedAt,
 			"source_kind":  string(r.Observation.SourceKind),

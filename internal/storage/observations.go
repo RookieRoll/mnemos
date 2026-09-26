@@ -609,6 +609,64 @@ func (s *obsStore) ListMissingEmbeddings(ctx context.Context, limit int) ([]memo
 	return scanObsList(rows)
 }
 
+// ListEmbeddings returns live observations in the query's scope that carry a
+// stored embedding vector. The vector-recall path brute-forces cosine over
+// this set, so there is deliberately no LIMIT: the scope filters (agent,
+// project, type, importance, tags) are what bound the scan. Ordered by
+// created_at descending then id so iteration is deterministic across calls.
+// The Query field is ignored; this is a scoped scan, not a text search.
+//
+// ponytail: unbounded scoped read; the recall benchmark documents the
+// measured ~10k-row ceiling. Revisit with a LIMIT or an index only if it bites.
+func (s *obsStore) ListEmbeddings(ctx context.Context, in memory.SearchInput) ([]memory.Observation, error) {
+	asOf := in.AsOf
+	if asOf.IsZero() {
+		asOf = time.Now().UTC()
+	}
+	var sb strings.Builder
+	sb.WriteString(selectObsSQL + ` WHERE embedding IS NOT NULL`)
+	args := []any{}
+	if in.AgentID != "" {
+		sb.WriteString(` AND agent_id = ?`)
+		args = append(args, in.AgentID)
+	}
+	if in.Project != "" {
+		sb.WriteString(` AND project = ?`)
+		args = append(args, in.Project)
+	}
+	if in.Type != "" {
+		sb.WriteString(` AND obs_type = ?`)
+		args = append(args, string(in.Type))
+	}
+	if in.MinImportance > 0 {
+		sb.WriteString(` AND importance >= ?`)
+		args = append(args, in.MinImportance)
+	}
+	if !in.IncludeStale {
+		sb.WriteString(` AND (invalidated_at IS NULL OR invalidated_at > ?)`)
+		args = append(args, asOf.UTC())
+		sb.WriteString(` AND (valid_until IS NULL OR valid_until > ?)`)
+		args = append(args, asOf.UTC())
+		sb.WriteString(` AND (expires_at  IS NULL OR expires_at  > ?)`)
+		args = append(args, asOf.UTC())
+	}
+	if !in.IncludeRaw {
+		sb.WriteString(` AND trust_tier != 'raw'`)
+	}
+	for _, tag := range in.Tags {
+		sb.WriteString(` AND tags LIKE ?`)
+		args = append(args, "%"+jsonQuote(tag)+"%")
+	}
+	sb.WriteString(` ORDER BY created_at DESC, id`)
+
+	rows, err := s.db.QueryContext(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list embeddings: %w", err)
+	}
+	defer rows.Close()
+	return scanObsList(rows)
+}
+
 func (s *obsStore) MarkExported(ctx context.Context, id string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE observations SET last_exported_at = ? WHERE id = ?`, at.UTC(), id)

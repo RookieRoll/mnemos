@@ -125,6 +125,7 @@ func runSearch(ctx context.Context, args []string) error {
 	}
 	for _, r := range results {
 		fmt.Printf("  %s  %-8s  %s\n", r.Observation.ID, r.Observation.Type, r.Observation.Title)
+		fmt.Printf("    score %.3f = relevance %.3f × policy %.3f\n", r.Score, r.Relevance, r.PolicyFactor)
 		fmt.Printf("    %s\n\n", r.Snippet)
 	}
 	fmt.Printf("%d result(s) · retrieval: %s\n", len(results), mode)

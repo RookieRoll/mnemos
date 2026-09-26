@@ -109,11 +109,21 @@ type SearchInput struct {
 }
 
 // SearchHit is one ranked search result.
+//
+// Score is the composite score contract: relevance x policy, bounded to
+// (0, 1.2], identical in meaning and scale across retrieval modes. Since
+// the retrieval-score-contract change this is NOT a BM25 magnitude any
+// more — callers holding BM25-scale thresholds must move them onto the
+// contract scale (see docs/ARCHITECTURE.md). Relevance and PolicyFactor
+// are the breakdown (Score = Relevance x PolicyFactor, clamped); BM25
+// stays on its raw magnitude scale for callers that reason about it.
 type SearchHit struct {
-	Observation Observation `json:"Observation"`
-	Score       float64     `json:"Score"`
-	BM25        float64     `json:"BM25"`
-	Snippet     string      `json:"Snippet"`
+	Observation   Observation `json:"Observation"`
+	Score         float64     `json:"Score"`
+	Relevance     float64     `json:"Relevance"`
+	PolicyFactor  float64     `json:"PolicyFactor"`
+	BM25          float64     `json:"BM25"`
+	Snippet       string      `json:"Snippet"`
 }
 
 // SessionStartInput is the payload for POST /v1/sessions.
