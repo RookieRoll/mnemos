@@ -356,7 +356,7 @@ func TestRunInitRegistersPiAndLeavesClaudeGateAlone(t *testing.T) {
 		t.Errorf("Claude Code hooks must stay gated on Claude Code being present, got: %s", out)
 	}
 
-	mcpPath := filepath.Join(agentDir, "mcp.json")
+	mcpPath := filepath.Join(agentDir, "mcp-adapter.json")
 	data, err := os.ReadFile(mcpPath)
 	if err != nil {
 		t.Fatalf("pi MCP config not written: %v", err)
@@ -377,7 +377,7 @@ func TestRunInitTwiceIsIdempotentForPi(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	mcpPath := filepath.Join(agentDir, "mcp.json")
+	mcpPath := filepath.Join(agentDir, "mcp-adapter.json")
 	first, _ := os.ReadFile(mcpPath)
 
 	out := captureStdout(t, func() {

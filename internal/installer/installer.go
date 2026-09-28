@@ -48,21 +48,25 @@ type ServerEntry struct {
 // than reimplementing that rebranding logic.
 const piAgentDirEnv = "PI_CODING_AGENT_DIR"
 
-// piTarget describes pi's MCP config location. pi reads MCP servers from
-// several files with a defined precedence; the agent-dir one is the
-// Pi-owned global override, which makes it the right target for a tool
-// that must not rewrite a user's shared or project config.
+// piTarget describes pi's MCP config location. The adapter reads MCP
+// servers from several files with a defined precedence; the agent-dir
+// adapter file is the adapter-owned global override, which makes it the
+// right target for a tool that must not rewrite a user's shared or
+// project config.
 //
-// piMCPConfigPath returns the path to pi's agent-dir MCP config.
+// piMCPConfigPath returns the path to the pi-mcp-adapter's agent-dir MCP
+// config. The adapter stopped reading pi's own mcp.json — that file now
+// belongs to pi's built-in MCP support, so writing an entry there would
+// register mnemos twice and leave the adapter blind to it.
 func piMCPConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
 	if d := os.Getenv(piAgentDirEnv); d != "" {
-		return filepath.Join(d, "mcp.json")
+		return filepath.Join(d, "mcp-adapter.json")
 	}
-	return filepath.Join(home, ".pi", "agent", "mcp.json")
+	return filepath.Join(home, ".pi", "agent", "mcp-adapter.json")
 }
 
 // piTarget returns pi's MCP config target. The server key stays "mnemos":

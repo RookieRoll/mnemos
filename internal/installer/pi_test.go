@@ -45,7 +45,7 @@ func TestDetectTargetsIncludesPiWhenAgentDirExists(t *testing.T) {
 	if !ok {
 		t.Fatal("pi must be detected when its agent dir exists")
 	}
-	want := filepath.Join(agentDir, "mcp.json")
+	want := filepath.Join(agentDir, "mcp-adapter.json")
 	if tg.Path != want {
 		t.Errorf("path = %q, want %q", tg.Path, want)
 	}
@@ -79,14 +79,14 @@ func TestDetectTargetsHonoursPiAgentDirOverride(t *testing.T) {
 	if !ok {
 		t.Fatal("the override dir must still yield a target")
 	}
-	if want := filepath.Join(custom, "mcp.json"); tg.Path != want {
+	if want := filepath.Join(custom, "mcp-adapter.json"); tg.Path != want {
 		t.Errorf("path = %q, want %q", tg.Path, want)
 	}
 }
 
 func TestInstallIntoPiConfigPreservesOtherServers(t *testing.T) {
 	_, agentDir := setupPiHome(t)
-	path := filepath.Join(agentDir, "mcp.json")
+	path := filepath.Join(agentDir, "mcp-adapter.json")
 	initial := `{
   "settings": { "idleTimeout": 10 },
   "mcpServers": {
@@ -157,7 +157,7 @@ func TestInstallIntoPiIsIdempotent(t *testing.T) {
 // their tool visibility silently reverted.
 func TestInstallIntoPiLeavesAdapterOnlyFieldsAlone(t *testing.T) {
 	_, agentDir := setupPiHome(t)
-	path := filepath.Join(agentDir, "mcp.json")
+	path := filepath.Join(agentDir, "mcp-adapter.json")
 	initial := `{
   "mcpServers": {
     "mnemos": {
@@ -259,7 +259,7 @@ func TestPiPackageInstalledToleratesMalformedSettings(t *testing.T) {
 // and the merge is not part of the package's surface.
 func TestInstallDropsStaleOwnedFields(t *testing.T) {
 	_, agentDir := setupPiHome(t)
-	path := filepath.Join(agentDir, "mcp.json")
+	path := filepath.Join(agentDir, "mcp-adapter.json")
 	initial := `{
   "mcpServers": {
     "mnemos": {

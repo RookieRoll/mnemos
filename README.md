@@ -214,7 +214,7 @@ The extension shells out to the `mnemos` executable, so it needs to be findable.
 
 `pi install` writes the package source into `~/.pi/agent/settings.json` (add `-l` for a project-local `.pi/settings.json` instead). Relative paths resolve against the settings file that names them, so a project-local `./pi` stays valid only while the checkout stays put.
 
-MCP config is separate, at `~/.pi/agent/mcp.json` (override the directory with `PI_CODING_AGENT_DIR`):
+MCP config for `pi-mcp-adapter` is separate, at `~/.pi/agent/mcp-adapter.json` (override the directory with `PI_CODING_AGENT_DIR`). The adapter no longer reads pi's own `mcp.json` — that file belongs to pi's built-in MCP support — so an older `~/.pi/agent/mcp.json` needs a rename (`mv mcp.json mcp-adapter.json`, merging if a target already exists):
 
 ```json
 {
