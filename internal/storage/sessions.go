@@ -159,6 +159,25 @@ func (s *sessStore) Recent(ctx context.Context, agentID string, limit int) ([]se
 	return out, rows.Err()
 }
 
+func (s *sessStore) RecentInProject(ctx context.Context, agentID, project string, limit int) ([]session.Session, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	query := `SELECT ` + sessColumns + ` FROM sessions WHERE project = ?`
+	args := []any{project}
+	if agentID != "" {
+		query += ` AND agent_id = ?`
+		args = append(args, agentID)
+	}
+	query += ` ORDER BY started_at DESC LIMIT ?`
+	args = append(args, limit)
+	out, err := s.list(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("recent in project: %w", err)
+	}
+	return out, nil
+}
+
 // SetGoalIfEmpty updates goal only when the session is still open (ended_at
 // IS NULL) and has no goal yet (NULL or empty string). A missed update is
 // not an error — the UserPromptSubmit hook calls this on every prompt and

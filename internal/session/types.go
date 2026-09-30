@@ -81,6 +81,8 @@ type Store interface {
 	Get(ctx context.Context, id string) (*Session, error)
 	Close(ctx context.Context, in CloseInput) error
 	Recent(ctx context.Context, agentID string, limit int) ([]Session, error)
+	// RecentInProject is Recent scoped to one project.
+	RecentInProject(ctx context.Context, agentID, project string, limit int) ([]Session, error)
 	Current(ctx context.Context, agentID string) (*Session, error)
 	// ListOpen returns every open (ended_at IS NULL) session, newest
 	// first, optionally scoped to a project. Empty project means all.
