@@ -1097,6 +1097,8 @@ func TestHasSearchableContent(t *testing.T) {
 		"keep going":                             false,
 		"ok go ahead please":                     false,
 		"fix tests":                              true,
+		"não está funcionando":                   true,
+		"ボタンが 動かない 直して":                          true,
 		"deploy all changes":                     true,
 		"open it in chrome for me to try it out": true,
 		"the module order dropdown doesn't do anything please fix": true,

@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/memory"
@@ -169,8 +171,8 @@ func isSyntheticPrompt(prompt string) bool {
 const minPromptContentWords = 2
 
 // hasSearchableContent reports whether prompt carries at least
-// minPromptContentWords words of three or more letters that are not
-// conversational filler.
+// minPromptContentWords words of three or more letters (any script) that
+// are not English conversational filler.
 func hasSearchableContent(prompt string) bool {
 	filler := map[string]bool{
 		"yes": true, "yeah": true, "yep": true, "nope": true, "okay": true,
@@ -186,9 +188,9 @@ func hasSearchableContent(prompt string) bool {
 	}
 	n := 0
 	for _, w := range strings.FieldsFunc(strings.ToLower(prompt), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '\''
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\''
 	}) {
-		if len(w) < 3 || filler[w] {
+		if utf8.RuneCountInString(w) < 3 || filler[w] {
 			continue
 		}
 		n++
@@ -646,16 +648,16 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 	}
 	defer d.close()
 
+	proj := projectFromHook(in)
 	hits, err := d.mem.Search(ctx, memory.SearchInput{
 		Query:   query,
-		Project: projectFromHook(in),
+		Project: proj,
 		Limit:   preToolMemoryMaxHits * 2,
 	})
 	if err != nil || len(hits) == 0 {
 		return
 	}
 
-	proj := projectFromHook(in)
 	var sessID, agentID string
 	if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
 		sessID, agentID = sess.ID, sess.AgentID

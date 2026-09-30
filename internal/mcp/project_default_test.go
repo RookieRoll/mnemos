@@ -1,9 +1,11 @@
 package mcp_test
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/polyxmedia/mnemos/internal/mcp"
 )
 
@@ -74,5 +76,43 @@ func TestWritesStayProjectlessWithoutADefault(t *testing.T) {
 	})
 	if got != "" {
 		t.Errorf("with no default project a write must stay project-less, got %q", got)
+	}
+}
+
+func TestCurrentSessionResourceStaysInTheServersProject(t *testing.T) {
+	h := newHarnessWith(t, func(c *mcp.Config) { c.DefaultProject = "taken" })
+
+	start := func(project string) string {
+		t.Helper()
+		res, text := h.call("mnemos_session_start", map[string]any{"project": project, "goal": project + " work"})
+		if res.IsError {
+			t.Fatalf("session_start: %s", text)
+		}
+		var out struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal([]byte(text), &out); err != nil || out.SessionID == "" {
+			t.Fatalf("no session_id in %q (%v)", text, err)
+		}
+		return out.SessionID
+	}
+	mine := start("taken")
+	start("wayframer") // newer, and another terminal's
+
+	read, err := h.client.ReadResource(context.Background(), &mcpsdk.ReadResourceParams{
+		URI: "mnemos://session/current",
+	})
+	if err != nil {
+		t.Fatalf("read current session: %v", err)
+	}
+	var got struct {
+		ID      string `json:"ID"`
+		Project string `json:"Project"`
+	}
+	if err := json.Unmarshal([]byte(read.Contents[0].Text), &got); err != nil {
+		t.Fatalf("decode %q: %v", read.Contents[0].Text, err)
+	}
+	if got.ID != mine {
+		t.Errorf("current session = %s (%s), want the taken session %s", got.ID, got.Project, mine)
 	}
 }
