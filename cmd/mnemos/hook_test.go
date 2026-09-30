@@ -772,7 +772,9 @@ func TestHookUserPromptEmptyPromptIsSilent(t *testing.T) {
 }
 
 func TestPathQueryTokens(t *testing.T) {
-	root := filepath.Join(string(filepath.Separator)+"Users", "x", "Code", "wayframer")
+	// t.TempDir is absolute on every OS; a bare leading separator is not
+	// absolute on Windows.
+	root := filepath.Join(t.TempDir(), "wayframer")
 	cases := []struct{ in, root, want string }{
 		{filepath.Join(root, "app", "Http", "Controllers", "SamController.php"), root, "http controllers samcontroller"},
 		{filepath.Join(root, "docs", "2026-09-29-policy-table.md"), root, "docs 2026 09 29 policy table"},
@@ -780,13 +782,18 @@ func TestPathQueryTokens(t *testing.T) {
 		{"internal/storage/sessions.go", "", "storage sessions"},
 		{"main_test.go", "", "main test"},
 		{"x", "", ""},
-		// Outside the root: fall back to the path's own last segments.
-		{filepath.Join(string(filepath.Separator)+"tmp", "scratch", "replay.py"), root, "tmp scratch replay"},
 	}
 	for _, c := range cases {
 		if got := pathQueryTokens(c.in, c.root); got != c.want {
 			t.Errorf("pathQueryTokens(%q, %q) = %q, want %q", c.in, c.root, got, c.want)
 		}
+	}
+
+	// Outside the root the path's own last segments are used, so the
+	// project directory is not stripped.
+	outside := filepath.Join(filepath.Dir(root), "elsewhere", "scratch", "replay.py")
+	if got := pathQueryTokens(outside, root); !strings.HasSuffix(got, "elsewhere scratch replay") {
+		t.Errorf("pathQueryTokens(%q, %q) = %q, want it to end with the file's own segments", outside, root, got)
 	}
 }
 
