@@ -20,6 +20,8 @@ func setupClaudeCodeHome(t *testing.T) string {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	// A developer's own MNEMOS_CONFIG must not steer tests at their real store.
+	t.Setenv("MNEMOS_CONFIG", "")
 	// Seed .claude.json so DetectTargets picks up Claude Code (user).
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatalf("seed .claude.json: %v", err)

@@ -24,6 +24,8 @@ func withHome(t *testing.T) {
 	// Ensure Claude Code's config-dir override doesn't leak from the host
 	// environment and redirect installer targets outside the temp HOME.
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	// A developer's own MNEMOS_CONFIG must not steer tests at their real store.
+	t.Setenv("MNEMOS_CONFIG", "")
 }
 
 // captureStdout runs fn with os.Stdout redirected to a buffer, returns

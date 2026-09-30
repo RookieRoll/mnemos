@@ -154,8 +154,17 @@ path = "~/vaults/mnemos"
 }
 
 func TestDefaultPathPointsUnderHome(t *testing.T) {
+	t.Setenv(config.ConfigEnv, "")
 	p := config.DefaultPath()
 	if !strings.Contains(p, ".mnemos") {
 		t.Errorf("DefaultPath should contain .mnemos: %s", p)
+	}
+}
+
+func TestDefaultPathHonoursConfigEnv(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "scratch.toml")
+	t.Setenv(config.ConfigEnv, want)
+	if got := config.DefaultPath(); got != want {
+		t.Errorf("DefaultPath with %s set = %q, want %q", config.ConfigEnv, got, want)
 	}
 }
