@@ -193,3 +193,22 @@ func TestEmbedStatus(t *testing.T) {
 		t.Errorf("embed status missing provider line: %s", out)
 	}
 }
+
+func TestProjectFromDir(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "andre")
+	root := filepath.VolumeName(home) + string(filepath.Separator)
+	cases := []struct {
+		dir, want string
+	}{
+		{filepath.Join(home, "Code", "taken"), "taken"},
+		{filepath.Join(home, "Code", "3dsolarsystem.online") + string(filepath.Separator), "3dsolarsystem.online"},
+		{home, ""},
+		{root, ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := projectFromDir(tc.dir, home); got != tc.want {
+			t.Errorf("projectFromDir(%q) = %q, want %q", tc.dir, got, tc.want)
+		}
+	}
+}
