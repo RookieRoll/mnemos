@@ -87,11 +87,13 @@ const maxAutoGoalChars = 120
 //     was saved precisely because LLMs skip optional tool calls; this
 //     promotes mnemos from optional to ambient.
 //
+// Turns the user did not type (see isSyntheticPrompt) get neither.
+//
 // Both effects degrade silently. UserPromptSubmit stdout is injected into
 // the model context, so a failed search must produce zero stdout.
 func runHookUserPrompt(ctx context.Context, _ []string) error {
 	in := readHookStdin(os.Stdin)
-	if in.Prompt == "" {
+	if in.Prompt == "" || isSyntheticPrompt(in.Prompt) {
 		return nil
 	}
 
@@ -120,6 +122,82 @@ func runHookUserPrompt(ctx context.Context, _ []string) error {
 	emitPromptMemoryBlock(ctx, os.Stdout, d, in.Prompt, agentID, project, sessID)
 	emitCaptureDirective(os.Stdout, in.Prompt)
 	return nil
+}
+
+// isSyntheticPrompt reports whether a UserPromptSubmit prompt is a turn the
+// harness generated rather than one the user typed: a background task
+// notification, a report from a subagent or another session, the summary
+// Claude Code writes after a compaction, or a slash-command echo. The hook
+// payload carries no field that tells these apart, so the check reads the
+// markers they open with.
+//
+// Between 2026-07-27 and 2026-09-30 these were 17% of prompt_hook events
+// and 24 of the 30 capture directives. A subagent's report is full of
+// "we tried" and "going forward", which the capture patterns read as the
+// user correcting the agent.
+func isSyntheticPrompt(prompt string) bool {
+	p := strings.TrimSpace(prompt)
+	prefixes := []string{
+		"<task-notification>",
+		"<agent-message",
+		"Another Claude session sent a message",
+		"This session is being continued from a previous conversation",
+		"[SYSTEM NOTIFICATION",
+		"<command-name>",
+		"<command-message>",
+		"<local-command-stdout>",
+		"[Request interrupted by user",
+	}
+	for _, pre := range prefixes {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	// Notifications can arrive behind a short harness banner, so the
+	// structural tags also count when they appear near the top.
+	head := p
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	return strings.Contains(head, "<task-notification>") || strings.Contains(head, "<agent-message")
+}
+
+// minPromptContentWords is how many content words a prompt needs before
+// its text is worth searching on. Every prompt token becomes an OR'd
+// prefix term in the FTS query, so "yes", "show me" or "so we good?"
+// matched stored memories on filler alone. Replaying 70 such prompts from
+// real sessions injected memories into 67 of them.
+const minPromptContentWords = 2
+
+// hasSearchableContent reports whether prompt carries at least
+// minPromptContentWords words of three or more letters that are not
+// conversational filler.
+func hasSearchableContent(prompt string) bool {
+	filler := map[string]bool{
+		"yes": true, "yeah": true, "yep": true, "nope": true, "okay": true,
+		"please": true, "thanks": true, "thank": true, "sure": true, "cool": true,
+		"nice": true, "great": true, "good": true, "fine": true, "done": true,
+		"the": true, "and": true, "but": true, "for": true, "with": true,
+		"you": true, "your": true, "that": true, "this": true, "then": true,
+		"now": true, "can": true, "lets": true, "let's": true, "what": true,
+		"how": true, "why": true, "show": true, "just": true, "ahead": true,
+		"keep": true, "going": true, "continue": true, "carry": true, "all": true,
+		"are": true, "was": true, "did": true, "does": true, "got": true,
+		"get": true, "not": true, "it's": true, "its": true, "too": true,
+	}
+	n := 0
+	for _, w := range strings.FieldsFunc(strings.ToLower(prompt), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '\''
+	}) {
+		if len(w) < 3 || filler[w] {
+			continue
+		}
+		n++
+		if n >= minPromptContentWords {
+			return true
+		}
+	}
+	return false
 }
 
 // captureSignal names what kind of write tool the user's phrasing is
@@ -225,6 +303,12 @@ func emitCaptureDirective(w io.Writer, prompt string) {
 // every prompt's context window.
 const promptMemoryMinScore = 1.5
 
+// promptMemoryHeader opens the injected block. It used to demand "apply or
+// address", but a hand-graded sample of 45 injections from real sessions
+// found about 5% relevant to the prompt. Telling the model to address the
+// other 95% invites tangents; the model is the better judge of relevance.
+const promptMemoryHeader = "[mnemos: possibly relevant memory from earlier sessions. Use what applies to this prompt and ignore the rest.]"
+
 // promptMemoryMaxHits caps how many memories we inject per prompt. Three
 // is small enough to stay invisible on routine prompts but large enough to
 // catch the "convention + correction + decision" cluster around a topic.
@@ -236,7 +320,7 @@ const promptMemoryMaxHits = 3
 // poisons the agent's context. Kept hits are recorded in the injection log
 // (channel prompt_hook) so surfaced-vs-used ratios cover this path too.
 func emitPromptMemoryBlock(ctx context.Context, w io.Writer, d *deps, prompt, agentID, project, sessionID string) {
-	if prompt == "" || d == nil {
+	if d == nil || !hasSearchableContent(prompt) {
 		return
 	}
 	// PreferProject, not Project: a hard filter would drop project-less
@@ -270,7 +354,7 @@ func emitPromptMemoryBlock(ctx context.Context, w io.Writer, d *deps, prompt, ag
 	if len(kept) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "[mnemos: prior memory relevant to this prompt — apply or address]")
+	fmt.Fprintln(w, promptMemoryHeader)
 	refs := make([]injection.Ref, 0, len(kept))
 	for _, h := range kept {
 		title := h.Observation.Title

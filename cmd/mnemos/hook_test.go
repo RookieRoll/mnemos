@@ -1109,3 +1109,111 @@ func TestDeriveSessionSummaryIgnoresOtherSessionsFiles(t *testing.T) {
 		t.Errorf("summary must not name another session's files, got %q", got)
 	}
 }
+
+func TestIsSyntheticPrompt(t *testing.T) {
+	synthetic := []string{
+		"<task-notification> <task-id>b5jnk36wo</task-id> <summary>Monitor event</summary> </task-notification>",
+		"Another Claude session sent a message: <agent-message from=\"a94f\"> [Subagent hand-back] we tried X, going forward do Y",
+		"This session is being continued from a previous conversation that ran out of context. Summary: ...",
+		"[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.\n\n<task-notification>\n<task-id>a0</task-id>",
+		"  <command-name>/clear</command-name> ",
+		"<local-command-stdout>Set model to Opus</local-command-stdout>",
+		"[Request interrupted by user for tool use]",
+	}
+	for _, p := range synthetic {
+		if !isSyntheticPrompt(p) {
+			t.Errorf("want synthetic: %q", p)
+		}
+	}
+	typed := []string{
+		"the module order dropdown doesn't do anything please fix",
+		"<pasted_content id=\"0479\"> https://mitchs.ai </pasted_content> why is this slow",
+		// The tags only count near the top; a user quoting one later is typing.
+		"explain this log " + strings.Repeat("context ", 100) + "<task-notification> <agent-message",
+	}
+	for _, p := range typed {
+		if isSyntheticPrompt(p) {
+			t.Errorf("want user-typed: %q", p)
+		}
+	}
+}
+
+func TestHasSearchableContent(t *testing.T) {
+	cases := map[string]bool{
+		"yes":                                    false,
+		"show me":                                false,
+		"so we good?":                            false,
+		"i like c":                               false,
+		"keep going":                             false,
+		"ok go ahead please":                     false,
+		"fix tests":                              true,
+		"deploy all changes":                     true,
+		"open it in chrome for me to try it out": true,
+		"the module order dropdown doesn't do anything please fix": true,
+	}
+	for prompt, want := range cases {
+		if got := hasSearchableContent(prompt); got != want {
+			t.Errorf("hasSearchableContent(%q) = %v, want %v", prompt, got, want)
+		}
+	}
+}
+
+func TestHookUserPromptIgnoresSyntheticTurns(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+
+	sess := openHostSession(t, "mnemos", "claude-a", "")
+	// Correction-shaped language inside a subagent report used to trigger
+	// a capture directive and become the session goal.
+	payload := hookPayload(t, map[string]any{
+		"hook_event_name": "UserPromptSubmit",
+		"session_id":      "claude-a",
+		"cwd":             filepath.Join(os.Getenv("HOME"), "code", "mnemos"),
+		"prompt":          "<task-notification> <task-id>ad21</task-id> <result>we tried caching for 5 minutes, going forward use 30 seconds</result> </task-notification>",
+	})
+	var out string
+	withStdin(t, payload, func() {
+		out = captureStdout(t, func() {
+			if err := runHookUserPrompt(ctx, nil); err != nil {
+				t.Fatalf("hook: %v", err)
+			}
+		})
+	})
+	if out != "" {
+		t.Errorf("a synthetic turn must produce no output, got %q", out)
+	}
+	if got := getSession(t, sess.ID); got.Goal != "" {
+		t.Errorf("a synthetic turn must not become the session goal, got %q", got.Goal)
+	}
+}
+
+func TestHookUserPromptSkipsSearchForContentlessPrompts(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	for _, title := range []string{"react hooks", "docker compose", "css grid", "git rebase"} {
+		_, _ = d.mem.Save(ctx, memory.SaveInput{
+			Title: title, Content: "unrelated filler", Type: memory.TypeContext, Project: "mnemos",
+		})
+	}
+	_, _ = d.mem.Save(ctx, memory.SaveInput{
+		Title:   "so we good to ship on fridays",
+		Content: "we are good to ship on fridays so long as the smoke tests pass",
+		Type:    memory.TypeDecision, Project: "mnemos",
+	})
+	d.close()
+
+	var out string
+	withStdin(t, `{"hook_event_name":"UserPromptSubmit","prompt":"so we good?"}`, func() {
+		out = captureStdout(t, func() {
+			_ = runHookUserPrompt(ctx, nil)
+		})
+	})
+	if strings.Contains(out, promptMemoryHeader) {
+		t.Errorf("a prompt with no content words must not inject memory, got %q", out)
+	}
+}
