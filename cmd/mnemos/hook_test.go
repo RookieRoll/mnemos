@@ -772,15 +772,20 @@ func TestHookUserPromptEmptyPromptIsSilent(t *testing.T) {
 }
 
 func TestPathQueryTokens(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"/Users/x/Code/repo/internal/storage/sessions.go", "repo internal storage sessions go"},
-		{"internal/storage/sessions.go", "internal storage sessions go"},
-		{"main_test.go", "main test go"},
-		{"x", ""},
+	root := filepath.Join(string(filepath.Separator)+"Users", "x", "Code", "wayframer")
+	cases := []struct{ in, root, want string }{
+		{filepath.Join(root, "app", "Http", "Controllers", "SamController.php"), root, "http controllers samcontroller"},
+		{filepath.Join(root, "docs", "2026-09-29-policy-table.md"), root, "docs 2026 09 29 policy table"},
+		{filepath.Join(root, "internal", "storage", "sessions.go"), root, "storage sessions"},
+		{"internal/storage/sessions.go", "", "storage sessions"},
+		{"main_test.go", "", "main test"},
+		{"x", "", ""},
+		// Outside the root: fall back to the path's own last segments.
+		{filepath.Join(string(filepath.Separator)+"tmp", "scratch", "replay.py"), root, "tmp scratch replay"},
 	}
 	for _, c := range cases {
-		if got := pathQueryTokens(c.in); got != c.want {
-			t.Errorf("pathQueryTokens(%q) = %q, want %q", c.in, got, c.want)
+		if got := pathQueryTokens(c.in, c.root); got != c.want {
+			t.Errorf("pathQueryTokens(%q, %q) = %q, want %q", c.in, c.root, got, c.want)
 		}
 	}
 }

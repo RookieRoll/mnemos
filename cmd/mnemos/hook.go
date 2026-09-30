@@ -630,7 +630,11 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 	if path == "" {
 		return
 	}
-	query := pathQueryTokens(path)
+	root := in.CWD
+	if root == "" {
+		root, _ = os.Getwd()
+	}
+	query := pathQueryTokens(path, root)
 	if query == "" {
 		return
 	}
@@ -709,23 +713,48 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 	_ = d.mem.RecordSurfaced(ctx, refIDs(refs))
 }
 
-// pathQueryTokens turns a file path into a search query: the last few
-// path segments split on separators, lowercased. "/Users/x/repo/internal/
-// storage/sessions.go" → "internal storage sessions go". The FTS layer
-// ORs the tokens, so any segment matching a correction's trigger context
-// or content surfaces it.
-func pathQueryTokens(p string) string {
+// pathQueryTokens turns the file an edit is about to write into a search
+// query: its path relative to the project root, last few segments split
+// on separators and punctuation, lowercased, with the extension and
+// generic layout directories dropped. "/Users/x/Code/repo/internal/
+// storage/sessions.go" under root "/Users/x/Code/repo" → "storage
+// sessions". The FTS layer ORs the tokens, so any segment matching a
+// correction's trigger context or content surfaces it.
+//
+// It used to keep the project directory and the extension, so the query
+// for any wayframer PHP file contained "wayframer" and "php" and matched
+// every memory mentioning either: "use DB_DATABASE=wayframer" fired on
+// controllers, models and markdown notes alike.
+func pathQueryTokens(p, root string) string {
+	if root != "" && filepath.IsAbs(p) {
+		if rel, err := filepath.Rel(root, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			p = rel
+		}
+	}
 	segs := strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })
+	if len(segs) == 0 {
+		return ""
+	}
 	if len(segs) > 4 {
 		segs = segs[len(segs)-4:]
+	}
+	last := len(segs) - 1
+	segs[last] = strings.TrimSuffix(segs[last], filepath.Ext(segs[last]))
+	// Layout directories say where a file lives in any project of its
+	// kind, not what it is about.
+	generic := map[string]bool{
+		"src": true, "internal": true, "cmd": true, "pkg": true, "lib": true, "app": true,
+		"resources": true, "js": true, "views": true, "components": true,
+		"composables": true, "public": true, "assets": true,
 	}
 	var toks []string
 	for _, s := range segs {
 		for _, t := range strings.FieldsFunc(s, func(r rune) bool {
 			return r == '.' || r == '_' || r == '-'
 		}) {
-			if len(t) > 1 {
-				toks = append(toks, strings.ToLower(t))
+			t = strings.ToLower(t)
+			if len(t) > 1 && !generic[t] {
+				toks = append(toks, t)
 			}
 		}
 	}
