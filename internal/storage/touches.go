@@ -41,9 +41,6 @@ func (s *touchStore) Hot(ctx context.Context, agentID, project string, limit int
 		limit = 10
 	}
 	args := []any{}
-	query := `
-		SELECT project, agent_id, path, COUNT(*) AS touches, MAX(touched_at) AS last_touched
-		  FROM file_touches`
 	where := []string{}
 	if agentID != "" {
 		where = append(where, `agent_id = ?`)
@@ -53,6 +50,27 @@ func (s *touchStore) Hot(ctx context.Context, agentID, project string, limit int
 		where = append(where, `project = ?`)
 		args = append(args, project)
 	}
+	return s.hot(ctx, where, args, limit)
+}
+
+// SessionHot returns the files touched in one session, most-touched first.
+// An empty sessionID returns nothing: touches recorded with no session
+// belong to no session's summary.
+func (s *touchStore) SessionHot(ctx context.Context, sessionID string, limit int) ([]memory.HotFile, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	return s.hot(ctx, []string{`session_id = ?`}, []any{sessionID}, limit)
+}
+
+// hot runs the grouped heat-map query under the given WHERE clauses.
+func (s *touchStore) hot(ctx context.Context, where []string, args []any, limit int) ([]memory.HotFile, error) {
+	query := `
+		SELECT project, agent_id, path, COUNT(*) AS touches, MAX(touched_at) AS last_touched
+		  FROM file_touches`
 	if len(where) > 0 {
 		query += ` WHERE ` + joinAnd(where)
 	}

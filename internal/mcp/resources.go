@@ -46,8 +46,20 @@ func (s *Server) registerResources() {
 	}, s.readCapabilities)
 }
 
+// readCurrentSession serves the newest open session in the server's own
+// project. Without a DefaultProject it falls back to the newest open
+// session anywhere, which with parallel terminals is often another
+// project's.
 func (s *Server) readCurrentSession(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
-	sess, err := s.cfg.Sessions.Current(ctx, "")
+	var (
+		sess *session.Session
+		err  error
+	)
+	if s.cfg.DefaultProject != "" {
+		sess, err = s.cfg.Sessions.Resolve(ctx, "", s.cfg.DefaultProject)
+	} else {
+		sess, err = s.cfg.Sessions.Current(ctx, "")
+	}
 	if err != nil {
 		if errors.Is(err, session.ErrNotFound) {
 			return resourceJSON(req.Params.URI, map[string]any{"session": nil})

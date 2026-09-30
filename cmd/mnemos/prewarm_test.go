@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
+	"github.com/polyxmedia/mnemos/internal/session"
 )
 
 func TestParsePrewarmMode(t *testing.T) {
@@ -239,4 +241,102 @@ func sessionIDFromOutput(t *testing.T, out string) string {
 	}
 	t.Fatalf("no mnemos_session_id in output: %q", out)
 	return ""
+}
+
+func TestRunPrewarmRecordsHostSessionAndAdoptsOnlyItsOwn(t *testing.T) {
+	homeWithConfig(t, "")
+	ctx := context.Background()
+
+	fire := func(host string) string {
+		t.Helper()
+		payload := hookPayload(t, map[string]any{
+			"hook_event_name": "SessionStart",
+			"source":          "startup",
+			"session_id":      host,
+		})
+		var out string
+		withStdin(t, payload, func() {
+			out = captureStdout(t, func() {
+				if err := runPrewarm(ctx, []string{"--project", "mnemos"}); err != nil {
+					t.Fatalf("prewarm: %v", err)
+				}
+			})
+		})
+		return sessionIDFromOutput(t, out)
+	}
+
+	first := fire("claude-a")
+	twin := fire("claude-a")
+	// A second terminal in the same project inside the adoption window.
+	second := fire("claude-b")
+
+	if twin != first {
+		t.Errorf("a duplicate SessionStart for the same conversation must adopt %s, got %s", first, twin)
+	}
+	if second == first {
+		t.Error("another conversation in the same project must get its own session")
+	}
+
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	defer d.close()
+	got, err := d.sess.Get(ctx, first)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.HostSessionID != "claude-a" {
+		t.Errorf("SessionStart must record the host session id, got %q", got.HostSessionID)
+	}
+}
+
+func TestRunPrewarmRecoveryRestoresTheHostsSession(t *testing.T) {
+	homeWithConfig(t, "")
+	ctx := context.Background()
+
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	mine, _ := d.sess.Open(ctx, session.OpenInput{
+		Project: "mnemos", Goal: "ship compaction recovery", HostSessionID: "claude-a",
+	})
+	if _, err := d.mem.Save(ctx, memory.SaveInput{
+		Title: "recovery runs from SessionStart compact", Content: "stderr from PreCompact never reached the model",
+		Project: "mnemos", Type: memory.TypeDecision, SessionID: mine.ID,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Another terminal in the same project, newer, so the old lookup took it.
+	_, _ = d.sess.Open(ctx, session.OpenInput{
+		Project: "mnemos", Goal: "unrelated review", HostSessionID: "claude-b",
+	})
+	d.close()
+
+	payload := hookPayload(t, map[string]any{
+		"hook_event_name": "SessionStart",
+		"source":          "compact",
+		"session_id":      "claude-a",
+	})
+	var out string
+	withStdin(t, payload, func() {
+		out = captureStdout(t, func() {
+			if err := runPrewarm(ctx, []string{"--project", "mnemos", "--mode", "compaction_recovery"}); err != nil {
+				t.Fatalf("prewarm: %v", err)
+			}
+		})
+	})
+	if !strings.Contains(out, "ship compaction recovery") {
+		t.Errorf("recovery must restore the compacted conversation's goal, got: %s", out)
+	}
+	if !strings.Contains(out, "recovery runs from SessionStart compact") {
+		t.Errorf("recovery must list the session's observations, got: %s", out)
+	}
+	if strings.Contains(out, "unrelated review") {
+		t.Errorf("recovery must not restore another terminal's session, got: %s", out)
+	}
+	if got := sessionIDFromOutput(t, out); got != mine.ID {
+		t.Errorf("recovery must report session %s, got %s", mine.ID, got)
+	}
 }

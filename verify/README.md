@@ -41,6 +41,12 @@ The arms are command templates. The default uses
 two arms see different MCP configurations; customize to match your CLI.
 `{{trigger}}` is substituted per run.
 
+The on-arm never writes to your real store. `runners/on.sh` snapshots it
+into a scratch directory and exports `MNEMOS_CONFIG` pointing there, so
+the hooks, the MCP server claude spawns, and anything the agent saves all
+hit the snapshot, which is deleted when the run ends. Set `MNEMOS_BIN` to
+run the arm against a development build.
+
 ## Both
 
 ```

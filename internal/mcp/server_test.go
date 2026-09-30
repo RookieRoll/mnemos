@@ -55,6 +55,13 @@ func (h *harness) call(name string, args any) (*mcpsdk.CallToolResult, string) {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil)
+}
+
+// newHarnessWith is newHarness with a hook to adjust the server config
+// before the server is built.
+func newHarnessWith(t *testing.T, adjust func(*mcp.Config)) *harness {
+	t.Helper()
 	dir := t.TempDir()
 	db, err := storage.Open(context.Background(), filepath.Join(dir, "mcp.db"))
 	if err != nil {
@@ -62,7 +69,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	srv := mcp.NewServer(mcp.Config{
+	cfg := mcp.Config{
 		Name:     "mnemos",
 		Version:  "test",
 		Memory:   memory.NewService(memory.Config{Store: db.Observations()}),
@@ -76,7 +83,11 @@ func newHarness(t *testing.T) *harness {
 			Touches:      db.Touches(),
 		}),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
+	}
+	if adjust != nil {
+		adjust(&cfg)
+	}
+	srv := mcp.NewServer(cfg)
 
 	ctx := context.Background()
 	t1, t2 := mcpsdk.NewInMemoryTransports()

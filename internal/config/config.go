@@ -154,8 +154,18 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// DefaultPath returns the conventional config location (~/.mnemos/config.toml).
+// ConfigEnv names the environment variable that overrides DefaultPath.
+// Every command, hook and the MCP server a host spawns inherit it, so one
+// export points a whole run at a scratch store: the verify harness sets
+// it so its fixture memories stay out of the user's own store.
+const ConfigEnv = "MNEMOS_CONFIG"
+
+// DefaultPath returns $MNEMOS_CONFIG when set, else the conventional
+// config location (~/.mnemos/config.toml).
 func DefaultPath() string {
+	if p := os.Getenv(ConfigEnv); p != "" {
+		return p
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "mnemos.toml"

@@ -11,10 +11,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/memory"
-	"github.com/polyxmedia/mnemos/internal/prewarm"
 	"github.com/polyxmedia/mnemos/internal/safety"
 	"github.com/polyxmedia/mnemos/internal/session"
 )
@@ -87,11 +88,13 @@ const maxAutoGoalChars = 120
 //     was saved precisely because LLMs skip optional tool calls; this
 //     promotes mnemos from optional to ambient.
 //
+// Turns the user did not type (see isSyntheticPrompt) get neither.
+//
 // Both effects degrade silently. UserPromptSubmit stdout is injected into
 // the model context, so a failed search must produce zero stdout.
 func runHookUserPrompt(ctx context.Context, _ []string) error {
 	in := readHookStdin(os.Stdin)
-	if in.Prompt == "" {
+	if in.Prompt == "" || isSyntheticPrompt(in.Prompt) {
 		return nil
 	}
 
@@ -102,7 +105,8 @@ func runHookUserPrompt(ctx context.Context, _ []string) error {
 	}
 	defer d.close()
 
-	sess, err := d.sess.Current(ctx, "")
+	project := projectFromHook(in)
+	sess, err := d.sess.Resolve(ctx, in.SessionID, project)
 	switch {
 	case err != nil && !errors.Is(err, session.ErrNotFound):
 		fmt.Fprintln(os.Stderr, "mnemos hook user-prompt:", err)
@@ -116,9 +120,85 @@ func runHookUserPrompt(ctx context.Context, _ []string) error {
 	if sess != nil {
 		sessID, agentID = sess.ID, sess.AgentID
 	}
-	emitPromptMemoryBlock(ctx, os.Stdout, d, in.Prompt, agentID, projectFromHook(in), sessID)
+	emitPromptMemoryBlock(ctx, os.Stdout, d, in.Prompt, agentID, project, sessID)
 	emitCaptureDirective(os.Stdout, in.Prompt)
 	return nil
+}
+
+// isSyntheticPrompt reports whether a UserPromptSubmit prompt is a turn the
+// harness generated rather than one the user typed: a background task
+// notification, a report from a subagent or another session, the summary
+// Claude Code writes after a compaction, or a slash-command echo. The hook
+// payload carries no field that tells these apart, so the check reads the
+// markers they open with.
+//
+// Between 2026-07-27 and 2026-09-30 these were 17% of prompt_hook events
+// and 24 of the 30 capture directives. A subagent's report is full of
+// "we tried" and "going forward", which the capture patterns read as the
+// user correcting the agent.
+func isSyntheticPrompt(prompt string) bool {
+	p := strings.TrimSpace(prompt)
+	prefixes := []string{
+		"<task-notification>",
+		"<agent-message",
+		"Another Claude session sent a message",
+		"This session is being continued from a previous conversation",
+		"[SYSTEM NOTIFICATION",
+		"<command-name>",
+		"<command-message>",
+		"<local-command-stdout>",
+		"[Request interrupted by user",
+	}
+	for _, pre := range prefixes {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	// Notifications can arrive behind a short harness banner, so the
+	// structural tags also count when they appear near the top.
+	head := p
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	return strings.Contains(head, "<task-notification>") || strings.Contains(head, "<agent-message")
+}
+
+// minPromptContentWords is how many content words a prompt needs before
+// its text is worth searching on. Every prompt token becomes an OR'd
+// prefix term in the FTS query, so "yes", "show me" or "so we good?"
+// matched stored memories on filler alone. Replaying 70 such prompts from
+// real sessions injected memories into 67 of them.
+const minPromptContentWords = 2
+
+// hasSearchableContent reports whether prompt carries at least
+// minPromptContentWords words of three or more letters (any script) that
+// are not English conversational filler.
+func hasSearchableContent(prompt string) bool {
+	filler := map[string]bool{
+		"yes": true, "yeah": true, "yep": true, "nope": true, "okay": true,
+		"please": true, "thanks": true, "thank": true, "sure": true, "cool": true,
+		"nice": true, "great": true, "good": true, "fine": true, "done": true,
+		"the": true, "and": true, "but": true, "for": true, "with": true,
+		"you": true, "your": true, "that": true, "this": true, "then": true,
+		"now": true, "can": true, "lets": true, "let's": true, "what": true,
+		"how": true, "why": true, "show": true, "just": true, "ahead": true,
+		"keep": true, "going": true, "continue": true, "carry": true, "all": true,
+		"are": true, "was": true, "did": true, "does": true, "got": true,
+		"get": true, "not": true, "it's": true, "its": true, "too": true,
+	}
+	n := 0
+	for _, w := range strings.FieldsFunc(strings.ToLower(prompt), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\''
+	}) {
+		if utf8.RuneCountInString(w) < 3 || filler[w] {
+			continue
+		}
+		n++
+		if n >= minPromptContentWords {
+			return true
+		}
+	}
+	return false
 }
 
 // captureSignal names what kind of write tool the user's phrasing is
@@ -224,6 +304,12 @@ func emitCaptureDirective(w io.Writer, prompt string) {
 // every prompt's context window.
 const promptMemoryMinScore = 1.5
 
+// promptMemoryHeader opens the injected block. It used to demand "apply or
+// address", but a hand-graded sample of 45 injections from real sessions
+// found about 5% relevant to the prompt. Telling the model to address the
+// other 95% invites tangents; the model is the better judge of relevance.
+const promptMemoryHeader = "[mnemos: possibly relevant memory from earlier sessions. Use what applies to this prompt and ignore the rest.]"
+
 // promptMemoryMaxHits caps how many memories we inject per prompt. Three
 // is small enough to stay invisible on routine prompts but large enough to
 // catch the "convention + correction + decision" cluster around a topic.
@@ -235,7 +321,7 @@ const promptMemoryMaxHits = 3
 // poisons the agent's context. Kept hits are recorded in the injection log
 // (channel prompt_hook) so surfaced-vs-used ratios cover this path too.
 func emitPromptMemoryBlock(ctx context.Context, w io.Writer, d *deps, prompt, agentID, project, sessionID string) {
-	if prompt == "" || d == nil {
+	if d == nil || !hasSearchableContent(prompt) {
 		return
 	}
 	// PreferProject, not Project: a hard filter would drop project-less
@@ -269,7 +355,7 @@ func emitPromptMemoryBlock(ctx context.Context, w io.Writer, d *deps, prompt, ag
 	if len(kept) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "[mnemos: prior memory relevant to this prompt — apply or address]")
+	fmt.Fprintln(w, promptMemoryHeader)
 	refs := make([]injection.Ref, 0, len(kept))
 	for _, h := range kept {
 		title := h.Observation.Title
@@ -341,7 +427,7 @@ func runHookPostTool(ctx context.Context, _ []string) error {
 	// Best-effort session stamp. If nothing is open we still record the
 	// touch so the heat map does not lose data; SessionID just stays empty.
 	var sessID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+	if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
 		sessID = sess.ID
 	} else if err != nil && !errors.Is(err, session.ErrNotFound) {
 		fmt.Fprintln(os.Stderr, "mnemos hook post-tool:", err)
@@ -381,11 +467,12 @@ func filePathFromToolInput(m map[string]any) string {
 	return ""
 }
 
-// runHookSessionEnd handles Claude Code's SessionEnd event. Closes every
-// open mnemos session for the project (SessionStart hooks installed at
-// both user and project scope each open one, so there can be twins) with
-// a summary stitched from recent activity and a status derived from the
-// reason Claude Code supplied. No-ops when the agent already called
+// runHookSessionEnd handles Claude Code's SessionEnd event. Closes the
+// session(s) this conversation opened, found by the payload's session_id
+// (duplicate SessionStart installs can leave twins carrying the same one),
+// with a summary of that session's own activity and a status derived from
+// the reason Claude Code supplied. Another terminal's session in the same
+// project stays open. No-ops when the agent already called
 // mnemos_session_end properly — session.Close guards on ended_at IS NULL.
 // Finishes with a stale sweep so sessions orphaned by killed terminals
 // (no SessionEnd ever fires) don't stay open forever.
@@ -400,34 +487,17 @@ func runHookSessionEnd(ctx context.Context, _ []string) error {
 	defer d.close()
 
 	proj := projectFromHook(in)
-	status := sessionStatusFromReason(in.Reason)
-	tags := []string{"auto-closed:" + sanitizeReason(in.Reason)}
-
-	if proj == "" {
-		// No project derivable: closing all open sessions would hit other
-		// projects' live sessions, so fall back to the newest one only.
-		if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
-			closeSessionQuietly(ctx, d, session.CloseInput{
-				ID: sess.ID, Summary: deriveSessionSummary(ctx, d, sess.ID),
-				Status: status, OutcomeTags: tags,
-			})
-		} else if err != nil && !errors.Is(err, session.ErrNotFound) {
-			fmt.Fprintln(os.Stderr, "mnemos hook session-end:", err)
-		}
-		sweepStaleSessions(ctx, d)
-		return nil
+	closeIn := session.CloseInput{
+		Status:      sessionStatusFromReason(in.Reason),
+		OutcomeTags: []string{"auto-closed:" + sanitizeReason(in.Reason)},
 	}
-
-	open, err := d.sess.ListOpen(ctx, proj)
-	if err != nil {
+	// The summary is per session, so it has to be derived before the
+	// close; the resolved session is the one CloseForHost will pick.
+	if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
+		closeIn.Summary = deriveSessionSummary(ctx, d, sess.ID)
+	}
+	if _, err := d.sess.CloseForHost(ctx, in.SessionID, proj, closeIn); err != nil {
 		fmt.Fprintln(os.Stderr, "mnemos hook session-end:", err)
-		return nil
-	}
-	for _, sess := range open {
-		closeSessionQuietly(ctx, d, session.CloseInput{
-			ID: sess.ID, Summary: deriveSessionSummary(ctx, d, sess.ID),
-			Status: status, OutcomeTags: tags,
-		})
 	}
 
 	sweepStaleSessions(ctx, d)
@@ -471,10 +541,10 @@ func sweepStaleSessions(ctx context.Context, d *deps) {
 	}
 }
 
-// deriveSessionSummary builds a one-line recap from recent activity on the
-// session: counts observations and touches, names the top files. Best
-// effort — returns "" if either query fails. A small, deterministic
-// summary beats an empty close.
+// deriveSessionSummary builds a one-line recap from the session's own
+// activity: counts its observations and names the files it touched most.
+// Best effort — returns "" if the observation query fails. A small,
+// deterministic summary beats an empty close.
 func deriveSessionSummary(ctx context.Context, d *deps, sessID string) string {
 	obs, err := d.db.Observations().ListBySession(ctx, sessID)
 	if err != nil {
@@ -484,7 +554,7 @@ func deriveSessionSummary(ctx context.Context, d *deps, sessID string) string {
 	if n := len(obs); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d observation(s)", n))
 	}
-	if hot, err := d.db.Touches().Hot(ctx, "", "", 5); err == nil && len(hot) > 0 {
+	if hot, err := d.db.Touches().SessionHot(ctx, sessID, 5); err == nil && len(hot) > 0 {
 		files := make([]string, 0, len(hot))
 		for _, h := range hot {
 			files = append(files, filepath.Base(h.Path))
@@ -562,7 +632,11 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 	if path == "" {
 		return
 	}
-	query := pathQueryTokens(path)
+	root := in.CWD
+	if root == "" {
+		root, _ = os.Getwd()
+	}
+	query := pathQueryTokens(path, root)
 	if query == "" {
 		return
 	}
@@ -574,9 +648,10 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 	}
 	defer d.close()
 
+	proj := projectFromHook(in)
 	hits, err := d.mem.Search(ctx, memory.SearchInput{
 		Query:   query,
-		Project: projectFromHook(in),
+		Project: proj,
 		Limit:   preToolMemoryMaxHits * 2,
 	})
 	if err != nil || len(hits) == 0 {
@@ -584,12 +659,11 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 	}
 
 	var sessID, agentID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+	if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
 		sessID, agentID = sess.ID, sess.AgentID
 	}
 
 	injStore := d.db.Injections()
-	proj := projectFromHook(in)
 	suppressed := injection.Suppressed(ctx, injStore, injection.KindObservation, proj, time.Now())
 
 	var kept []memory.SearchResult
@@ -641,23 +715,48 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 	_ = d.mem.RecordSurfaced(ctx, refIDs(refs))
 }
 
-// pathQueryTokens turns a file path into a search query: the last few
-// path segments split on separators, lowercased. "/Users/x/repo/internal/
-// storage/sessions.go" → "internal storage sessions go". The FTS layer
-// ORs the tokens, so any segment matching a correction's trigger context
-// or content surfaces it.
-func pathQueryTokens(p string) string {
+// pathQueryTokens turns the file an edit is about to write into a search
+// query: its path relative to the project root, last few segments split
+// on separators and punctuation, lowercased, with the extension and
+// generic layout directories dropped. "/Users/x/Code/repo/internal/
+// storage/sessions.go" under root "/Users/x/Code/repo" → "storage
+// sessions". The FTS layer ORs the tokens, so any segment matching a
+// correction's trigger context or content surfaces it.
+//
+// It used to keep the project directory and the extension, so the query
+// for any wayframer PHP file contained "wayframer" and "php" and matched
+// every memory mentioning either: "use DB_DATABASE=wayframer" fired on
+// controllers, models and markdown notes alike.
+func pathQueryTokens(p, root string) string {
+	if root != "" && filepath.IsAbs(p) {
+		if rel, err := filepath.Rel(root, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			p = rel
+		}
+	}
 	segs := strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })
+	if len(segs) == 0 {
+		return ""
+	}
 	if len(segs) > 4 {
 		segs = segs[len(segs)-4:]
+	}
+	last := len(segs) - 1
+	segs[last] = strings.TrimSuffix(segs[last], filepath.Ext(segs[last]))
+	// Layout directories say where a file lives in any project of its
+	// kind, not what it is about.
+	generic := map[string]bool{
+		"src": true, "internal": true, "cmd": true, "pkg": true, "lib": true, "app": true,
+		"resources": true, "js": true, "views": true, "components": true,
+		"composables": true, "public": true, "assets": true,
 	}
 	var toks []string
 	for _, s := range segs {
 		for _, t := range strings.FieldsFunc(s, func(r rune) bool {
 			return r == '.' || r == '_' || r == '-'
 		}) {
-			if len(t) > 1 {
-				toks = append(toks, strings.ToLower(t))
+			t = strings.ToLower(t)
+			if len(t) > 1 && !generic[t] {
+				toks = append(toks, t)
 			}
 		}
 	}
@@ -752,70 +851,16 @@ func walkStrings(v any, dst *[]string) {
 	}
 }
 
-// runHookPreCompact handles Claude Code's PreCompact event. Emits a
-// prewarm recovery block to stderr, which Claude Code feeds back into
-// the model's context — so mnemos state survives through the compaction
-// instead of being silently dropped. Without this, the agent keeps
-// working for at least one more turn on context that has lost all
-// mnemos observations, touches, and session goal.
-func runHookPreCompact(ctx context.Context, _ []string) error {
-	emitCompactionRecoveryBlock(ctx, os.Stderr, "PreCompact")
-	return nil
-}
+// runHookPreCompact and runHookPostCompact are kept as silent no-ops so
+// settings.json files still carrying the hooks earlier releases installed
+// keep working until `mnemos init` removes them. Both used to write a
+// recovery block to stderr; it never appeared in any transcript, while
+// every run logged its memories as surfaced on the recovery channel.
+// Recovery now runs from a SessionStart hook with the compact matcher,
+// whose output does reach the model.
+func runHookPreCompact(_ context.Context, _ []string) error { return nil }
 
-// runHookPostCompact handles Claude Code's PostCompact event. Emits the
-// same block to stderr for terminal visibility; unlike PreCompact,
-// PostCompact stderr is shown to the user only (not fed back to Claude).
-// The side effect a future Claude Code release might surface it; today
-// the primary value is a transcript-level record that compaction
-// happened and what mnemos looked like at that moment.
-func runHookPostCompact(ctx context.Context, _ []string) error {
-	emitCompactionRecoveryBlock(ctx, os.Stderr, "PostCompact")
-	return nil
-}
-
-// emitCompactionRecoveryBlock composes a prewarm block in the compaction-
-// recovery mode and writes it to w with a header naming the event. w is
-// injected so tests can capture the output without going through stderr.
-// Failure is always silent at the caller: a hook must not fail loudly.
-func emitCompactionRecoveryBlock(ctx context.Context, w io.Writer, event string) {
-	in := readHookStdin(os.Stdin)
-
-	d, err := loadDeps(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mnemos hook "+strings.ToLower(event)+":", err)
-		return
-	}
-	defer d.close()
-
-	proj := projectFromHook(in)
-
-	var sessID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
-		sessID = sess.ID
-	} else if err != nil && !errors.Is(err, session.ErrNotFound) {
-		fmt.Fprintln(os.Stderr, "mnemos hook "+strings.ToLower(event)+":", err)
-	}
-
-	pw := prewarm.NewService(prewarm.Config{
-		Observations: d.db.Observations(),
-		Sessions:     d.db.Sessions(),
-		Skills:       d.db.Skills(),
-		Touches:      d.db.Touches(),
-		Rumination:   d.rum,
-		Injections:   injection.NewLogger(d.db.Injections(), nil),
-	})
-	block, err := pw.Build(ctx, prewarm.Request{
-		Mode:      prewarm.ModeCompactionRecovery,
-		Project:   proj,
-		SessionID: sessID,
-	})
-	if err != nil || block == nil || block.Text == "" {
-		return
-	}
-
-	fmt.Fprintf(w, "[mnemos %s — recovery block]\n%s\n", event, block.Text)
-}
+func runHookPostCompact(_ context.Context, _ []string) error { return nil }
 
 // uniqueRuleNames deduplicates the rule names from the findings while
 // keeping order stable for reproducible stderr messages.

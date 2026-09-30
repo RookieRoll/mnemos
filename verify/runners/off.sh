@@ -12,9 +12,11 @@ trigger="$1"
 sandbox=$(mktemp -d -t mnemos-off)
 mkdir "$sandbox/mnemos"
 cd "$sandbox/mnemos"
+# claude runs as a child, not via exec, so this trap fires and the sandbox
+# is removed when the run ends.
 trap 'rm -rf "$sandbox"' EXIT
 
-MNEMOS_DISABLED=1 exec claude -p "$trigger" \
+MNEMOS_DISABLED=1 claude -p "$trigger" \
   --mcp-config /Users/andrefigueira/Code/mnemos/verify/mcp_off.json \
   --strict-mcp-config \
   --dangerously-skip-permissions \

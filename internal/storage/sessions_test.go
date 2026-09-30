@@ -119,6 +119,65 @@ func TestSessionListOpenScopesAndOrders(t *testing.T) {
 	}
 }
 
+func TestSessionHostIDRoundTripsAndScopesListOpenByHost(t *testing.T) {
+	db := openSessDB(t)
+	store := db.Sessions()
+	ctx := context.Background()
+
+	base := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	older := &session.Session{
+		ID: ulid.Make().String(), AgentID: "default", Project: "p",
+		StartedAt: base, HostSessionID: "claude-a",
+	}
+	newer := &session.Session{
+		ID: ulid.Make().String(), AgentID: "default", Project: "p",
+		StartedAt: base.Add(time.Second), HostSessionID: "claude-a",
+	}
+	closed := &session.Session{
+		ID: ulid.Make().String(), AgentID: "default", Project: "p",
+		StartedAt: base, HostSessionID: "claude-a",
+	}
+	otherHost := &session.Session{
+		ID: ulid.Make().String(), AgentID: "default", Project: "p",
+		StartedAt: base, HostSessionID: "claude-b",
+	}
+	unowned := &session.Session{
+		ID: ulid.Make().String(), AgentID: "default", Project: "p", StartedAt: base,
+	}
+	for _, s := range []*session.Session{older, newer, closed, otherHost, unowned} {
+		if err := store.Insert(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = store.Close(ctx, session.CloseInput{ID: closed.ID, Status: session.StatusOK})
+
+	got, err := store.Get(ctx, older.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HostSessionID != "claude-a" {
+		t.Errorf("host session id must round-trip, got %q", got.HostSessionID)
+	}
+	if got, _ := store.Get(ctx, unowned.ID); got.HostSessionID != "" {
+		t.Errorf("unowned session must read back with no host id, got %q", got.HostSessionID)
+	}
+
+	open, err := store.ListOpenByHost(ctx, "claude-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 2 {
+		t.Fatalf("want the 2 open claude-a sessions, got %d", len(open))
+	}
+	if open[0].ID != newer.ID {
+		t.Errorf("want newest first, got %s", open[0].ID)
+	}
+
+	if none, err := store.ListOpenByHost(ctx, ""); err != nil || len(none) != 0 {
+		t.Errorf("empty host id must match nothing, got %d rows, err %v", len(none), err)
+	}
+}
+
 func TestSessionCurrentNoneWhenAllClosed(t *testing.T) {
 	db := openSessDB(t)
 	store := db.Sessions()

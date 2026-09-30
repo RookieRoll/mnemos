@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -713,60 +712,6 @@ func TestSanitizeReasonDefaultsUnknown(t *testing.T) {
 	}
 }
 
-func TestEmitCompactionRecoveryBlockIncludesSessionContext(t *testing.T) {
-	withHome(t)
-	ctx := context.Background()
-
-	// Seed a session with a goal and a couple of observations so there is
-	// actually something to recover.
-	d, err := loadDeps(ctx)
-	if err != nil {
-		t.Fatalf("loadDeps: %v", err)
-	}
-	sess, err := d.sess.Open(ctx, session.OpenInput{Project: "mnemos", Goal: "ship compaction hooks"})
-	if err != nil {
-		t.Fatalf("open session: %v", err)
-	}
-	if _, err := d.mem.Save(ctx, memory.SaveInput{
-		Title:     "we chose pure-Go sqlite driver",
-		Content:   "modernc.org/sqlite keeps us CGO-free",
-		Project:   "mnemos",
-		Type:      memory.TypeDecision,
-		SessionID: sess.ID,
-	}); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	d.close()
-
-	var buf bytes.Buffer
-	withStdin(t, `{"hook_event_name":"PreCompact"}`, func() {
-		emitCompactionRecoveryBlock(ctx, &buf, "PreCompact")
-	})
-
-	got := buf.String()
-	if !strings.Contains(got, "[mnemos PreCompact — recovery block]") {
-		t.Errorf("output missing event header, got: %s", got)
-	}
-	if got == "[mnemos PreCompact — recovery block]\n\n" || strings.TrimSpace(got) == "[mnemos PreCompact — recovery block]" {
-		t.Errorf("recovery block should carry actual content, got: %q", got)
-	}
-}
-
-func TestEmitCompactionRecoveryBlockSilentWhenNothingToSay(t *testing.T) {
-	withHome(t)
-	ctx := context.Background()
-
-	// No session, no observations — prewarm returns an empty block and the
-	// hook should stay silent rather than emit a bare header.
-	var buf bytes.Buffer
-	withStdin(t, `{"hook_event_name":"PreCompact"}`, func() {
-		emitCompactionRecoveryBlock(ctx, &buf, "PreCompact")
-	})
-	if buf.Len() != 0 {
-		t.Errorf("empty store must produce no output, got: %q", buf.String())
-	}
-}
-
 func TestHookPreCompactDispatchesCleanly(t *testing.T) {
 	withHome(t)
 	ctx := context.Background()
@@ -827,16 +772,28 @@ func TestHookUserPromptEmptyPromptIsSilent(t *testing.T) {
 }
 
 func TestPathQueryTokens(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"/Users/x/Code/repo/internal/storage/sessions.go", "repo internal storage sessions go"},
-		{"internal/storage/sessions.go", "internal storage sessions go"},
-		{"main_test.go", "main test go"},
-		{"x", ""},
+	// t.TempDir is absolute on every OS; a bare leading separator is not
+	// absolute on Windows.
+	root := filepath.Join(t.TempDir(), "wayframer")
+	cases := []struct{ in, root, want string }{
+		{filepath.Join(root, "app", "Http", "Controllers", "SamController.php"), root, "http controllers samcontroller"},
+		{filepath.Join(root, "docs", "2026-09-29-policy-table.md"), root, "docs 2026 09 29 policy table"},
+		{filepath.Join(root, "internal", "storage", "sessions.go"), root, "storage sessions"},
+		{"internal/storage/sessions.go", "", "storage sessions"},
+		{"main_test.go", "", "main test"},
+		{"x", "", ""},
 	}
 	for _, c := range cases {
-		if got := pathQueryTokens(c.in); got != c.want {
-			t.Errorf("pathQueryTokens(%q) = %q, want %q", c.in, got, c.want)
+		if got := pathQueryTokens(c.in, c.root); got != c.want {
+			t.Errorf("pathQueryTokens(%q, %q) = %q, want %q", c.in, c.root, got, c.want)
 		}
+	}
+
+	// Outside the root the path's own last segments are used, so the
+	// project directory is not stripped.
+	outside := filepath.Join(filepath.Dir(root), "elsewhere", "scratch", "replay.py")
+	if got := pathQueryTokens(outside, root); !strings.HasSuffix(got, "elsewhere scratch replay") {
+		t.Errorf("pathQueryTokens(%q, %q) = %q, want it to end with the file's own segments", outside, root, got)
 	}
 }
 
@@ -950,5 +907,272 @@ func TestHookPreToolGuardrailStillBlocks(t *testing.T) {
 	}
 	if !strings.Contains(msg, "blocked") {
 		t.Errorf("unexpected guardrail message: %q", msg)
+	}
+}
+
+// openHostSession opens a session the way the SessionStart hook does for a
+// Claude Code conversation: scoped to a project and tagged with the host's
+// session_id.
+func openHostSession(t *testing.T, project, host, goal string) *session.Session {
+	t.Helper()
+	d, err := loadDeps(context.Background())
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	defer d.close()
+	sess, err := d.sess.Open(context.Background(), session.OpenInput{
+		Project: project, Goal: goal, HostSessionID: host,
+	})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	return sess
+}
+
+func getSession(t *testing.T, id string) *session.Session {
+	t.Helper()
+	d, err := loadDeps(context.Background())
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	defer d.close()
+	got, err := d.sess.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get session %s: %v", id, err)
+	}
+	return got
+}
+
+func TestHookUserPromptBackfillsGoalOnTheHostsSessionOnly(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+
+	mine := openHostSession(t, "mnemos", "claude-a", "")
+	// A terminal in another project opened later, so it is the newest open
+	// session anywhere. The old lookup backfilled this one.
+	other := openHostSession(t, "otherproj", "claude-b", "")
+
+	payload := hookPayload(t, map[string]any{
+		"hook_event_name": "UserPromptSubmit",
+		"session_id":      "claude-a",
+		"cwd":             filepath.Join(os.Getenv("HOME"), "code", "mnemos"),
+		"prompt":          "wire the host session id through the hooks",
+	})
+	withStdin(t, payload, func() {
+		if err := runHookUserPrompt(ctx, nil); err != nil {
+			t.Fatalf("hook: %v", err)
+		}
+	})
+
+	if got := getSession(t, mine.ID); got.Goal != "wire the host session id through the hooks" {
+		t.Errorf("the prompt's own session must get the goal, got %q", got.Goal)
+	}
+	if got := getSession(t, other.ID); got.Goal != "" {
+		t.Errorf("another project's session must not get the goal, got %q", got.Goal)
+	}
+}
+
+func TestHookSessionEndClosesOnlyTheHostsSession(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+
+	mine := openHostSession(t, "mnemos", "claude-a", "ship")
+	// Second terminal in the same repo, started seconds later: inside the
+	// project twin window, so only the host ID tells them apart.
+	sibling := openHostSession(t, "mnemos", "claude-b", "review")
+
+	payload := hookPayload(t, map[string]any{
+		"hook_event_name": "SessionEnd",
+		"session_id":      "claude-a",
+		"reason":          "logout",
+		"cwd":             filepath.Join(os.Getenv("HOME"), "code", "mnemos"),
+	})
+	withStdin(t, payload, func() {
+		if err := runHookSessionEnd(ctx, nil); err != nil {
+			t.Fatalf("hook: %v", err)
+		}
+	})
+
+	if got := getSession(t, mine.ID); got.EndedAt == nil {
+		t.Error("the ending conversation's session must be closed")
+	}
+	if got := getSession(t, sibling.ID); got.EndedAt != nil {
+		t.Error("the other terminal's session in the same project must stay open")
+	}
+}
+
+func TestHookPostToolStampsTouchWithTheHostsSession(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+
+	mine := openHostSession(t, "mnemos", "claude-a", "")
+	openHostSession(t, "otherproj", "claude-b", "")
+
+	cwd := filepath.Join(os.Getenv("HOME"), "code", "mnemos")
+	payload := hookPayload(t, map[string]any{
+		"hook_event_name": "PostToolUse",
+		"session_id":      "claude-a",
+		"cwd":             cwd,
+		"tool_name":       "Edit",
+		"tool_input":      map[string]any{"file_path": filepath.Join(cwd, "internal", "hook.go")},
+	})
+	withStdin(t, payload, func() {
+		if err := runHookPostTool(ctx, nil); err != nil {
+			t.Fatalf("hook: %v", err)
+		}
+	})
+
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	defer d.close()
+	files, err := d.db.Touches().SessionHot(ctx, mine.ID, 5)
+	if err != nil {
+		t.Fatalf("session hot: %v", err)
+	}
+	if len(files) != 1 || filepath.Base(files[0].Path) != "hook.go" {
+		t.Errorf("touch must be stamped with the host's session, got %+v", files)
+	}
+}
+
+func TestDeriveSessionSummaryIgnoresOtherSessionsFiles(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	defer d.close()
+	mine, _ := d.sess.Open(ctx, session.OpenInput{Project: "mnemos"})
+	other, _ := d.sess.Open(ctx, session.OpenInput{Project: "taken"})
+	for i := 0; i < 5; i++ {
+		// A busy session elsewhere: the old summary listed the globally
+		// hottest files, so every session read "touched Environment.ts".
+		_ = d.db.Touches().Record(ctx, memory.TouchInput{
+			Project: "taken", Path: "src/world/Environment.ts", SessionID: other.ID,
+		})
+	}
+	_ = d.db.Touches().Record(ctx, memory.TouchInput{
+		Project: "mnemos", Path: "cmd/mnemos/hook.go", SessionID: mine.ID,
+	})
+
+	got := deriveSessionSummary(ctx, d, mine.ID)
+	if !strings.Contains(got, "hook.go") {
+		t.Errorf("summary must name this session's file, got %q", got)
+	}
+	if strings.Contains(got, "Environment.ts") {
+		t.Errorf("summary must not name another session's files, got %q", got)
+	}
+}
+
+func TestIsSyntheticPrompt(t *testing.T) {
+	synthetic := []string{
+		"<task-notification> <task-id>b5jnk36wo</task-id> <summary>Monitor event</summary> </task-notification>",
+		"Another Claude session sent a message: <agent-message from=\"a94f\"> [Subagent hand-back] we tried X, going forward do Y",
+		"This session is being continued from a previous conversation that ran out of context. Summary: ...",
+		"[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.\n\n<task-notification>\n<task-id>a0</task-id>",
+		"  <command-name>/clear</command-name> ",
+		"<local-command-stdout>Set model to Opus</local-command-stdout>",
+		"[Request interrupted by user for tool use]",
+	}
+	for _, p := range synthetic {
+		if !isSyntheticPrompt(p) {
+			t.Errorf("want synthetic: %q", p)
+		}
+	}
+	typed := []string{
+		"the module order dropdown doesn't do anything please fix",
+		"<pasted_content id=\"0479\"> https://mitchs.ai </pasted_content> why is this slow",
+		// The tags only count near the top; a user quoting one later is typing.
+		"explain this log " + strings.Repeat("context ", 100) + "<task-notification> <agent-message",
+	}
+	for _, p := range typed {
+		if isSyntheticPrompt(p) {
+			t.Errorf("want user-typed: %q", p)
+		}
+	}
+}
+
+func TestHasSearchableContent(t *testing.T) {
+	cases := map[string]bool{
+		"yes":                                    false,
+		"show me":                                false,
+		"so we good?":                            false,
+		"i like c":                               false,
+		"keep going":                             false,
+		"ok go ahead please":                     false,
+		"fix tests":                              true,
+		"não está funcionando":                   true,
+		"ボタンが 動かない 直して":                          true,
+		"deploy all changes":                     true,
+		"open it in chrome for me to try it out": true,
+		"the module order dropdown doesn't do anything please fix": true,
+	}
+	for prompt, want := range cases {
+		if got := hasSearchableContent(prompt); got != want {
+			t.Errorf("hasSearchableContent(%q) = %v, want %v", prompt, got, want)
+		}
+	}
+}
+
+func TestHookUserPromptIgnoresSyntheticTurns(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+
+	sess := openHostSession(t, "mnemos", "claude-a", "")
+	// Correction-shaped language inside a subagent report used to trigger
+	// a capture directive and become the session goal.
+	payload := hookPayload(t, map[string]any{
+		"hook_event_name": "UserPromptSubmit",
+		"session_id":      "claude-a",
+		"cwd":             filepath.Join(os.Getenv("HOME"), "code", "mnemos"),
+		"prompt":          "<task-notification> <task-id>ad21</task-id> <result>we tried caching for 5 minutes, going forward use 30 seconds</result> </task-notification>",
+	})
+	var out string
+	withStdin(t, payload, func() {
+		out = captureStdout(t, func() {
+			if err := runHookUserPrompt(ctx, nil); err != nil {
+				t.Fatalf("hook: %v", err)
+			}
+		})
+	})
+	if out != "" {
+		t.Errorf("a synthetic turn must produce no output, got %q", out)
+	}
+	if got := getSession(t, sess.ID); got.Goal != "" {
+		t.Errorf("a synthetic turn must not become the session goal, got %q", got.Goal)
+	}
+}
+
+func TestHookUserPromptSkipsSearchForContentlessPrompts(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	for _, title := range []string{"react hooks", "docker compose", "css grid", "git rebase"} {
+		_, _ = d.mem.Save(ctx, memory.SaveInput{
+			Title: title, Content: "unrelated filler", Type: memory.TypeContext, Project: "mnemos",
+		})
+	}
+	_, _ = d.mem.Save(ctx, memory.SaveInput{
+		Title:   "so we good to ship on fridays",
+		Content: "we are good to ship on fridays so long as the smoke tests pass",
+		Type:    memory.TypeDecision, Project: "mnemos",
+	})
+	d.close()
+
+	var out string
+	withStdin(t, `{"hook_event_name":"UserPromptSubmit","prompt":"so we good?"}`, func() {
+		out = captureStdout(t, func() {
+			_ = runHookUserPrompt(ctx, nil)
+		})
+	})
+	if strings.Contains(out, promptMemoryHeader) {
+		t.Errorf("a prompt with no content words must not inject memory, got %q", out)
 	}
 }
