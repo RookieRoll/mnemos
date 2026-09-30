@@ -45,6 +45,8 @@ func (s *Service) Open(ctx context.Context, in OpenInput) (*Session, error) {
 		Project:   in.Project,
 		Goal:      strings.TrimSpace(in.Goal),
 		StartedAt: s.clock().UTC(),
+
+		HostSessionID: in.HostSessionID,
 	}
 	if err := s.store.Insert(ctx, sess); err != nil {
 		return nil, err
@@ -90,6 +92,81 @@ func (s *Service) Current(ctx context.Context, agentID string) (*Session, error)
 	return s.store.Current(ctx, agentID)
 }
 
+// Resolve finds the open session a hook event belongs to.
+//
+// The host's session ID is authoritative: Claude Code sends the same
+// session_id with every hook of one conversation, and SessionStart stored
+// it on the session it opened. When no session carries it (a conversation
+// opened before host IDs were recorded, or one resumed without a
+// SessionStart), the newest open session in the project is used, but only
+// if no other host conversation owns it. Without a host ID the newest open
+// session in the project is used.
+//
+// Resolve never crosses projects. Picking the newest open session anywhere
+// is how, with parallel terminals, most hook events were attributed to
+// another project's session. An empty project with no host match returns
+// ErrNotFound: an unattributed event is better than a misattributed one.
+func (s *Service) Resolve(ctx context.Context, hostSessionID, project string) (*Session, error) {
+	if hostSessionID != "" {
+		owned, err := s.store.ListOpenByHost(ctx, hostSessionID)
+		if err != nil {
+			return nil, err
+		}
+		if len(owned) > 0 {
+			return &owned[0], nil
+		}
+	}
+	if project == "" {
+		return nil, ErrNotFound
+	}
+	open, err := s.store.ListOpen(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	for i := range open {
+		if hostSessionID == "" || open[i].HostSessionID == "" {
+			return &open[i], nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// CloseForHost closes the session(s) a SessionEnd belongs to and returns
+// how many it closed. With a host ID it closes every open session carrying
+// that ID (duplicate SessionStart installs give one conversation more than
+// one), falling back to whatever Resolve picks. Without a host ID it falls
+// back to CloseAllOpen's newest-plus-twins rule for the project. in.ID is
+// ignored.
+func (s *Service) CloseForHost(ctx context.Context, hostSessionID, project string, in CloseInput) (int, error) {
+	if hostSessionID == "" {
+		if project == "" {
+			return 0, nil
+		}
+		return s.CloseAllOpen(ctx, project, in)
+	}
+	targets, err := s.store.ListOpenByHost(ctx, hostSessionID)
+	if err != nil {
+		return 0, err
+	}
+	if len(targets) == 0 {
+		sess, err := s.Resolve(ctx, hostSessionID, project)
+		if errors.Is(err, ErrNotFound) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		targets = []Session{*sess}
+	}
+	return s.closeEach(ctx, targets, in)
+}
+
+// ListOpenByHost returns the open sessions carrying hostSessionID, newest
+// first. Empty hostSessionID returns nothing.
+func (s *Service) ListOpenByHost(ctx context.Context, hostSessionID string) ([]Session, error) {
+	return s.store.ListOpenByHost(ctx, hostSessionID)
+}
+
 // ListOpen returns all open sessions, newest first, optionally scoped to
 // a project (empty means all projects).
 func (s *Service) ListOpen(ctx context.Context, project string) ([]Session, error) {
@@ -131,12 +208,20 @@ func (s *Service) CloseAllOpen(ctx context.Context, project string, in CloseInpu
 	// ListOpen is ordered started_at DESC, so open[0] is the newest and the
 	// most likely owner of the SessionEnd that got us here.
 	cutoff := open[0].StartedAt.Add(-TwinWindow)
-
-	closed := 0
+	twins := open[:0]
 	for _, sess := range open {
-		if sess.StartedAt.Before(cutoff) {
-			continue
+		if !sess.StartedAt.Before(cutoff) {
+			twins = append(twins, sess)
 		}
+	}
+	return s.closeEach(ctx, twins, in)
+}
+
+// closeEach closes every session in targets with the same close payload
+// and returns how many it closed.
+func (s *Service) closeEach(ctx context.Context, targets []Session, in CloseInput) (int, error) {
+	closed := 0
+	for _, sess := range targets {
 		ci := in
 		ci.ID = sess.ID
 		if err := s.store.Close(ctx, ci); err != nil {

@@ -102,7 +102,8 @@ func runHookUserPrompt(ctx context.Context, _ []string) error {
 	}
 	defer d.close()
 
-	sess, err := d.sess.Current(ctx, "")
+	project := projectFromHook(in)
+	sess, err := d.sess.Resolve(ctx, in.SessionID, project)
 	switch {
 	case err != nil && !errors.Is(err, session.ErrNotFound):
 		fmt.Fprintln(os.Stderr, "mnemos hook user-prompt:", err)
@@ -116,7 +117,7 @@ func runHookUserPrompt(ctx context.Context, _ []string) error {
 	if sess != nil {
 		sessID, agentID = sess.ID, sess.AgentID
 	}
-	emitPromptMemoryBlock(ctx, os.Stdout, d, in.Prompt, agentID, projectFromHook(in), sessID)
+	emitPromptMemoryBlock(ctx, os.Stdout, d, in.Prompt, agentID, project, sessID)
 	emitCaptureDirective(os.Stdout, in.Prompt)
 	return nil
 }
@@ -341,7 +342,7 @@ func runHookPostTool(ctx context.Context, _ []string) error {
 	// Best-effort session stamp. If nothing is open we still record the
 	// touch so the heat map does not lose data; SessionID just stays empty.
 	var sessID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+	if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
 		sessID = sess.ID
 	} else if err != nil && !errors.Is(err, session.ErrNotFound) {
 		fmt.Fprintln(os.Stderr, "mnemos hook post-tool:", err)
@@ -381,11 +382,12 @@ func filePathFromToolInput(m map[string]any) string {
 	return ""
 }
 
-// runHookSessionEnd handles Claude Code's SessionEnd event. Closes every
-// open mnemos session for the project (SessionStart hooks installed at
-// both user and project scope each open one, so there can be twins) with
-// a summary stitched from recent activity and a status derived from the
-// reason Claude Code supplied. No-ops when the agent already called
+// runHookSessionEnd handles Claude Code's SessionEnd event. Closes the
+// session(s) this conversation opened, found by the payload's session_id
+// (duplicate SessionStart installs can leave twins carrying the same one),
+// with a summary of that session's own activity and a status derived from
+// the reason Claude Code supplied. Another terminal's session in the same
+// project stays open. No-ops when the agent already called
 // mnemos_session_end properly — session.Close guards on ended_at IS NULL.
 // Finishes with a stale sweep so sessions orphaned by killed terminals
 // (no SessionEnd ever fires) don't stay open forever.
@@ -400,34 +402,17 @@ func runHookSessionEnd(ctx context.Context, _ []string) error {
 	defer d.close()
 
 	proj := projectFromHook(in)
-	status := sessionStatusFromReason(in.Reason)
-	tags := []string{"auto-closed:" + sanitizeReason(in.Reason)}
-
-	if proj == "" {
-		// No project derivable: closing all open sessions would hit other
-		// projects' live sessions, so fall back to the newest one only.
-		if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
-			closeSessionQuietly(ctx, d, session.CloseInput{
-				ID: sess.ID, Summary: deriveSessionSummary(ctx, d, sess.ID),
-				Status: status, OutcomeTags: tags,
-			})
-		} else if err != nil && !errors.Is(err, session.ErrNotFound) {
-			fmt.Fprintln(os.Stderr, "mnemos hook session-end:", err)
-		}
-		sweepStaleSessions(ctx, d)
-		return nil
+	closeIn := session.CloseInput{
+		Status:      sessionStatusFromReason(in.Reason),
+		OutcomeTags: []string{"auto-closed:" + sanitizeReason(in.Reason)},
 	}
-
-	open, err := d.sess.ListOpen(ctx, proj)
-	if err != nil {
+	// The summary is per session, so it has to be derived before the
+	// close; the resolved session is the one CloseForHost will pick.
+	if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
+		closeIn.Summary = deriveSessionSummary(ctx, d, sess.ID)
+	}
+	if _, err := d.sess.CloseForHost(ctx, in.SessionID, proj, closeIn); err != nil {
 		fmt.Fprintln(os.Stderr, "mnemos hook session-end:", err)
-		return nil
-	}
-	for _, sess := range open {
-		closeSessionQuietly(ctx, d, session.CloseInput{
-			ID: sess.ID, Summary: deriveSessionSummary(ctx, d, sess.ID),
-			Status: status, OutcomeTags: tags,
-		})
 	}
 
 	sweepStaleSessions(ctx, d)
@@ -471,10 +456,10 @@ func sweepStaleSessions(ctx context.Context, d *deps) {
 	}
 }
 
-// deriveSessionSummary builds a one-line recap from recent activity on the
-// session: counts observations and touches, names the top files. Best
-// effort — returns "" if either query fails. A small, deterministic
-// summary beats an empty close.
+// deriveSessionSummary builds a one-line recap from the session's own
+// activity: counts its observations and names the files it touched most.
+// Best effort — returns "" if the observation query fails. A small,
+// deterministic summary beats an empty close.
 func deriveSessionSummary(ctx context.Context, d *deps, sessID string) string {
 	obs, err := d.db.Observations().ListBySession(ctx, sessID)
 	if err != nil {
@@ -484,7 +469,7 @@ func deriveSessionSummary(ctx context.Context, d *deps, sessID string) string {
 	if n := len(obs); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d observation(s)", n))
 	}
-	if hot, err := d.db.Touches().Hot(ctx, "", "", 5); err == nil && len(hot) > 0 {
+	if hot, err := d.db.Touches().SessionHot(ctx, sessID, 5); err == nil && len(hot) > 0 {
 		files := make([]string, 0, len(hot))
 		for _, h := range hot {
 			files = append(files, filepath.Base(h.Path))
@@ -583,13 +568,13 @@ func emitPreToolMemory(ctx context.Context, w io.Writer, in hookInput) {
 		return
 	}
 
+	proj := projectFromHook(in)
 	var sessID, agentID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+	if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
 		sessID, agentID = sess.ID, sess.AgentID
 	}
 
 	injStore := d.db.Injections()
-	proj := projectFromHook(in)
 	suppressed := injection.Suppressed(ctx, injStore, injection.KindObservation, proj, time.Now())
 
 	var kept []memory.SearchResult
@@ -791,7 +776,7 @@ func emitCompactionRecoveryBlock(ctx context.Context, w io.Writer, event string)
 	proj := projectFromHook(in)
 
 	var sessID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+	if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
 		sessID = sess.ID
 	} else if err != nil && !errors.Is(err, session.ErrNotFound) {
 		fmt.Fprintln(os.Stderr, "mnemos hook "+strings.ToLower(event)+":", err)

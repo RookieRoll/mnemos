@@ -90,4 +90,6 @@ type Store interface {
 type TouchStore interface {
 	Record(ctx context.Context, in TouchInput) error
 	Hot(ctx context.Context, agentID, project string, limit int) ([]HotFile, error)
+	// SessionHot is Hot scoped to the touches recorded in one session.
+	SessionHot(ctx context.Context, sessionID string, limit int) ([]HotFile, error)
 }
