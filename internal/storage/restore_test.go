@@ -38,7 +38,7 @@ func TestRestoreObservationPreservesFidelity(t *testing.T) {
 		ContentHash: "deadbeef", Structured: `{"tried":"retry"}`,
 		Rationale:  "auth failures are not transient",
 		SourceKind: memory.SourceTool, TrustTier: memory.TrustRaw,
-		DerivedFrom: []string{"p1", "p2"},
+		DerivedFrom: []string{"p1", "p2"}, Pinned: true,
 	}
 
 	added, err := store.Restore(ctx, want)
@@ -62,6 +62,9 @@ func TestRestoreObservationPreservesFidelity(t *testing.T) {
 	}
 	if got.SourceKind != memory.SourceTool || got.TrustTier != memory.TrustRaw {
 		t.Errorf("provenance not preserved: source_kind=%v trust_tier=%v", got.SourceKind, got.TrustTier)
+	}
+	if got.Pinned != want.Pinned {
+		t.Errorf("pinned not preserved: got %v, want %v", got.Pinned, want.Pinned)
 	}
 	if got.ContentHash != "deadbeef" {
 		t.Errorf("content_hash not preserved: %q", got.ContentHash)

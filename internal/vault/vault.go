@@ -157,7 +157,7 @@ func (e *Exporter) writeObservation(ctx context.Context, o memory.Observation) e
 	path := filepath.Join(e.root, "observations", name)
 
 	var b strings.Builder
-	writeFrontmatter(&b, map[string]any{
+	fm := map[string]any{
 		"id":         o.ID,
 		"type":       string(o.Type),
 		"importance": o.Importance,
@@ -166,7 +166,11 @@ func (e *Exporter) writeObservation(ctx context.Context, o memory.Observation) e
 		"project":    o.Project,
 		"created":    o.CreatedAt.Format(time.RFC3339),
 		"accessed":   o.AccessCount,
-	})
+	}
+	if o.Pinned {
+		fm["pinned"] = true
+	}
+	writeFrontmatter(&b, fm)
 
 	fmt.Fprintf(&b, "# %s\n\n", o.Title)
 	if o.Rationale != "" {

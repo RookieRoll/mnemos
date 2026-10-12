@@ -169,8 +169,10 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 		SourceKind:  sourceKind,
 		TrustTier:   trustTier,
 		DerivedFrom: in.DerivedFrom,
+		Pinned:      in.Pinned,
 	}
-	if in.TTLDays > 0 {
+	// Pinning wins over TTL: core memory cannot silently expire.
+	if in.TTLDays > 0 && !in.Pinned {
 		t := now.AddDate(0, 0, in.TTLDays)
 		o.ExpiresAt = &t
 	}
@@ -195,8 +197,9 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 }
 
 // Restore reinserts an exported observation verbatim, preserving its ID,
-// bi-temporal timestamps, provenance, trust tier, access count, and content
-// hash. It is the fidelity-import counterpart to Save: where Save mints a new
+// bi-temporal timestamps, provenance, trust tier, pinned status, access
+// count, and content hash. It is the fidelity-import counterpart to Save:
+// where Save mints a new
 // ID, stamps fresh timestamps, runs content-hash dedup, and clamps the trust
 // tier, Restore does none of that. It is the trusted path for restoring a
 // full-store dump (the JSON equivalent of copying the database file), so it
@@ -314,6 +317,18 @@ const minPromoteReasonLen = 16
 // the user or a rumination/dream pass. TrustRaw → TrustSkill is allowed
 // (consolidation directly skips the curated step when a skill is the
 // right shape). Returns ErrNotFound if the observation doesn't exist.
+// Pin sets or unsets the pinned core-memory status of an observation.
+// Pinning clears any existing expiry; unpinning leaves expiry unset.
+func (s *Service) Pin(ctx context.Context, id string, pinned bool) (*Observation, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("pin: observation id is required")
+	}
+	if err := s.store.SetPinned(ctx, id, pinned); err != nil {
+		return nil, err
+	}
+	return s.store.Get(ctx, id)
+}
+
 func (s *Service) Promote(ctx context.Context, in PromoteInput) error {
 	if in.ID == "" {
 		return fmt.Errorf("promote: id is required")
@@ -419,10 +434,9 @@ func (s *Service) SearchWithMode(ctx context.Context, in SearchInput) ([]SearchR
 		}
 		raw[i].Relevance = rel
 		raw[i].PolicyFactor = policy
-		raw[i].Score = rel * policy
-		if raw[i].Score > ScoreCeiling {
-			raw[i].Score = ScoreCeiling
-		}
+		raw[i].GraphFactor = 1.0
+		raw[i].ContradictionFactor = 1.0
+		raw[i].Score = min(ScoreCeiling, rel*policy)
 		kept = append(kept, raw[i])
 	}
 
@@ -430,6 +444,93 @@ func (s *Service) SearchWithMode(ctx context.Context, in SearchInput) ([]SearchR
 	if vectorSignal {
 		mode = RetrievalHybrid
 	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
+
+	// --- 1-Hop Graph Expansion --------------------------------------
+	// Inspect initial top hits (up to top 3 with Score > 0.45) for live
+	// refines/derived_from neighbours.
+	var topIDs []string
+	parentMap := map[string]SearchResult{}
+	seenIDs := map[string]bool{}
+	for i := range kept {
+		seenIDs[kept[i].Observation.ID] = true
+	}
+	for i := 0; i < len(kept) && i < 3; i++ {
+		if kept[i].Score > 0.45 {
+			id := kept[i].Observation.ID
+			topIDs = append(topIDs, id)
+			parentMap[id] = kept[i]
+		}
+	}
+	if len(topIDs) > 0 {
+		if neighbours, err := s.store.ListNeighborsFor(ctx, topIDs, 2); err == nil {
+			for _, n := range neighbours {
+				if seenIDs[n.Observation.ID] {
+					continue
+				}
+				if !expansionVisible(in, n.Observation) {
+					continue
+				}
+				seenIDs[n.Observation.ID] = true
+				parent := parentMap[n.ParentID]
+				nHit := SearchResult{
+					Observation:         n.Observation,
+					Relevance:           parent.Relevance,
+					PolicyFactor:        parent.PolicyFactor,
+					GraphFactor:         0.70,
+					ContradictionFactor: 1.0,
+					ExpandedFrom:        parent.Observation.ID,
+					BM25:                0,
+					Snippet:             snippetFrom(n.Observation.Content),
+				}
+				nHit.Score = min(ScoreCeiling, nHit.Relevance*nHit.PolicyFactor*nHit.GraphFactor*nHit.ContradictionFactor)
+				kept = append(kept, nHit)
+			}
+		}
+	}
+
+	// --- Contradiction Scoring & Annotation -------------------------
+	// Check candidate hits against active contradicts edges.
+	if len(kept) > 0 {
+		candidateIDs := make([]string, len(kept))
+		for i := range kept {
+			candidateIDs[i] = kept[i].Observation.ID
+		}
+		if contradictors, err := s.store.ListContradictors(ctx, candidateIDs); err == nil && len(contradictors) > 0 {
+			byCand := map[string][]Contradictor{}
+			for _, c := range contradictors {
+				byCand[c.CandidateID] = append(byCand[c.CandidateID], c)
+			}
+			for i := range kept {
+				refs, ok := byCand[kept[i].Observation.ID]
+				if !ok || len(refs) == 0 {
+					continue
+				}
+				hasCuratedOrSkill := false
+				refIDs := make([]string, 0, len(refs))
+				var warnParts []string
+				for _, r := range refs {
+					refIDs = append(refIDs, r.Observation.ID)
+					if r.Observation.TrustTier == TrustCurated || r.Observation.TrustTier == TrustSkill {
+						hasCuratedOrSkill = true
+						warnParts = append(warnParts, fmt.Sprintf("%s: %s", r.Observation.ID, r.Observation.Title))
+					} else {
+						warnParts = append(warnParts, fmt.Sprintf("%s (unverified source): %s", r.Observation.ID, r.Observation.Title))
+					}
+				}
+				factor := 0.75
+				if hasCuratedOrSkill {
+					factor = 0.50
+				}
+				kept[i].ContradictionFactor = factor
+				kept[i].ContradictedBy = refIDs
+				warning := fmt.Sprintf("[WARNING: Contradicted by %s] ", strings.Join(warnParts, "; "))
+				kept[i].Snippet = warning + kept[i].Snippet
+				kept[i].Score = min(ScoreCeiling, kept[i].Relevance*kept[i].PolicyFactor*kept[i].GraphFactor*kept[i].ContradictionFactor)
+			}
+		}
+	}
+
 	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
 
 	if len(kept) > limit {
@@ -474,6 +575,42 @@ func (s *Service) unionVectorRecall(ctx context.Context, in SearchInput, qvec []
 		})
 	}
 	return cands
+}
+
+// expansionVisible mirrors the search's own visibility contract for a
+// graph-expanded neighbour. A link must never become a back door past the
+// query's scoping filters or the raw-tier quarantine: prewarm searches
+// constrain type and project, and surfacing quarantined raw content through
+// a link would breach the trust boundary the search filter enforces.
+func expansionVisible(in SearchInput, o Observation) bool {
+	if o.TrustTier == TrustRaw && !in.IncludeRaw {
+		return false
+	}
+	if in.Type != "" && string(o.Type) != string(in.Type) {
+		return false
+	}
+	if in.Project != "" && o.Project != in.Project {
+		return false
+	}
+	if in.AgentID != "" && o.AgentID != in.AgentID {
+		return false
+	}
+	if in.MinImportance > 0 && o.Importance < in.MinImportance {
+		return false
+	}
+	for _, t := range in.Tags {
+		found := false
+		for _, ot := range o.Tags {
+			if ot == t {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // snippetFrom renders a one-line preview for vector-recall hits, which —

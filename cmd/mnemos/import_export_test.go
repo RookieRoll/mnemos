@@ -29,6 +29,7 @@ func TestExportImportRoundTripPreservesFidelity(t *testing.T) {
 		AgentID: "agentX", Project: "projX", Title: "retry 401",
 		Content: "401 is auth, refresh the token", Type: memory.TypeCorrection,
 		Tags: []string{"auth"}, Importance: 9, SourceKind: memory.SourceTool,
+		Pinned: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -68,5 +69,8 @@ func TestExportImportRoundTripPreservesFidelity(t *testing.T) {
 	}
 	if got.Importance != 9 || got.Type != memory.TypeCorrection {
 		t.Errorf("fields not preserved: importance=%d type=%v", got.Importance, got.Type)
+	}
+	if !got.Pinned {
+		t.Errorf("pinned flag not preserved through CLI round trip")
 	}
 }

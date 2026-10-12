@@ -84,6 +84,15 @@ func (f *fakeMemoryReader) ListByTrustTier(ctx context.Context, agentID string, 
 func (f *fakeMemoryReader) Stats(ctx context.Context) (memory.Stats, error) {
 	return memory.Stats{}, nil
 }
+func (f *fakeMemoryReader) ListNeighborsFor(ctx context.Context, ids []string, perParent int) ([]memory.Neighbour, error) {
+	return nil, nil
+}
+func (f *fakeMemoryReader) ListContradictors(ctx context.Context, ids []string) ([]memory.Contradictor, error) {
+	return nil, nil
+}
+func (f *fakeMemoryReader) ListPinned(ctx context.Context, agentID, project string, limit int) ([]memory.Observation, error) {
+	return nil, nil
+}
 
 func TestService_Detect_SortsBySeverity(t *testing.T) {
 	reader := &fakeSkillReader{items: []skills.Skill{

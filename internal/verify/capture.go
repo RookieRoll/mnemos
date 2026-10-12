@@ -13,8 +13,8 @@ import (
 type CaptureFixture struct {
 	// SourcePath is the file the fixture was loaded from; see
 	// BehaviorFixture.SourcePath. Not part of the YAML.
-	SourcePath string             `yaml:"-"`
-	Arm        ArmCmd             `yaml:"arm"`
+	SourcePath string            `yaml:"-"`
+	Arm        ArmCmd            `yaml:"arm"`
 	Scenarios  []CaptureScenario `yaml:"scenarios"`
 }
 

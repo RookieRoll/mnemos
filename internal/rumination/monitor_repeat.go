@@ -122,11 +122,19 @@ func (m *CorrectionRepeatUnderSkillMonitor) Detect(ctx context.Context) ([]Candi
 		if !ok {
 			continue
 		}
-		// Count corrections recorded AFTER the skill was created — those
-		// are the ones proving the skill isn't holding up.
+		// Count corrections recorded at or after the skill's creation —
+		// those are the ones proving the skill isn't holding up. The
+		// boundary is inclusive on purpose: store timestamps have finite
+		// resolution and a skill plus the corrections that follow it
+		// routinely land on the same clock tick (Windows especially), so a
+		// strict After() silently dropped tied corrections and made this
+		// monitor lose races to tie-breaking (seen as flaky end-to-end
+		// runs). Ties count as post-creation; pre-creation corrections
+		// still do not — this monitor only flags for review, so erring
+		// toward review matches rumination's stance.
 		after := 0
 		for _, c := range obs {
-			if c.CreatedAt.After(sk.CreatedAt) {
+			if !c.CreatedAt.Before(sk.CreatedAt) {
 				after++
 			}
 		}

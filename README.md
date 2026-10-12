@@ -115,6 +115,14 @@ Skills rot. Threshold monitors flag the ones that drop in effectiveness, sit unt
 
 Facts have valid and invalid timestamps. The default ranker only surfaces currently valid facts, but old ones stay queryable for replay and audit. Same idea Graphiti uses, the implementation is just much simpler.
 
+### Pinned core memory
+
+Some things must not rot: the rule you keep re-explaining, the architectural call everyone forgets, the mistake you already paid for. Pin them — `mnemos_pin`, or `pinned` on save — and they stop decaying, survive the dream pass, drop any TTL, and always show up first in the prewarm block. Everything else decays at a rate matched to its type: conventions and architecture barely move, corrections fade fastest, so promoted skill outranks raw history on its own.
+
+### Graph recall and contradiction warnings
+
+Top hits expand one hop along `refines` and `derived_from` links at 0.70 the parent's score, so asking about the parent pulls in its refinements — and only inside your query's own filters, expansion can't smuggle quarantined raw notes past the search. When a candidate is refuted by a live `contradicts` edge its score halves and the snippet names the refuter; unverified raw-tier refutations only cost 25%. Every hit carries the full factor breakdown.
+
 ### Prompt-injection scanner
 
 Memory stores are a write-time attack surface. Anything that can write an observation can plant fake tool-call syntax, MCP spoofing payloads, zero-width unicode, bidi overrides, or instruction overrides, all the stuff that ends up in your context next session and looks like it came from you. The scanner runs at write time and either sanitises the content or wraps it in a `[MNEMOS: FLAGGED]` banner so the model can see it for what it is.
@@ -270,7 +278,7 @@ To undo: `pi remove D:\software\mnemos\pi`, then delete the directory.
 
 ### Any MCP-compatible client
 
-Stdio: point the client at `mnemos serve`. The server advertises 17 tools and 4 resources on the `initialize` handshake (21 tools when rumination is enabled).
+Stdio: point the client at `mnemos serve`. The server advertises 18 tools and 4 resources on the `initialize` handshake (22 tools when rumination is enabled).
 
 ### HTTP transport
 
@@ -307,7 +315,7 @@ Use `pkg/client` from Go or call `POST /v1/observations` directly. Reference: [d
 
 ## MCP tools
 
-`mnemos_save` `mnemos_search` `mnemos_get` `mnemos_delete` `mnemos_link` `mnemos_session_start` `mnemos_session_end` `mnemos_context` `mnemos_premortem` `mnemos_promote` `mnemos_correct` `mnemos_convention` `mnemos_touch` `mnemos_skill_match` `mnemos_skill_save` `mnemos_skill_score` `mnemos_stats`
+`mnemos_save` `mnemos_search` `mnemos_get` `mnemos_delete` `mnemos_link` `mnemos_pin` `mnemos_session_start` `mnemos_session_end` `mnemos_context` `mnemos_premortem` `mnemos_promote` `mnemos_correct` `mnemos_convention` `mnemos_touch` `mnemos_skill_match` `mnemos_skill_save` `mnemos_skill_score` `mnemos_stats`
 
 With `[rumination].enabled = true`: `mnemos_ruminate_list` `mnemos_ruminate_pack` `mnemos_ruminate_resolve` `mnemos_ruminate_dismiss`
 
@@ -322,7 +330,7 @@ Parameters: [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).
 path = "~/.mnemos/mnemos.db"
 
 [search]
-decay_rate         = 0.05
+decay_rate         = 0.05    # uniform override at non-default values; else the per-type decay table applies
 default_limit      = 20
 max_context_tokens = 2000
 hybrid_alpha       = 0.5    # 1.0 = pure BM25, 0.0 = pure vector

@@ -89,6 +89,33 @@ func TestCorrectionRepeatMonitor_IgnoresPreCreationCorrections(t *testing.T) {
 	}
 }
 
+func TestCorrectionRepeatMonitor_CountsSameInstantCorrections(t *testing.T) {
+	// Store timestamps have finite resolution: a skill and the corrections
+	// that follow it routinely land on the same clock tick (especially on
+	// Windows). Ties count as post-creation — the monitor flags for
+	// review, so it must not lose evidence to tie-breaking. This is the
+	// deterministic contract TestRumination_EndToEnd relies on.
+	skillCreated := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	skl := &fakeSkillLister{items: []skills.Skill{{
+		ID: "sk-oauth", Tags: []string{"oauth"}, CreatedAt: skillCreated, UpdatedAt: skillCreated,
+	}}}
+	corr := &fakeCorrectionLister{items: []memory.Observation{
+		{ID: "c1", Tags: []string{"oauth"}, Type: memory.TypeCorrection, Project: "p", CreatedAt: skillCreated},
+		{ID: "c2", Tags: []string{"oauth"}, Type: memory.TypeCorrection, Project: "p", CreatedAt: skillCreated},
+		{ID: "c3", Tags: []string{"oauth"}, Type: memory.TypeCorrection, Project: "p", CreatedAt: skillCreated},
+	}}
+
+	m := &CorrectionRepeatUnderSkillMonitor{Corrections: corr, Skills: skl}
+	got, err := m.Detect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("same-instant corrections count as post-creation: want 1 candidate, got %+v", got)
+	}
+}
+
 func TestCorrectionRepeatMonitor_BelowThresholdSilent(t *testing.T) {
 	skillCreated := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	after := skillCreated.Add(24 * time.Hour)

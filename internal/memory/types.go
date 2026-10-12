@@ -153,6 +153,15 @@ type Observation struct {
 	InvalidatedAt  *time.Time
 	ExpiresAt      *time.Time
 
+	// Pinned marks core memory. A pinned observation is immune to time
+	// decay (recency factor stays 1.0 whatever its type or age), skipped
+	// by the dream pass's idle-importance decay and TTL pruning, and
+	// guaranteed a Tier-0 slot in every prewarm block. Save and pin clear
+	// ExpiresAt so a core memory cannot silently expire; Restore keeps
+	// whatever the dump carried verbatim. Pinned never bypasses trust-tier
+	// quarantine: a pinned raw observation still waits for promotion.
+	Pinned bool
+
 	// ContentHash is the SHA-256 of normalised content. Used for dedup on
 	// save: identical content in the same (agent, project) scope bumps the
 	// existing observation's access count instead of creating a duplicate.
@@ -215,6 +224,12 @@ type SaveInput struct {
 	ValidUntil *time.Time
 	TTLDays    int
 
+	// Pinned requests core-memory status at save time: the observation
+	// opts out of decay and earns a Tier-0 prewarm slot. Pinning wins over
+	// TTLDays — when both are set the expiry is dropped (and reported in
+	// SaveResult) rather than left to silently expire a core memory.
+	Pinned bool
+
 	// Structured fields for type-specific data (e.g. correction.tried).
 	// JSON-encoded object; keys are type-specific.
 	Structured string
@@ -256,13 +271,17 @@ type SearchInput struct {
 // SearchResult is a ranked hit with a content snippet and score breakdown.
 // Agents receive these from Search; Get returns the full Observation.
 //
-// Score is the composite score contract: relevance x policy, bounded to
-// (0, ScoreCeiling], identical in meaning and scale across retrieval modes.
-// Relevance and PolicyFactor are its breakdown: Score = Relevance *
-// PolicyFactor (clamped to ScoreCeiling), so a consumer can always answer
-// "why did this pass the gate". BM25 stays on its raw magnitude scale —
-// it is the source signal, not the contract, and existing consumers that
-// reason about magnitudes keep reading it unchanged.
+// Score is the composite score contract, bounded to (0, ScoreCeiling],
+// identical in meaning and scale across retrieval modes:
+//
+//	Score = Relevance x PolicyFactor x GraphFactor x ContradictionFactor
+//
+// clamped to ScoreCeiling. Every factor is exposed on the result, so a
+// consumer can reconstruct the score by multiplying the breakdown back
+// together. Primary hits carry GraphFactor 1.0 and clean hits carry
+// ContradictionFactor 1.0. BM25 stays on its raw magnitude scale — it is
+// the source signal, not the contract, and existing consumers that reason
+// about magnitudes keep reading it unchanged.
 type SearchResult struct {
 	Observation Observation
 	Score       float64
@@ -271,8 +290,22 @@ type SearchResult struct {
 	// PolicyFactor is the non-relevance multiplier (importance x recency
 	// x access x project affinity).
 	PolicyFactor float64
-	BM25        float64
-	Snippet     string
+	// GraphFactor is 1.0 for primary hits and 0.70 per 1-hop expansion:
+	// results derived from a parent candidate inherit the parent's
+	// relevance and policy breakdown scaled by this factor.
+	GraphFactor float64
+	// ContradictionFactor is 1.0 when no live refutation exists, 0.5 when
+	// a curated or skill-tier observation contradicts this hit, and 0.75
+	// when the refutation comes only from raw-tier observations.
+	ContradictionFactor float64
+	// ExpandedFrom names the parent hit whose graph expansion produced
+	// this result. Empty for primary hits.
+	ExpandedFrom string
+	// ContradictedBy lists the IDs of the live observations contradicting
+	// this hit. Empty when nothing refutes it.
+	ContradictedBy []string
+	BM25           float64
+	Snippet        string
 }
 
 // RetrievalMode reports which retrieval path actually decided a query's
@@ -351,6 +384,27 @@ type LinkEdge struct {
 	TargetCreatedAt time.Time
 	TargetTrustTier TrustTier
 	LinkedAt        time.Time
+}
+
+// Neighbour is one graph-expansion hit: a live observation reachable from
+// a retrieved parent candidate along a typed link. Search scores
+// neighbours as a discounted extension of their parent, never as
+// independent recall hits — the parent supplies the relevance.
+type Neighbour struct {
+	// ParentID is the retrieved candidate the expansion started from.
+	ParentID string
+	// Observation is the live neighbour itself.
+	Observation Observation
+}
+
+// Contradictor pairs a retrieved candidate with a live observation that
+// refutes it along a "contradicts" edge (either direction). The refuter's
+// trust tier carries how heavily to weigh the refutation.
+type Contradictor struct {
+	// CandidateID is the retrieved candidate being refuted.
+	CandidateID string
+	// Observation is the live refuting observation.
+	Observation Observation
 }
 
 // FileTouch records that an agent touched a file during a session.

@@ -58,9 +58,9 @@ func TestNormBM25Transform(t *testing.T) {
 
 func TestNormCosClipping(t *testing.T) {
 	cases := []struct {
-		name     string
+		name      string
 		c, lo, hi float64
-		want     float64
+		want      float64
 	}{
 		{"below window", 0.05, 0.2, 0.8, 0},
 		{"at low edge", 0.2, 0.2, 0.8, 0},
@@ -81,11 +81,11 @@ func TestNormCosClipping(t *testing.T) {
 func TestCombineRelevanceRenormalises(t *testing.T) {
 	bm25, cos := 0.8, 0.2
 	cases := []struct {
-		name      string
-		nBM25     *float64
-		nCos      *float64
-		alpha     float64
-		want      float64
+		name  string
+		nBM25 *float64
+		nCos  *float64
+		alpha float64
+		want  float64
 	}{
 		{"keyword signal alone wins outright", &bm25, nil, 0.5, 0.8},
 		{"vector signal alone wins outright", nil, &cos, 0.5, 0.2},

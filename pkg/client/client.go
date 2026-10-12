@@ -74,6 +74,7 @@ type SaveInput struct {
 	SessionID  string   `json:"SessionID,omitempty"`
 	Rationale  string   `json:"Rationale,omitempty"`
 	Structured string   `json:"Structured,omitempty"`
+	Pinned     bool     `json:"Pinned,omitzero"`
 }
 
 // SaveResult is the response from POST /v1/observations.
@@ -93,6 +94,7 @@ type Observation struct {
 	AccessCount int       `json:"AccessCount"`
 	Project     string    `json:"Project"`
 	SessionID   string    `json:"SessionID"`
+	Pinned      bool      `json:"Pinned"`
 	CreatedAt   time.Time `json:"CreatedAt"`
 }
 
@@ -118,12 +120,16 @@ type SearchInput struct {
 // are the breakdown (Score = Relevance x PolicyFactor, clamped); BM25
 // stays on its raw magnitude scale for callers that reason about it.
 type SearchHit struct {
-	Observation   Observation `json:"Observation"`
-	Score         float64     `json:"Score"`
-	Relevance     float64     `json:"Relevance"`
-	PolicyFactor  float64     `json:"PolicyFactor"`
-	BM25          float64     `json:"BM25"`
-	Snippet       string      `json:"Snippet"`
+	Observation         Observation `json:"Observation"`
+	Score               float64     `json:"Score"`
+	Relevance           float64     `json:"Relevance"`
+	PolicyFactor        float64     `json:"PolicyFactor"`
+	GraphFactor         float64     `json:"GraphFactor"`
+	ContradictionFactor float64     `json:"ContradictionFactor"`
+	ExpandedFrom        string      `json:"ExpandedFrom"`
+	ContradictedBy      []string    `json:"ContradictedBy"`
+	BM25                float64     `json:"BM25"`
+	Snippet             string      `json:"Snippet"`
 }
 
 // SessionStartInput is the payload for POST /v1/sessions.
@@ -169,6 +175,16 @@ func (c *Client) Get(ctx context.Context, id string) (*Observation, error) {
 // Delete removes an observation by ID.
 func (c *Client) Delete(ctx context.Context, id string) error {
 	return c.do(ctx, "DELETE", "/v1/observations/"+id, nil, nil)
+}
+
+// Pin sets or unsets the pinned core-memory status of an observation.
+func (c *Client) Pin(ctx context.Context, id string, pinned bool) (*Observation, error) {
+	var out Observation
+	payload := map[string]bool{"pinned": pinned}
+	if err := c.do(ctx, "POST", "/v1/observations/"+id+"/pin", payload, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Search runs a ranked memory search.

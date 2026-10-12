@@ -63,3 +63,84 @@ func TestHashContentSensitiveToType(t *testing.T) {
 		t.Errorf("different types should hash differently")
 	}
 }
+
+func TestDecayRateFor_AllTypes(t *testing.T) {
+	r := NewRanker(DefaultRankParams())
+	expected := map[ObsType]float64{
+		TypeConvention:   0.002,
+		TypeArchitecture: 0.002,
+		TypeDecision:     0.002,
+		TypePattern:      0.030,
+		TypePreference:   0.030,
+		TypeSemantic:     0.030,
+		TypeBugfix:       0.050,
+		TypeContext:      0.050,
+		TypeEpisodic:     0.050,
+		TypeDream:        0.050,
+		TypeCorrection:   0.100,
+		TypeProcedural:   0.050,
+	}
+	for _, typ := range AllTypes {
+		want := expected[typ]
+		if want == 0 {
+			want = 0.050
+		}
+		got := r.DecayRateFor(typ)
+		if math.Abs(got-want) > 1e-6 {
+			t.Errorf("type %q: got decay rate %v, want %v", typ, got, want)
+		}
+	}
+
+	// Custom override in params is respected.
+	custom := NewRanker(RankParams{DecayRate: 0.08, ImportanceWeight: 0.5, AccessBoost: 0.1})
+	for _, typ := range AllTypes {
+		if got := custom.DecayRateFor(typ); got != 0.08 {
+			t.Errorf("custom params should override table: got %v, want 0.08", got)
+		}
+	}
+}
+
+func TestPinnedBypassesDecay(t *testing.T) {
+	r := NewRanker(DefaultRankParams())
+	now := time.Now().UTC()
+	oldTime := now.AddDate(0, 0, -180)
+
+	pinned := Observation{Importance: 5, CreatedAt: oldTime, Pinned: true, Type: TypeCorrection}
+	fresh := Observation{Importance: 5, CreatedAt: now, Pinned: false, Type: TypeCorrection}
+
+	scorePinned := r.Score(pinned, 1.0, now)
+	scoreFresh := r.Score(fresh, 1.0, now)
+
+	if math.Abs(scorePinned-scoreFresh) > 1e-6 {
+		t.Errorf("pinned 180-day observation should match fresh: pinned=%v, fresh=%v", scorePinned, scoreFresh)
+	}
+}
+
+func TestTypeDifferentiatedDecayRates(t *testing.T) {
+	r := NewRanker(DefaultRankParams())
+	now := time.Now().UTC()
+
+	// 1. Convention at 60 days maintains > 0.99 recency
+	t60 := now.AddDate(0, 0, -60)
+	conv := Observation{Importance: 10, CreatedAt: t60, Type: TypeConvention}
+	convFactor := r.PolicyFactor(conv, now)
+	// For importance 10 (multiplier 1.0) and access 0 (multiplier 1.0), factor = recency
+	if convFactor < 0.99 {
+		t.Errorf("convention at 60 days should keep recency factor > 0.99, got %v", convFactor)
+	}
+
+	// 2. Correction at 14 days drops below 0.77 recency (15^-0.10 ≈ 0.763)
+	t14 := now.AddDate(0, 0, -14)
+	corr := Observation{Importance: 10, CreatedAt: t14, Type: TypeCorrection}
+	corrFactor := r.PolicyFactor(corr, now)
+	if corrFactor >= 0.77 {
+		t.Errorf("correction at 14 days should decay below 0.77, got %v", corrFactor)
+	}
+
+	// 3. At 60 days, durable types outrank standard and correction types
+	bug := Observation{Importance: 10, CreatedAt: t60, Type: TypeBugfix}
+	bugFactor := r.PolicyFactor(bug, now)
+	if convFactor <= bugFactor {
+		t.Errorf("convention (%v) must outrank bugfix (%v) at 60 days", convFactor, bugFactor)
+	}
+}

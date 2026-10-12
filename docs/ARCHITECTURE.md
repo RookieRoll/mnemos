@@ -46,10 +46,10 @@ Key design calls:
 
 ## Memory service
 
-**Score contract** (spec: `memory-retrieval`). Every search result's `Score` is
+**Score contract** (specs: `memory-retrieval`, `memory-lifecycle-retrieval`). Every search result's `Score` is
 
 ```
-Score = relevance × policy,  bounded to (0, 1.2]
+Score = clamp(relevance × policy × graph_factor × contradiction_factor, (0, 1.2])
 
 relevance = weighted mean of per-source [0,1] relevance over available signals
             n_bm25 = b / (b + 8)                     # saturating; b = raw BM25 magnitude
@@ -57,10 +57,31 @@ relevance = weighted mean of per-source [0,1] relevance over available signals
 policy    = importance_weight × recency_factor × access_factor × cross_project_penalty
 
 importance_weight     = 0.5 + 0.5 × (importance / 10)   # 0.55..1.0
-recency_factor        = (1 + age_days)^(-decay_rate)    # default 0.05
+recency_factor        = (1 + age_days)^(-decay_rate)    # exactly 1.0 when pinned
 access_factor         = 1 + 0.1 × ln(1 + access_count)  # ACT-R base-level activation
 cross_project_penalty = 0.05                            # other-project hits (PreferProject)
+
+graph_factor          = 1.0 for primary hits; 0.70 for 1-hop neighbours (refines/derived_from)
+contradiction_factor  = 1.0 clean; 0.50 if curated/skill contradicts; 0.75 if raw-only refutes
 ```
+
+**Type-differentiated decay and pinned lifecycle.** Rather than a single flat decay slope, `decay_rate` reflects cognitive multi-sector persistence:
+- `convention`, `architecture`, `decision`: `0.002` (year-scale half-life; core architectural facts do not rot)
+- `pattern`, `preference`, `semantic`: `0.030` (slow decay)
+- `bugfix`, `context`, `episodic`, `dream`: `0.050` (standard default)
+- `correction`: `0.100` (accelerated fade unless reinforced or promoted)
+
+**Pinned core memory (`pinned = true`):**
+- Recency factor is held at `1.0` (zero time decay regardless of type or age).
+- Exempt from idle-importance decay in the dream pass (`DecayImportance AND pinned = 0`).
+- Pinning clears `expires_at` so core memories cannot silently be pruned by TTL.
+- Guaranteed Tier-0 slot at the top of every prewarm block (up to 150 tokens).
+- Does *not* bypass trust-tier quarantine (`raw` pinned notes stay quarantined).
+
+**Expansion stays inside the query's contract.** A graph neighbour is never a
+back door past the search filters: expanded neighbours pass the same raw-tier
+quarantine and type/project/agent/importance/tag constraints as primary hits,
+and they never override their parent's score.
 
 The scale is identical in keyword-only and hybrid retrieval — that is the
 contract's whole point: a consumer threshold (the prompt hook's floor) means
@@ -118,7 +139,7 @@ Pipeline, in order:
 
 ## MCP
 
-We use the [official Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.5.x, maintained in collaboration with Google). Each tool is registered via `mcp.AddTool[In, Out]` with a typed argument struct — JSON schemas are inferred from `json` and `jsonschema` struct tags, and the SDK validates inputs before invoking the handler. Our `internal/mcp` package is a thin wrapping layer (~750 LOC) that owns (a) the Config + NewServer wiring, (b) 15 core tool handlers plus 4 optional rumination handlers, and (c) the 3 resource handlers. Protocol framing, JSON-RPC, version negotiation, cancellation, and transport plumbing are all the SDK's job.
+We use the [official Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.5.x, maintained in collaboration with Google). Each tool is registered via `mcp.AddTool[In, Out]` with a typed argument struct — JSON schemas are inferred from `json` and `jsonschema` struct tags, and the SDK validates inputs before invoking the handler. Our `internal/mcp` package is a thin wrapping layer (~750 LOC) that owns (a) the Config + NewServer wiring, (b) 18 core tool handlers plus 4 optional rumination handlers, and (c) the 3 resource handlers. Protocol framing, JSON-RPC, version negotiation, cancellation, and transport plumbing are all the SDK's job.
 
 Resources (`mnemos://session/current`, `mnemos://skills/index`, `mnemos://stats`) are read-only JSON snapshots.
 

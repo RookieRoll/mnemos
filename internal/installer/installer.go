@@ -302,7 +302,8 @@ func asStringMap(v any) map[string]any {
 	return map[string]any{}
 }
 
-func desiredEntry(entry ServerEntry) map[string]any {	out := map[string]any{"command": entry.Command}
+func desiredEntry(entry ServerEntry) map[string]any {
+	out := map[string]any{"command": entry.Command}
 	if len(entry.Args) > 0 {
 		args := make([]any, len(entry.Args))
 		for i, a := range entry.Args {

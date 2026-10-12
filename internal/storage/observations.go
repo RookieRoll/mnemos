@@ -25,7 +25,8 @@ const obsColumns = `
 	invalidated_at, expires_at,
 	content_hash, structured, rationale,
 	embedding, embedding_model, last_exported_at,
-	source_kind, trust_tier, derived_from`
+	source_kind, trust_tier, derived_from,
+	pinned`
 
 const selectObsSQL = `SELECT ` + obsColumns + ` FROM observations`
 
@@ -66,8 +67,8 @@ func (s *obsStore) Insert(ctx context.Context, o *memory.Observation) error {
 			created_at, valid_from, valid_until, expires_at,
 			content_hash, structured, rationale,
 			embedding, embedding_model,
-			source_kind, trust_tier, derived_from
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			source_kind, trust_tier, derived_from, pinned
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		o.ID,
 		nullableStr(o.SessionID),
 		o.AgentID,
@@ -89,6 +90,7 @@ func (s *obsStore) Insert(ctx context.Context, o *memory.Observation) error {
 		string(sourceKind),
 		string(trustTier),
 		string(derived),
+		pinnedInt(o.Pinned),
 	)
 	if err != nil {
 		return fmt.Errorf("insert observation: %w", err)
@@ -133,8 +135,8 @@ func (s *obsStore) Restore(ctx context.Context, o *memory.Observation) (bool, er
 			created_at, valid_from, valid_until, invalidated_at, expires_at,
 			content_hash, structured, rationale,
 			embedding, embedding_model,
-			source_kind, trust_tier, derived_from, last_exported_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			source_kind, trust_tier, derived_from, last_exported_at, pinned
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		o.ID,
 		nullableStr(o.SessionID),
 		agentID,
@@ -160,6 +162,7 @@ func (s *obsStore) Restore(ctx context.Context, o *memory.Observation) (bool, er
 		string(trustTier),
 		string(derived),
 		nullableTime(o.LastExportedAt),
+		pinnedInt(o.Pinned),
 	)
 	if err != nil {
 		return false, fmt.Errorf("restore observation: %w", err)
@@ -232,6 +235,27 @@ func (s *obsStore) SetTrustTier(ctx context.Context, id string, tier memory.Trus
 		string(tier), id)
 	if err != nil {
 		return fmt.Errorf("set trust tier: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return memory.ErrNotFound
+	}
+	return nil
+}
+
+// SetPinned sets or unsets the pinned core-memory flag. Pinning clears any
+// existing expiry (so core memory cannot be pruned by TTL); unpinning leaves
+// expiry unset.
+func (s *obsStore) SetPinned(ctx context.Context, id string, pinned bool) error {
+	var query string
+	if pinned {
+		query = `UPDATE observations SET pinned = 1, expires_at = NULL WHERE id = ?`
+	} else {
+		query = `UPDATE observations SET pinned = 0 WHERE id = ?`
+	}
+	res, err := s.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("set pinned: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
@@ -415,6 +439,34 @@ func (s *obsStore) ListLinks(ctx context.Context, linkType memory.LinkType, agen
 	return out, rows.Err()
 }
 
+// ListPinned returns live, unquarantined pinned observations in scope,
+// ordered by importance desc then created_at asc.
+func (s *obsStore) ListPinned(ctx context.Context, agentID, project string, limit int) ([]memory.Observation, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	now := time.Now().UTC()
+	query := selectObsSQL + ` WHERE pinned = 1 AND trust_tier != 'raw' AND ` + liveObsSQL("")
+	args := []any{now, now}
+	if agentID != "" {
+		query += ` AND agent_id = ?`
+		args = append(args, agentID)
+	}
+	if project != "" {
+		query += ` AND (project = ? OR project IS NULL OR project = '')`
+		args = append(args, project)
+	}
+	query += ` ORDER BY importance DESC, created_at ASC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list pinned: %w", err)
+	}
+	defer rows.Close()
+	return scanObsList(rows)
+}
+
 // ListByTrustTier returns live observations at the given tier, oldest
 // first. The StaleRawObservationMonitor uses this to surface raw-tier
 // observations that have been sitting in quarantine too long without a
@@ -443,7 +495,7 @@ func (s *obsStore) ListByTrustTier(ctx context.Context, agentID string, tier mem
 
 func (s *obsStore) Prune(ctx context.Context, now time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM observations WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+		`DELETE FROM observations WHERE pinned = 0 AND expires_at IS NOT NULL AND expires_at <= ?`,
 		now.UTC())
 	if err != nil {
 		return 0, fmt.Errorf("prune: %w", err)
@@ -495,6 +547,9 @@ func (s *obsStore) ListByTitleSimilarity(ctx context.Context, agentID, title str
 	return scanObsList(rows)
 }
 
+// DecayImportance lowers importance on observations idle past staleDays,
+// skipping pinned rows: core memory is exempt from the dream pass's idle
+// decay, part of the pinned lifecycle (docs/ARCHITECTURE.md).
 func (s *obsStore) DecayImportance(ctx context.Context, staleDays int, amount int) (int64, error) {
 	if staleDays <= 0 || amount <= 0 {
 		return 0, nil
@@ -504,6 +559,7 @@ func (s *obsStore) DecayImportance(ctx context.Context, staleDays int, amount in
 		UPDATE observations
 		   SET importance = MAX(1, importance - ?)
 		 WHERE importance > 1
+		   AND pinned = 0
 		   AND COALESCE(last_accessed_at, created_at) < ?`,
 		amount, cutoff)
 	if err != nil {
@@ -676,6 +732,146 @@ func (s *obsStore) MarkExported(ctx context.Context, id string, at time.Time) er
 	return nil
 }
 
+// ListNeighborsFor returns live observations reachable from the given
+// candidate IDs along the expansion edge set: `refines` link rows and
+// `derived_from` provenance references, each followed in both directions
+// (so a candidate's refinements, its refiners, its derivation parents,
+// and the observations derived from it all surface). Results are ordered
+// deterministically (parent, neighbour created_at, neighbour id) and
+// capped at perParent entries per parent (no cap when perParent <= 0), so
+// graph expansion is reproducible run to run.
+func (s *obsStore) ListNeighborsFor(ctx context.Context, ids []string, perParent int) ([]memory.Neighbour, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	ph := placeholders(len(ids))
+	query := `
+		SELECT e.parent_id, ` + prefixed("o", obsColumns) + `
+		  FROM (
+		        SELECT l.source_id AS parent_id, l.target_id AS nb_id
+		          FROM observation_links l
+		         WHERE l.link_type = ? AND l.source_id IN (` + ph + `)
+		        UNION
+		        SELECT l.target_id, l.source_id
+		          FROM observation_links l
+		         WHERE l.link_type = ? AND l.target_id IN (` + ph + `)
+		        UNION
+		        SELECT c.id, je.value
+		          FROM observations c, json_each(c.derived_from) je
+		         WHERE c.id IN (` + ph + `)
+		        UNION
+		        SELECT je.value, d.id
+		          FROM observations d, json_each(d.derived_from) je
+		         WHERE je.value IN (` + ph + `)
+		       ) e
+		  JOIN observations o ON o.id = e.nb_id
+		 WHERE ` + liveObsSQL("o") + `
+		 ORDER BY e.parent_id, o.created_at, o.id`
+	args := make([]any, 0, 4*len(ids)+4)
+	args = append(args, string(memory.LinkRefines))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, string(memory.LinkRefines))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, now, now)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list neighbours: %w", err)
+	}
+	defer rows.Close()
+
+	counts := map[string]int{}
+	var out []memory.Neighbour
+	for rows.Next() {
+		var parentID string
+		o := &memory.Observation{}
+		d := newObsScanDest(o)
+		if err := rows.Scan(append([]any{&parentID}, d.args()...)...); err != nil {
+			return nil, fmt.Errorf("scan neighbour: %w", err)
+		}
+		d.finalise()
+		if perParent > 0 && counts[parentID] >= perParent {
+			continue
+		}
+		counts[parentID]++
+		out = append(out, memory.Neighbour{
+			ParentID:    parentID,
+			Observation: *o,
+		})
+	}
+	return out, rows.Err()
+}
+
+// ListContradictors returns live `contradicts` refutations of the given
+// candidate IDs, following the edge in both directions: the candidate may
+// sit at either endpoint. Each entry pairs the candidate with the live
+// refuting observation; its trust tier carries how much weight the
+// refutation deserves. Ordered by (candidate id, refuter id).
+func (s *obsStore) ListContradictors(ctx context.Context, ids []string) ([]memory.Contradictor, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	ph := placeholders(len(ids))
+	query := `
+		SELECT e.candidate_id, ` + prefixed("o", obsColumns) + `
+		  FROM (
+		        SELECT source_id AS candidate_id, target_id AS other_id
+		          FROM observation_links
+		         WHERE link_type = ? AND source_id IN (` + ph + `)
+		        UNION
+		        SELECT target_id AS candidate_id, source_id AS other_id
+		          FROM observation_links
+		         WHERE link_type = ? AND target_id IN (` + ph + `)
+		       ) e
+		  JOIN observations o ON o.id = e.other_id
+		 WHERE ` + liveObsSQL("o") + `
+		 ORDER BY e.candidate_id, e.other_id`
+	args := make([]any, 0, 2*len(ids)+4)
+	args = append(args, string(memory.LinkContradicts))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, string(memory.LinkContradicts))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, now, now)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list contradictors: %w", err)
+	}
+	defer rows.Close()
+
+	var out []memory.Contradictor
+	for rows.Next() {
+		var candidateID string
+		o := &memory.Observation{}
+		d := newObsScanDest(o)
+		if err := rows.Scan(append([]any{&candidateID}, d.args()...)...); err != nil {
+			return nil, fmt.Errorf("scan contradictor: %w", err)
+		}
+		d.finalise()
+		out = append(out, memory.Contradictor{
+			CandidateID: candidateID,
+			Observation: *o,
+		})
+	}
+	return out, rows.Err()
+}
+
 // --- scanners -----------------------------------------------------------
 
 type obsScanDest struct {
@@ -690,6 +886,7 @@ type obsScanDest struct {
 	embedding                 *[]byte
 	sourceKind, trustTier     *string
 	derivedFromJSON           *string
+	pinned                    *int64
 }
 
 func newObsScanDest(o *memory.Observation) obsScanDest {
@@ -711,6 +908,7 @@ func newObsScanDest(o *memory.Observation) obsScanDest {
 		sourceKind:      new(string),
 		trustTier:       new(string),
 		derivedFromJSON: new(string),
+		pinned:          new(int64),
 	}
 }
 
@@ -724,6 +922,7 @@ func (d obsScanDest) args() []any {
 		d.contentHash, d.structured, d.rationale,
 		d.embedding, d.embeddingModel, d.lastExportedAt,
 		d.sourceKind, d.trustTier, d.derivedFromJSON,
+		d.pinned,
 	}
 }
 
@@ -744,6 +943,7 @@ func (d obsScanDest) finalise() {
 	d.o.SourceKind = memory.SourceKind(*d.sourceKind)
 	d.o.TrustTier = memory.TrustTier(*d.trustTier)
 	_ = json.Unmarshal([]byte(*d.derivedFromJSON), &d.o.DerivedFrom)
+	d.o.Pinned = *d.pinned != 0
 }
 
 func scanObs(row scanner) (*memory.Observation, error) {
@@ -782,6 +982,21 @@ func scanObsList(rows *sql.Rows) ([]memory.Observation, error) {
 }
 
 // --- helpers ------------------------------------------------------------
+
+// pinnedInt maps the pinned flag to its SQLite INTEGER form (the column is
+// INTEGER CHECK (pinned IN (0, 1))). The conversion is explicit so the
+// driver never sees a bool and the CHECK stays trivially honest.
+func pinnedInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// placeholders renders n bind markers ("?,?,?") for an IN clause.
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
 
 // prefixed returns the column list with a table alias prefixed to each name.
 func prefixed(alias, columns string) string {

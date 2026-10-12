@@ -121,3 +121,100 @@ func TestTouchWithoutTouchesStore(t *testing.T) {
 	// Not directly testable without rewiring the harness; skip.
 	t.Skip("touches store is always wired in harness; covered by TestTouchAppearsInStats")
 }
+
+func TestSaveWithPinnedEchoesFlag(t *testing.T) {
+	h := newHarness(t)
+	_, saveText := h.call("mnemos_save", map[string]any{
+		"title":   "core architecture constraint",
+		"content": "zero cgo binaries always",
+		"type":    "convention",
+		"pinned":  true,
+	})
+	var saved map[string]any
+	if err := json.Unmarshal([]byte(saveText), &saved); err != nil {
+		t.Fatalf("unmarshal save: %v", err)
+	}
+	if saved["pinned"] != true {
+		t.Errorf("mnemos_save should echo pinned: true, got %v", saved["pinned"])
+	}
+
+	id := saved["id"].(string)
+	_, getText := h.call("mnemos_get", map[string]any{"id": id})
+	var got map[string]any
+	if err := json.Unmarshal([]byte(getText), &got); err != nil {
+		t.Fatalf("unmarshal get: %v", err)
+	}
+	// jsonResult(o) serializes struct fields
+	pinnedVal, ok := got["Pinned"]
+	if !ok {
+		pinnedVal = got["pinned"]
+	}
+	if pinnedVal != true {
+		t.Errorf("mnemos_get should preserve pinned=true: %v", got)
+	}
+}
+
+func TestPinToolLifecycle(t *testing.T) {
+	h := newHarness(t)
+	_, saveText := h.call("mnemos_save", map[string]any{
+		"title":   "ephemeral note",
+		"content": "note content",
+		"type":    "context",
+	})
+	var saved map[string]any
+	_ = json.Unmarshal([]byte(saveText), &saved)
+	id := saved["id"].(string)
+
+	// 1. Pin observation
+	_, pinText := h.call("mnemos_pin", map[string]any{"id": id, "pinned": true})
+	var pinned map[string]any
+	if err := json.Unmarshal([]byte(pinText), &pinned); err != nil {
+		t.Fatalf("unmarshal pin: %v", err)
+	}
+	if pinned["pinned"] != true {
+		t.Errorf("pin tool should report pinned: true, got %v", pinned["pinned"])
+	}
+
+	// 2. Unpin observation
+	_, unpinText := h.call("mnemos_pin", map[string]any{"id": id, "pinned": false})
+	var unpinned map[string]any
+	if err := json.Unmarshal([]byte(unpinText), &unpinned); err != nil {
+		t.Fatalf("unmarshal unpin: %v", err)
+	}
+	if unpinned["pinned"] != false {
+		t.Errorf("pin tool should report pinned: false, got %v", unpinned["pinned"])
+	}
+
+	// 3. Pin nonexistent observation returns error
+	res, err := h.client.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "mnemos_pin",
+		Arguments: map[string]any{"id": "nonexistent", "pinned": true},
+	})
+	if err == nil && !res.IsError {
+		t.Error("expected pin on unknown id to fail")
+	}
+}
+
+func TestSearchEchoesGraphAndContradictionFields(t *testing.T) {
+	h := newHarness(t)
+	h.call("mnemos_save", map[string]any{
+		"title":   "clean search observation",
+		"content": "observation content for search verification",
+		"type":    "pattern",
+	})
+	_, searchText := h.call("mnemos_search", map[string]any{"query": "search observation"})
+	var searchOut map[string]any
+	if err := json.Unmarshal([]byte(searchText), &searchOut); err != nil {
+		t.Fatalf("unmarshal search: %v", err)
+	}
+	results := searchOut["results"].([]any)
+	if len(results) == 0 {
+		t.Fatal("expected at least one search result")
+	}
+	first := results[0].(map[string]any)
+	for _, field := range []string{"pinned", "expanded_from", "contradicted_by", "graph_factor", "contradiction_factor"} {
+		if _, exists := first[field]; !exists {
+			t.Errorf("search result missing field %q: %+v", field, first)
+		}
+	}
+}

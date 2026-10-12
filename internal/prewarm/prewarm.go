@@ -241,6 +241,7 @@ func (s *Service) pipeline(mode Mode) []stepFunc {
 	switch mode {
 	case ModeCompactionRecovery:
 		return []stepFunc{
+			stepPinnedCore,
 			stepCurrentSession,
 			stepInSessionObservations,
 			stepConventions,
@@ -253,6 +254,7 @@ func (s *Service) pipeline(mode Mode) []stepFunc {
 		// this plan died", so corrections and failed sessions lead, and
 		// the correction cap is wider than the session-start block's.
 		return []stepFunc{
+			stepPinnedCore,
 			stepPremortemCorrections,
 			stepFailedSessions,
 			stepMatchingSkills,
@@ -261,6 +263,7 @@ func (s *Service) pipeline(mode Mode) []stepFunc {
 		}
 	default: // ModeSessionStart
 		return []stepFunc{
+			stepPinnedCore,
 			stepConventions,
 			stepPendingRumination,
 			stepRecentSessions,
@@ -271,10 +274,39 @@ func (s *Service) pipeline(mode Mode) []stepFunc {
 	}
 }
 
-// stepPendingRumination surfaces the top pending rumination candidates so
-// the agent sees them before picking a skill or acting on a convention.
-// We cap at 3 — any more and it starts crowding out the conventions block
-// it sits next to. Severity already sorts highest-first in the store query.
+// stepPinnedCore renders Tier-0 pinned core memories before all other
+// sections in all modes. Budget: ~150 tokens. Ordering: importance desc,
+// created_at asc. Transparent overflow notes how many are shown.
+func stepPinnedCore(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
+	draft := sectionDraft{title: "core invariants (pinned)"}
+	list, err := s.obs.ListPinned(ctx, req.AgentID, req.Project, 50)
+	if err != nil {
+		return draft, err
+	}
+	if len(list) == 0 {
+		return draft, nil
+	}
+
+	const pinnedBudget = 150
+	var b strings.Builder
+	shown := 0
+	total := len(list)
+	for _, o := range list {
+		line := fmt.Sprintf("- [%s] %s — %s\n", o.Type, o.Title, oneLine(o.Content))
+		if shown > 0 && estimateTokens(b.String()+line) > pinnedBudget {
+			break
+		}
+		b.WriteString(line)
+		draft.refs = append(draft.refs, injection.Ref{Kind: injection.KindObservation, ID: o.ID})
+		shown++
+	}
+	if shown < total {
+		fmt.Fprintf(&b, "[pinned: %d of %d shown]\n", shown, total)
+	}
+	draft.body = strings.TrimRight(b.String(), "\n")
+	return draft, nil
+}
+
 func stepPendingRumination(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
 	draft := sectionDraft{title: "pending reviews"}
 	if s.rumination == nil {
@@ -313,6 +345,9 @@ func stepConventions(ctx context.Context, s *Service, req Request) (sectionDraft
 	var b strings.Builder
 	var refs []injection.Ref
 	for _, o := range list {
+		if o.Pinned {
+			continue // de-duplicate: already rendered in stepPinnedCore
+		}
 		b.WriteString("- ")
 		b.WriteString(o.Title)
 		if strings.TrimSpace(o.Rationale) != "" {
@@ -425,18 +460,44 @@ func stepCorrections(ctx context.Context, s *Service, req Request) (sectionDraft
 	if len(results) == 0 {
 		return sectionDraft{title: "relevant corrections"}, nil
 	}
+	contradictedIDs := map[string]bool{}
+	for _, r := range results {
+		if len(r.ContradictedBy) > 0 {
+			contradictedIDs[r.Observation.ID] = true
+		}
+	}
+	if len(contradictedIDs) == 0 && len(results) > 0 {
+		cids := make([]string, len(results))
+		for i, r := range results {
+			cids[i] = r.Observation.ID
+		}
+		if contras, err := s.obs.ListContradictors(ctx, cids); err == nil {
+			for _, c := range contras {
+				contradictedIDs[c.CandidateID] = true
+			}
+		}
+	}
+
 	var b strings.Builder
 	var refs []injection.Ref
-	for i, r := range results {
-		if i >= 3 {
+	n := 0
+	for _, r := range results {
+		if r.Observation.Pinned {
+			continue // de-duplicate: already rendered in stepPinnedCore
+		}
+		if n >= 3 {
 			break
 		}
 		b.WriteString("- ")
+		if contradictedIDs[r.Observation.ID] {
+			b.WriteString("[contradicted] ")
+		}
 		b.WriteString(r.Observation.Title)
 		b.WriteString(": ")
 		b.WriteString(oneLine(r.Observation.Content))
 		b.WriteString("\n")
 		refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: r.Observation.ID})
+		n++
 	}
 	return sectionDraft{title: "relevant corrections", body: strings.TrimRight(b.String(), "\n"), refs: refs}, nil
 }
@@ -463,9 +524,33 @@ func stepPremortemCorrections(ctx context.Context, s *Service, req Request) (sec
 	if len(results) == 0 {
 		return draft, nil
 	}
+	contradictedIDs := map[string]bool{}
+	for _, r := range results {
+		if len(r.ContradictedBy) > 0 {
+			contradictedIDs[r.Observation.ID] = true
+		}
+	}
+	if len(contradictedIDs) == 0 && len(results) > 0 {
+		cids := make([]string, len(results))
+		for i, r := range results {
+			cids[i] = r.Observation.ID
+		}
+		if contras, err := s.obs.ListContradictors(ctx, cids); err == nil {
+			for _, c := range contras {
+				contradictedIDs[c.CandidateID] = true
+			}
+		}
+	}
+
 	var b strings.Builder
 	for _, r := range results {
+		if r.Observation.Pinned {
+			continue // de-duplicate: already rendered in stepPinnedCore
+		}
 		b.WriteString("- ")
+		if contradictedIDs[r.Observation.ID] {
+			b.WriteString("[contradicted] ")
+		}
 		b.WriteString(r.Observation.Title)
 		b.WriteString(": ")
 		b.WriteString(oneLine(r.Observation.Content))
@@ -609,6 +694,9 @@ func stepInSessionObservations(ctx context.Context, s *Service, req Request) (se
 	for _, o := range all {
 		if o.SessionID != req.SessionID {
 			continue
+		}
+		if o.Pinned {
+			continue // de-duplicate: already rendered in stepPinnedCore
 		}
 		if n >= 8 {
 			break

@@ -29,7 +29,7 @@ func TestCapabilitiesAlwaysReportsCoreAndProvenance(t *testing.T) {
 	if c.Spec != memory.SpecVersion {
 		t.Errorf("spec = %q, want %q", c.Spec, memory.SpecVersion)
 	}
-	if !c.Bitemporal || !c.Provenance || !c.TrustTiers || !c.TypedLinks || !c.DeterministicDedup {
+	if !c.Bitemporal || !c.Provenance || !c.TrustTiers || !c.TypedLinks || !c.DeterministicDedup || !c.PinnedMemory || !c.GraphRetrieval {
 		t.Errorf("schema-level capabilities must all be true, got %+v", c)
 	}
 	if !hasTier(c.Tiers, "memory-core") || !hasTier(c.Tiers, "provenance") {

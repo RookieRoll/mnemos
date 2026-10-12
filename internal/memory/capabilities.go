@@ -43,6 +43,14 @@ type Capabilities struct {
 	// intact. This is portability, not live multi-store federation, which is
 	// a separate future capability.
 	PortableExport bool `json:"portable_export"`
+
+	// PinnedMemory reports first-class core memory support: observations can
+	// be pinned to bypass recency decay and earn Tier-0 prewarm delivery.
+	PinnedMemory bool `json:"pinned_memory"`
+
+	// GraphRetrieval reports 1-hop expansion along refines and derived_from
+	// edges and contradiction-aware scoring during memory search.
+	GraphRetrieval bool `json:"graph_retrieval"`
 }
 
 // Capabilities returns the live capability document for this service. Read it
@@ -60,6 +68,8 @@ func (s *Service) Capabilities() Capabilities {
 		// Fidelity-preserving export/import ships (ROADMAP Bet 2 phase 4):
 		// Service.Restore round-trips a full dump verbatim.
 		PortableExport: true,
+		PinnedMemory:   true,
+		GraphRetrieval: true,
 	}
 	c.Tiers = c.tiers()
 	return c

@@ -260,3 +260,85 @@ func TestScoresComparableAcrossModes(t *testing.T) {
 		}
 	}
 }
+
+// Spec scenario "Breakdown is auditable" & "Layered score contract":
+// Score = clamp(Relevance * PolicyFactor * GraphFactor * ContradictionFactor, (0, ScoreCeiling])
+func TestLayeredScoreContractDecomposition(t *testing.T) {
+	q := "distributed consensus architecture"
+	_, store := newContractStore(t)
+	svc := memory.NewService(memory.Config{
+		Store: store,
+	})
+	seedContrast(t, store, 20)
+
+	// 1. Primary hit
+	parentID := insertObs(t, store, &memory.Observation{
+		Title:      "distributed consensus architecture",
+		Content:    "consensus protocols raft paxos distributed agreement",
+		Importance: 10,
+	})
+
+	// 2. Neighbour linked via refines
+	childID := insertObs(t, store, &memory.Observation{
+		Title:      "raft leader election timeouts",
+		Content:    "randomized heartbeat timer intervals",
+		Importance: 8,
+	})
+	if err := store.Link(context.Background(), parentID, childID, memory.LinkRefines); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Contradicted candidate
+	contraID := insertObs(t, store, &memory.Observation{
+		Title:      "paxos single round-trip consensus",
+		Content:    "classic paxos always commits in one round-trip",
+		Importance: 8,
+	})
+	refuterID := insertObs(t, store, &memory.Observation{
+		Title:      "paxos requires two phases for consensus",
+		Content:    "prepare and accept phases both need quorum",
+		Importance: 9,
+		TrustTier:  memory.TrustCurated,
+	})
+	if err := store.Link(context.Background(), refuterID, contraID, memory.LinkContradicts); err != nil {
+		t.Fatal(err)
+	}
+
+	res, _, err := svc.SearchWithMode(context.Background(), memory.SearchInput{Query: q})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, r := range res {
+		if r.Score <= 0 || r.Score > memory.ScoreCeiling {
+			t.Errorf("result %s score %v outside (0, ScoreCeiling]", r.Observation.ID, r.Score)
+		}
+		expectedScore := r.Relevance * r.PolicyFactor * r.GraphFactor * r.ContradictionFactor
+		if expectedScore > memory.ScoreCeiling {
+			expectedScore = memory.ScoreCeiling
+		}
+		if math.Abs(r.Score-expectedScore) > 1e-6 {
+			t.Errorf("score breakdown mismatch for %s: got %v, want %v (rel=%v, pol=%v, graph=%v, contra=%v)",
+				r.Observation.ID, r.Score, expectedScore, r.Relevance, r.PolicyFactor, r.GraphFactor, r.ContradictionFactor)
+		}
+
+		if r.Observation.ID == parentID {
+			if r.GraphFactor != 1.0 || r.ContradictionFactor != 1.0 {
+				t.Errorf("primary clean hit should have factors (1.0, 1.0), got (%v, %v)", r.GraphFactor, r.ContradictionFactor)
+			}
+		}
+		if r.Observation.ID == childID {
+			if math.Abs(r.GraphFactor-0.70) > 1e-6 {
+				t.Errorf("expanded hit should have GraphFactor 0.70, got %v", r.GraphFactor)
+			}
+			if r.ExpandedFrom != parentID {
+				t.Errorf("expanded hit ExpandedFrom = %q, want %q", r.ExpandedFrom, parentID)
+			}
+		}
+		if r.Observation.ID == contraID {
+			if math.Abs(r.ContradictionFactor-0.50) > 1e-6 {
+				t.Errorf("contradicted hit should have ContradictionFactor 0.50, got %v", r.ContradictionFactor)
+			}
+		}
+	}
+}

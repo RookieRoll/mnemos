@@ -1,8 +1,8 @@
 ---
 name: mnemos
 description: Persistent memory and learning-loop skills for AI coding agents using mnemos MCP tools. Use whenever mnemos_* MCP tools are available and you are doing work worth remembering. Cross-session memory, conventions, corrections, and architectural decisions surface back into context automatically. Triggers on session start (record a goal), session end (record a summary), the user says "save", "remember", "record this", "we were wrong about", and on any genuine correction or architectural decision. Keeps mnemos's memory store alive across sessions so the next session starts smarter. Without this skill, agents silently edit and the store goes empty.
-allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention
-version: 0.12.0
+allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_pin
+version: 0.13.0
 author: André Figueira <andre@polyxmedia.com>
 license: MIT
 compatibility: "Designed for any MCP-capable agent host (Claude Code, Claude Desktop, Cursor, Windsurf, OpenAI Codex CLI, pi). Requires the mnemos binary on PATH — run mnemos init to wire the MCP server and mnemos doctor to verify. On pi, the package in this repo also adds the harness hooks."
@@ -56,6 +56,7 @@ Status values: `ok` | `failed` | `blocked` | `abandoned`. An open session with n
 | --- | --- |
 | About to execute a non-trivial plan (after deciding approach, before first edit) | `mnemos_premortem(plan, project)` — returns how similar attempts failed; read it before proceeding |
 | A non-obvious decision, pattern, or architectural call worth preserving | `mnemos_save` with `type=decision` / `architecture` / `pattern` |
+| A core architectural invariant that must never decay or be evicted | `mnemos_pin(id, pinned=true)` (or `mnemos_save` with `pinned=true`) |
 | User corrects an approach: "actually no, do X because Y" | `mnemos_correct(tried, wrong_because, fix)` |
 | A rule that should apply to the project forever: "always wrap errors with %w" | `mnemos_convention(title, rule, rationale, project)` |
 | A file you are editing heavily and will revisit | `mnemos_touch(path, project)` |

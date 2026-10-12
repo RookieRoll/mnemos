@@ -30,28 +30,28 @@ func seedCalibrationStore(t *testing.T) (*memory.Service, memory.Store) {
 	rows := []*memory.Observation{
 		{
 			ID: "mem-sql", Project: "api", Title: "Prepared statements for every query",
-			Content:  "Every SQL query goes through prepared statements; string concatenation into SQL is banned after the injection incident. Parameter binding only.",
-			Type:     memory.TypeConvention, Importance: 9, CreatedAt: now, ValidFrom: now,
+			Content: "Every SQL query goes through prepared statements; string concatenation into SQL is banned after the injection incident. Parameter binding only.",
+			Type:    memory.TypeConvention, Importance: 9, CreatedAt: now, ValidFrom: now,
 		},
 		{
 			ID: "mem-tx", Project: "api", Title: "Transactions wrap multi-write operations",
-			Content:  "Multi-write flows open a transaction and roll back on error; no partial writes.",
-			Type:     memory.TypeConvention, Importance: 6, CreatedAt: now, ValidFrom: now,
+			Content: "Multi-write flows open a transaction and roll back on error; no partial writes.",
+			Type:    memory.TypeConvention, Importance: 6, CreatedAt: now, ValidFrom: now,
 		},
 		{
 			ID: "mem-notes", Project: "api", Title: "Meeting notes",
-			Content:  "Discussed the SQL schema and the roadmap afterwards; no decisions recorded.",
-			Type:     memory.TypeEpisodic, Importance: 2, CreatedAt: now, ValidFrom: now,
+			Content: "Discussed the SQL schema and the roadmap afterwards; no decisions recorded.",
+			Type:    memory.TypeEpisodic, Importance: 2, CreatedAt: now, ValidFrom: now,
 		},
 		{
 			ID: "mem-escape", Project: "web", Title: "Escape user input before HTML rendering",
-			Content:  "Every value interpolated into HTML gets escaped; raw template insertion is banned to prevent SQL problems too.",
-			Type:     memory.TypeConvention, Importance: 7, CreatedAt: now, ValidFrom: now,
+			Content: "Every value interpolated into HTML gets escaped; raw template insertion is banned to prevent SQL problems too.",
+			Type:    memory.TypeConvention, Importance: 7, CreatedAt: now, ValidFrom: now,
 		},
 		{
 			ID: "mem-style", Project: "api", Title: "Formatting",
-			Content:  "gofmt decides; do not argue about spacing.",
-			Type:     memory.TypeConvention, Importance: 3, CreatedAt: now, ValidFrom: now,
+			Content: "gofmt decides; do not argue about spacing.",
+			Type:    memory.TypeConvention, Importance: 3, CreatedAt: now, ValidFrom: now,
 		},
 	}
 	for _, o := range rows {

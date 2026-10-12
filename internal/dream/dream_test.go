@@ -102,3 +102,69 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestDream_ProtectsPinnedObservations(t *testing.T) {
+	ds, _, db := newDream(t)
+	store := db.Observations()
+	ctx := context.Background()
+
+	oldTime := time.Now().UTC().AddDate(0, 0, -60)
+	pastExpiry := time.Now().UTC().Add(-time.Hour)
+
+	// 1. Pinned observation (stale + past expiry)
+	pinned := &memory.Observation{
+		ID:         "pinned_core",
+		Title:      "core zero cgo invariant",
+		Content:    "must never add cgo dependencies",
+		Type:       memory.TypeConvention,
+		Importance: 8,
+		Pinned:     true,
+		CreatedAt:  oldTime,
+		ValidFrom:  oldTime,
+		ExpiresAt:  &pastExpiry, // artificially set to verify Prune skips pinned
+	}
+	if err := store.Insert(ctx, pinned); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Unpinned stale observation
+	unpinned := &memory.Observation{
+		ID:         "unpinned_stale",
+		Title:      "transient note",
+		Content:    "temporary investigation details",
+		Type:       memory.TypeContext,
+		Importance: 8,
+		Pinned:     false,
+		CreatedAt:  oldTime,
+		ValidFrom:  oldTime,
+	}
+	if err := store.Insert(ctx, unpinned); err != nil {
+		t.Fatal(err)
+	}
+
+	j, err := ds.Run(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unpinned row must decay; pinned row must not
+	if j.Decayed != 1 {
+		t.Errorf("journal Decayed = %d, want 1", j.Decayed)
+	}
+
+	gotPinned, err := store.Get(ctx, pinned.ID)
+	if err != nil {
+		t.Fatalf("pinned observation must survive (not pruned): %v", err)
+	}
+	if gotPinned.Importance != 8 {
+		t.Errorf("pinned importance must stay 8, got %d", gotPinned.Importance)
+	}
+
+	gotUnpinned, err := store.Get(ctx, unpinned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotUnpinned.Importance != 7 {
+		t.Errorf("unpinned importance must decay to 7, got %d", gotUnpinned.Importance)
+	}
+}

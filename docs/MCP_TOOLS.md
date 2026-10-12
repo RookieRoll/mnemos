@@ -1,6 +1,6 @@
 # MCP tools reference
 
-All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 15 core tools; enabling rumination adds 4 more.
+All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 18 core tools; enabling rumination adds 4 more (22 total).
 
 ## Save & retrieve
 
@@ -21,8 +21,9 @@ Store an agent-curated observation.
 | `trust_tier` |   | `raw`, `curated`, `skill`; defaults to `curated` |
 | `derived_from` |   | parent observation IDs |
 | `rationale` |   | why this memory matters |
+| `pinned` |   | `true` to pin as core memory: immune to decay, Tier-0 prewarm slot, clears expiry |
 
-Returns `{id, title, type, source_kind, trust_tier, derived_from, created_at, deduped}`. `deduped: true` means an identical live observation already existed; its access counter was bumped instead.
+Returns `{id, title, type, source_kind, trust_tier, derived_from, pinned, created_at, deduped}`. `deduped: true` means an identical live observation already existed; its access counter was bumped instead.
 
 ### `mnemos_search`
 BM25 + importance + recency + access-frequency ranked search.
@@ -39,7 +40,7 @@ BM25 + importance + recency + access-frequency ranked search.
 | `include_raw` |   | include quarantined raw-tier observations |
 | `as_of` |   | ISO-8601, historical query |
 
-Returns `{results: [{id, title, type, tags, importance, score, snippet, created_at, source_kind, trust_tier, derived_from}], retrieval_mode}`.
+Returns `{results: [{id, title, type, tags, importance, score, relevance, policy_factor, graph_factor, contradiction_factor, expanded_from, contradicted_by, pinned, snippet, created_at, source_kind, trust_tier, derived_from}], retrieval_mode}`.
 
 `retrieval_mode` is `"hybrid"` when vector cosine was fused into the ranking via RRF, or `"fts"` when BM25/FTS5 alone decided it. It reports the actual per-call outcome, not the configured capability: a hybrid-capable store still returns `"fts"` when the embedder fails at query time or no matching observation carries a vector, so the signal never overstates what ran.
 
@@ -53,6 +54,16 @@ Hard-delete by ID. Use only for mistaken saves. For changed facts, use `mnemos_l
 | `source_id`, `target_id`, `link_type` | all required |
 
 `link_type`: `related | caused_by | supersedes | contradicts | refines`. `supersedes` automatically invalidates the target so default searches no longer surface the stale fact.
+
+### `mnemos_pin`
+Pin or unpin an observation as core memory. Pinned memories are immune to time decay (`recency_factor = 1.0`), exempt from dream-pass idle importance decay, and guaranteed a Tier-0 slot at the top of every prewarm block (up to 150 tokens). Pinning clears any existing expiry (`expires_at`); unpinning restores type-differentiated decay.
+
+| Param | Required | Notes |
+|---|---|---|
+| `id` | ✓ | observation ID |
+| `pinned` | ✓ | `true` to pin, `false` to unpin |
+
+Returns `{id, title, pinned, expires_at}`.
 
 ## Sessions
 

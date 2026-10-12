@@ -152,3 +152,71 @@ func TestBadJSONReturns400(t *testing.T) {
 		t.Errorf("expected error field in response: %v", body)
 	}
 }
+
+func TestPinEndpoints(t *testing.T) {
+	ts := newAPIServer(t, "")
+
+	// 1. Save unpinned observation
+	code, out := request(t, ts, "POST", "/v1/observations", "", map[string]any{
+		"Title": "api note", "Content": "content", "Type": "context",
+	})
+	if code != 201 {
+		t.Fatalf("save: %d %v", code, out)
+	}
+	obs := out["Observation"].(map[string]any)
+	id := obs["ID"].(string)
+
+	// 2. Pin via POST /v1/observations/{id}/pin
+	code, pinOut := request(t, ts, "POST", "/v1/observations/"+id+"/pin", "", map[string]any{
+		"pinned": true,
+	})
+	if code != 200 {
+		t.Fatalf("pin: %d %v", code, pinOut)
+	}
+	if pinOut["Pinned"] != true {
+		t.Errorf("pin endpoint should return Pinned=true: %v", pinOut)
+	}
+
+	// 3. Unpin via POST /v1/observations/{id}/pin
+	code, unpinOut := request(t, ts, "POST", "/v1/observations/"+id+"/pin", "", map[string]any{
+		"pinned": false,
+	})
+	if code != 200 {
+		t.Fatalf("unpin: %d %v", code, unpinOut)
+	}
+	if unpinOut["Pinned"] != false {
+		t.Errorf("unpin endpoint should return Pinned=false: %v", unpinOut)
+	}
+
+	// 4. Pin nonexistent returns 404
+	code, _ = request(t, ts, "POST", "/v1/observations/nonexistent/pin", "", map[string]any{
+		"pinned": true,
+	})
+	if code != 404 {
+		t.Errorf("pin nonexistent should return 404, got %d", code)
+	}
+
+	// 5. Convention endpoint supports pinned
+	code, convOut := request(t, ts, "POST", "/v1/convention", "", map[string]any{
+		"title": "zero cgo", "rule": "keep pure go", "project": "p", "pinned": true,
+	})
+	if code != 201 {
+		t.Fatalf("convention save: %d %v", code, convOut)
+	}
+	convObs := convOut["Observation"].(map[string]any)
+	if convObs["Pinned"] != true {
+		t.Errorf("convention should be pinned: %v", convObs)
+	}
+
+	// 6. Correct endpoint supports pinned
+	code, corrOut := request(t, ts, "POST", "/v1/correct", "", map[string]any{
+		"title": "fixed bug", "tried": "x", "wrong_because": "y", "fix": "z", "pinned": true,
+	})
+	if code != 201 {
+		t.Fatalf("correct save: %d %v", code, corrOut)
+	}
+	corrObs := corrOut["Observation"].(map[string]any)
+	if corrObs["Pinned"] != true {
+		t.Errorf("correction should be pinned: %v", corrObs)
+	}
+}

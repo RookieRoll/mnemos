@@ -101,6 +101,14 @@ func (s *Server) registerTools() {
 			"reasons (<16 chars) are rejected.",
 	}, s.handlePromote)
 
+	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		Name: "mnemos_pin",
+		Description: "Pin or unpin an observation as core memory. Pinned memories are immune to " +
+			"time decay (recency factor 1.0), exempt from dream-pass idle importance decay, " +
+			"and guaranteed a Tier-0 slot at the top of every prewarm block. Pinning an observation " +
+			"clears its expiry so it cannot be pruned by TTL; unpinning restores type-differentiated decay.",
+	}, s.handlePin)
+
 	// Agent supercharge --------------------------------------------------
 	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
 		Name: "mnemos_correct",
@@ -213,6 +221,7 @@ type saveArgs struct {
 	SourceKind  string   `json:"source_kind,omitempty" jsonschema:"user|tool|agent_inference|dream|import — defaults to user"`
 	TrustTier   string   `json:"trust_tier,omitempty" jsonschema:"raw|curated|skill — only user-sourced saves keep this; any non-user source_kind is quarantined to raw automatically regardless of this value"`
 	DerivedFrom []string `json:"derived_from,omitempty" jsonschema:"parent observation IDs this memory was derived from"`
+	Pinned      bool     `json:"pinned,omitempty" jsonschema:"true to pin as core memory: immune to decay, Tier-0 prewarm slot, clears expiry"`
 }
 
 func (s *Server) handleSave(ctx context.Context, _ *mcpsdk.CallToolRequest, a saveArgs) (*mcpsdk.CallToolResult, any, error) {
@@ -224,6 +233,7 @@ func (s *Server) handleSave(ctx context.Context, _ *mcpsdk.CallToolRequest, a sa
 		SourceKind:  memory.SourceKind(a.SourceKind),
 		TrustTier:   memory.TrustTier(a.TrustTier),
 		DerivedFrom: a.DerivedFrom,
+		Pinned:      a.Pinned,
 	}
 	if t, err := parseTime(a.ValidFrom); err != nil {
 		return nil, nil, err
@@ -246,6 +256,7 @@ func (s *Server) handleSave(ctx context.Context, _ *mcpsdk.CallToolRequest, a sa
 		"source_kind":  string(res.Observation.SourceKind),
 		"trust_tier":   string(res.Observation.TrustTier),
 		"derived_from": res.Observation.DerivedFrom,
+		"pinned":       res.Observation.Pinned,
 		"created_at":   res.Observation.CreatedAt,
 		"deduped":      res.Deduped,
 	})
@@ -286,19 +297,24 @@ func (s *Server) handleSearch(ctx context.Context, _ *mcpsdk.CallToolRequest, a 
 	hits := make([]map[string]any, 0, len(results))
 	for _, r := range results {
 		hits = append(hits, map[string]any{
-			"id":           r.Observation.ID,
-			"title":        r.Observation.Title,
-			"type":         string(r.Observation.Type),
-			"tags":         r.Observation.Tags,
-			"importance":   r.Observation.Importance,
-			"score":        r.Score,
-			"relevance":    r.Relevance,
-			"policy_factor": r.PolicyFactor,
-			"snippet":      r.Snippet,
-			"created_at":   r.Observation.CreatedAt,
-			"source_kind":  string(r.Observation.SourceKind),
-			"trust_tier":   string(r.Observation.TrustTier),
-			"derived_from": r.Observation.DerivedFrom,
+			"id":                   r.Observation.ID,
+			"title":                r.Observation.Title,
+			"type":                 string(r.Observation.Type),
+			"tags":                 r.Observation.Tags,
+			"importance":           r.Observation.Importance,
+			"score":                r.Score,
+			"relevance":            r.Relevance,
+			"policy_factor":        r.PolicyFactor,
+			"graph_factor":         r.GraphFactor,
+			"contradiction_factor": r.ContradictionFactor,
+			"expanded_from":        r.ExpandedFrom,
+			"contradicted_by":      r.ContradictedBy,
+			"pinned":               r.Observation.Pinned,
+			"snippet":              r.Snippet,
+			"created_at":           r.Observation.CreatedAt,
+			"source_kind":          string(r.Observation.SourceKind),
+			"trust_tier":           string(r.Observation.TrustTier),
+			"derived_from":         r.Observation.DerivedFrom,
 		})
 	}
 	return jsonResult(map[string]any{"results": hits, "retrieval_mode": string(mode)})
@@ -499,6 +515,29 @@ func (s *Server) handlePremortem(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		"token_estimate": block.TokenEstimate,
 		"section_count":  len(block.Sections),
 		"safety_risk":    block.SafetyReport.MaxRisk.String(),
+	})
+}
+
+// ---- mnemos_pin --------------------------------------------------------
+
+type pinArgs struct {
+	ID     string `json:"id" jsonschema:"observation ID to pin or unpin"`
+	Pinned bool   `json:"pinned" jsonschema:"true to pin as core memory, false to unpin"`
+}
+
+func (s *Server) handlePin(ctx context.Context, _ *mcpsdk.CallToolRequest, a pinArgs) (*mcpsdk.CallToolResult, any, error) {
+	o, err := s.cfg.Memory.Pin(ctx, a.ID, a.Pinned)
+	if err != nil {
+		if errors.Is(err, memory.ErrNotFound) {
+			return nil, nil, fmt.Errorf("observation not found: %s", a.ID)
+		}
+		return nil, nil, err
+	}
+	return jsonResult(map[string]any{
+		"id":         o.ID,
+		"title":      o.Title,
+		"pinned":     o.Pinned,
+		"expires_at": o.ExpiresAt,
 	})
 }
 

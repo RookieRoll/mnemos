@@ -56,6 +56,8 @@ roles. Added a test that asserts max 2 queries for the endpoint.
 
 - `**Why:**` renders when the observation has a `rationale` field (decisions,
   conventions, architecture entries typically do).
+- `pinned: true` appears in frontmatter when the observation is pinned core
+  memory (omitted otherwise).
 - `[[sessions/ID]]` links back to the originating session.
 - `[[tags/X]]` links to the tag MOC page.
 - Observation links (`related`, `supersedes`, etc.) become wikilinks in the

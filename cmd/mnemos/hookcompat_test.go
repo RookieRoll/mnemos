@@ -268,7 +268,7 @@ func seedPreToolStore(t *testing.T) (string, string) {
 		"tool_name":       "Edit",
 		"cwd":             dir,
 		"tool_input": map[string]any{
-			"file_path": "internal/storage/sessions.go",
+			"file_path":  "internal/storage/sessions.go",
 			"old_string": "a", "new_string": "b",
 		},
 	})

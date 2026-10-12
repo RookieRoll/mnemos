@@ -103,8 +103,8 @@ func TestToolsListReturnsBaselineSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Tools) != 17 {
-		t.Errorf("want 17 baseline tools, got %d", len(res.Tools))
+	if len(res.Tools) != 18 {
+		t.Errorf("want 18 baseline tools, got %d", len(res.Tools))
 	}
 	expected := map[string]bool{
 		"mnemos_save": true, "mnemos_search": true, "mnemos_get": true,
@@ -116,6 +116,7 @@ func TestToolsListReturnsBaselineSet(t *testing.T) {
 		"mnemos_skill_score": true,
 		"mnemos_stats":       true,
 		"mnemos_promote":     true,
+		"mnemos_pin":         true,
 	}
 	for _, tool := range res.Tools {
 		delete(expected, tool.Name)

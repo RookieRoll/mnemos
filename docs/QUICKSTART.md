@@ -43,7 +43,7 @@ That gets you session prewarm, per-prompt memory recall, the capture directive, 
 
 ## 4. Restart your agent
 
-Close and reopen Claude Code (or Cursor, or whichever MCP-capable agent you use). On next launch, 16 baseline `mnemos_*` tools become available, or 20 when rumination is enabled.
+Close and reopen Claude Code (or Cursor, or whichever MCP-capable agent you use). On next launch, 18 baseline `mnemos_*` tools become available, or 22 when rumination is enabled.
 
 ## 5. First session
 

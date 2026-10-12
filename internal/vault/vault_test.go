@@ -118,3 +118,53 @@ func TestObservationHasFrontmatterAndSessionLink(t *testing.T) {
 		t.Error("missing session wikilink")
 	}
 }
+
+func TestObservationPinnedFrontmatter(t *testing.T) {
+	ex, mem, _, _, root := newVault(t)
+	ctx := context.Background()
+
+	oPinned, err := mem.Save(ctx, memory.SaveInput{
+		Title:   "core pinned invariant",
+		Content: "content for core",
+		Type:    memory.TypeConvention,
+		Pinned:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oUnpinned, err := mem.Save(ctx, memory.SaveInput{
+		Title:   "transient note",
+		Content: "content for note",
+		Type:    memory.TypeContext,
+		Pinned:  false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ex.ExportAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(root, "observations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, e := range entries {
+		b, _ := os.ReadFile(filepath.Join(root, "observations", e.Name()))
+		text := string(b)
+		if strings.Contains(text, oPinned.Observation.ID) {
+			if !strings.Contains(text, "pinned: true") {
+				t.Errorf("pinned observation frontmatter missing 'pinned: true': %s", text)
+			}
+		}
+		if strings.Contains(text, oUnpinned.Observation.ID) {
+			if strings.Contains(text, "pinned:") {
+				t.Errorf("unpinned observation frontmatter should not contain 'pinned:': %s", text)
+			}
+		}
+	}
+}

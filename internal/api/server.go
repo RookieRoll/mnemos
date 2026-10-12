@@ -84,6 +84,12 @@ func (s *Server) Handler() http.Handler {
 		func(r *http.Request) (int, struct{}, error) {
 			return http.StatusNoContent, struct{}{}, s.mem.Delete(r.Context(), r.PathValue("id"))
 		}))
+	mux.Handle("POST /v1/observations/{id}/pin", jsonIn(
+		http.StatusBadRequest, memory.ErrNotFound,
+		func(r *http.Request, in pinRequest) (int, *memory.Observation, error) {
+			o, err := s.mem.Pin(r.Context(), r.PathValue("id"), in.Pinned)
+			return http.StatusOK, o, err
+		}))
 
 	// Search / context / link ----------------------------------------
 	mux.Handle("POST /v1/search", jsonIn(
@@ -164,7 +170,7 @@ func (s *Server) Handler() http.Handler {
 			res, err := s.mem.Save(r.Context(), memory.SaveInput{
 				Title: in.Title, Content: content, Type: memory.TypeCorrection,
 				Tags: in.Tags, Project: in.Project, AgentID: in.AgentID,
-				SessionID: in.SessionID, Importance: 8,
+				SessionID: in.SessionID, Importance: 8, Pinned: in.Pinned,
 			})
 			return http.StatusCreated, res, err
 		}))
@@ -178,7 +184,7 @@ func (s *Server) Handler() http.Handler {
 			res, err := s.mem.Save(r.Context(), memory.SaveInput{
 				Title: in.Title, Content: content, Type: memory.TypeConvention,
 				Tags: in.Tags, Project: in.Project, AgentID: in.AgentID,
-				Importance: 8, Rationale: in.Rationale,
+				Importance: 8, Rationale: in.Rationale, Pinned: in.Pinned,
 			})
 			return http.StatusCreated, res, err
 		}))
@@ -260,6 +266,10 @@ func (s *Server) Serve(ctx context.Context, addr string) error {
 
 // Request payloads ------------------------------------------------------
 
+type pinRequest struct {
+	Pinned bool `json:"pinned"`
+}
+
 type linkRequest struct {
 	SourceID string `json:"source_id"`
 	TargetID string `json:"target_id"`
@@ -283,6 +293,7 @@ type correctRequest struct {
 	Project        string   `json:"project"`
 	AgentID        string   `json:"agent_id"`
 	SessionID      string   `json:"session_id"`
+	Pinned         bool     `json:"pinned"`
 }
 
 type conventionRequest struct {
@@ -293,4 +304,5 @@ type conventionRequest struct {
 	Project   string   `json:"project"`
 	Tags      []string `json:"tags"`
 	AgentID   string   `json:"agent_id"`
+	Pinned    bool     `json:"pinned"`
 }

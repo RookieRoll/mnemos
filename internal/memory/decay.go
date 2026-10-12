@@ -37,6 +37,32 @@ func DefaultRankParams() RankParams {
 	}
 }
 
+// DecayRateFor returns the decay rate calibrated for the observation type.
+// If RankParams specifies a non-default DecayRate (i.e. != 0.05), that custom
+// rate is respected as an override for backwards compatibility.
+// Otherwise, the cognitive multi-sector decay table applies:
+//   - convention, architecture, decision: 0.002 (year-scale half-life)
+//   - pattern, preference, semantic: 0.030 (slow decay)
+//   - bugfix, context, episodic, dream: 0.050 (standard default)
+//   - correction: 0.100 (accelerated fade unless reinforced/promoted)
+func (r *Ranker) DecayRateFor(t ObsType) float64 {
+	if r.Params.DecayRate != 0 && r.Params.DecayRate != 0.05 {
+		return r.Params.DecayRate
+	}
+	switch t {
+	case TypeConvention, TypeArchitecture, TypeDecision:
+		return 0.002
+	case TypePattern, TypePreference, TypeSemantic:
+		return 0.030
+	case TypeBugfix, TypeContext, TypeEpisodic, TypeDream:
+		return 0.050
+	case TypeCorrection:
+		return 0.100
+	default:
+		return 0.050
+	}
+}
+
 // NewRanker constructs a Ranker with the given params.
 func NewRanker(p RankParams) *Ranker { return &Ranker{Params: p} }
 
@@ -45,19 +71,17 @@ func NewRanker(p RankParams) *Ranker { return &Ranker{Params: p} }
 // multiplies fused relevance by this factor; keeping it separate lets the
 // result carry its own score breakdown and keeps relevance free of policy.
 func (r *Ranker) PolicyFactor(o Observation, now time.Time) float64 {
-	age := now.Sub(o.CreatedAt).Hours() / 24.0
-	if age < 0 {
-		age = 0
+	var recency float64
+	if o.Pinned {
+		// Pinned core memory is immune to time decay: recency factor stays
+		// exactly 1.0 regardless of type or age.
+		recency = 1.0
+	} else {
+		age := max(0.0, now.Sub(o.CreatedAt).Hours()/24.0)
+		recency = math.Pow(1+age, -r.DecayRateFor(o.Type))
 	}
-	recency := math.Pow(1+age, -r.Params.DecayRate)
 
-	imp := float64(o.Importance)
-	if imp < 1 {
-		imp = 1
-	}
-	if imp > 10 {
-		imp = 10
-	}
+	imp := float64(max(1, min(10, o.Importance)))
 	importance := (1 - r.Params.ImportanceWeight) + r.Params.ImportanceWeight*(imp/10.0)
 
 	access := 1 + r.Params.AccessBoost*math.Log1p(float64(o.AccessCount))

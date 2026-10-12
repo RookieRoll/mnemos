@@ -14,7 +14,7 @@ in one SQLite file, and injects a token-budgeted block of them at session start.
 
 - Module: `github.com/polyxmedia/mnemos`
 - Binary: `cmd/mnemos` → `mnemos`
-- Language: Go (`go.mod` declares `go 1.25.0`; CI tests 1.25 and 1.26)
+- Language: Go (`go.mod` declares `go 1.27.2`, the latest patch; CI tests 1.27)
 - Runtime state: `~/.mnemos/mnemos.db` (SQLite) + `~/.mnemos/config.toml`
 - License: MIT
 
@@ -47,7 +47,7 @@ in one SQLite file, and injects a token-budgeted block of them at session start.
 ```
 cmd/mnemos/            CLI: serve, init, doctor, prewarm, hook, dream, vault,
                        verify, skill, replay, update, digest, efficacy, ...
-internal/mcp/          official Model Context Protocol Go SDK wrapper: 21 tools,
+internal/mcp/          official Model Context Protocol Go SDK wrapper: 22 tools,
                        3 resources — thin adapter only
 internal/api/          stdlib net/http REST transport + API-key middleware
 internal/memory/       observation domain: types, service, hybrid ranker, decay,
@@ -151,7 +151,7 @@ usage text lives in `printUsage` in the same file. Add a subcommand by writing a
 registering it in both places.
 
 MCP tools are registered with `mcpsdk.AddTool` in `internal/mcp/tools.go`
-(schemas inferred from struct tags). There are 21 registrations: 17 core, 4
+(schemas inferred from struct tags). There are 22 registrations: 18 core, 4
 optional `mnemos_ruminate_*` tools enabled by `[rumination].enabled`. Resources
 are read-only JSON snapshots in `internal/mcp/resources.go`. Tool descriptions are
 **load-bearing** — they are tuned from capture-rate measurements in `README.md`;
@@ -184,9 +184,8 @@ A release version lives in more than one manifest and CI only enforces part of i
 | `.claude-plugin/marketplace.json` | `jq .` (its plugin entry version has historically drifted) |
 | `.claude/skills/mnemos/SKILL.md`, `.agents/skills/mnemos/SKILL.md` | frontmatter `version:` |
 
-Known drift to be aware of (as of v0.11.0): `.claude-plugin/marketplace.json`
-still declares `0.5.1` while everything else says `0.11.0`. If you touch versions,
-consider reconciling it. Release flow is `make release V=vX.Y.Z` (tags + pushes;
+All five manifests are currently unified at `0.13.0` (the historical
+`marketplace.json` drift has been reconciled). Release flow is `make release V=vX.Y.Z` (tags + pushes;
 GitHub Actions + goreleaser does the rest) — never hand-build release artifacts.
 
 ## Efficacy harness
@@ -221,10 +220,12 @@ artifacts live in `openspec/changes/<change-id>/` (`proposal.md`, `design.md`,
 `openspec-archive-change`) when the user asks to work on a change; do not invent
 parallel planning documents.
 
-**No active changes.** `add-pi-hook-parity` is archived at
-`openspec/changes/archive/2026-09-18-add-pi-hook-parity/`, and its 18 requirements
-were synced into `openspec/specs/` (`harness-neutral-hooks`, `pi-integration`) —
-those two specs are now live and are what a new change would modify.
+**No active changes.** Three changes are archived under `openspec/changes/archive/`:
+`2026-09-18-add-pi-hook-parity` (18 requirements → `harness-neutral-hooks`,
+`pi-integration`), `2026-10-12-retrieval-score-contract` (6 requirements →
+`memory-retrieval`), and `2026-10-12-lifecycle-and-graph-retrieval` (9 requirements
+→ `memory-lifecycle-retrieval`). Those four specs are live in `openspec/specs/`
+and are what a new change would modify.
 
 The archive is still the best reference for the hook architecture, because it is
 where the reasoning lives. Three things in it matter before touching hook

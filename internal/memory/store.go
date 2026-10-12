@@ -31,6 +31,19 @@ type Reader interface {
 	ListByTitleSimilarity(ctx context.Context, agentID, title string, limit int) ([]Observation, error)
 	FindByContentHash(ctx context.Context, agentID, project, hash string) (*Observation, error)
 	ListLinks(ctx context.Context, linkType LinkType, agentID string, limit int) ([]LinkEdge, error)
+	// ListNeighborsFor returns live graph neighbours of the given candidate
+	// IDs along the expansion edge set (refines links and derived_from
+	// references, both directions), capped per parent and deterministically
+	// ordered. The 1-hop expansion source.
+	ListNeighborsFor(ctx context.Context, ids []string, perParent int) ([]Neighbour, error)
+	// ListContradictors returns live "contradicts" refutations of the given
+	// candidate IDs (either edge direction) with the refuting observations
+	// inline. The contradiction-scoring source.
+	ListContradictors(ctx context.Context, ids []string) ([]Contradictor, error)
+	// ListPinned returns live, unquarantined pinned observations for the
+	// scope (project-scoped or global), ordered by importance desc, then
+	// created_at asc. Used by the prewarm Tier-0 core memory pipeline.
+	ListPinned(ctx context.Context, agentID, project string, limit int) ([]Observation, error)
 	// ListByTrustTier returns live observations at the given tier, oldest
 	// first. The stale-raw rumination monitor uses it to surface raw-tier
 	// observations that have been sitting in quarantine too long.
@@ -55,6 +68,9 @@ type Writer interface {
 	// memory.Service's Promote method which adds validation on top; this
 	// is the primitive it sits on.
 	SetTrustTier(ctx context.Context, id string, tier TrustTier) error
+	// SetPinned sets or unsets the pinned core-memory status. Pinning clears
+	// any existing expires_at; unpinning leaves expires_at unset.
+	SetPinned(ctx context.Context, id string, pinned bool) error
 }
 
 // Maintenance is the housekeeping surface — time-based operations that

@@ -43,16 +43,16 @@ func BenchmarkVectorRecallScan(b *testing.B) {
 			vec[j] = rng.Float32()
 		}
 		o := &memory.Observation{
-			ID:        ulid.Make().String(),
-			AgentID:   "bench",
-			Project:   "bench",
-			Title:     fmt.Sprintf("row %d", i),
-			Content:   fmt.Sprintf("benchmarked content %d", i),
-			Type:      memory.TypeEpisodic,
+			ID:         ulid.Make().String(),
+			AgentID:    "bench",
+			Project:    "bench",
+			Title:      fmt.Sprintf("row %d", i),
+			Content:    fmt.Sprintf("benchmarked content %d", i),
+			Type:       memory.TypeEpisodic,
 			Importance: 5,
-			CreatedAt: now,
-			ValidFrom: now,
-			Embedding: vec,
+			CreatedAt:  now,
+			ValidFrom:  now,
+			Embedding:  vec,
 		}
 		if err := store.Insert(ctx, o); err != nil {
 			b.Fatal(err)
