@@ -1,6 +1,6 @@
 # MCP tools reference
 
-All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 20 core tools; enabling rumination adds 4 more (24 total).
+All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 21 core tools; enabling rumination adds 4 more (25 total).
 
 ## Save & retrieve
 
@@ -20,10 +20,14 @@ Store an agent-curated observation.
 | `source_kind` |   | `user`, `tool`, `agent_inference`, `dream`, `import`; defaults to `user` |
 | `trust_tier` |   | `raw`, `curated`, `skill`; defaults to `curated` |
 | `derived_from` |   | parent observation IDs |
+| `topic_key` |   | optional case-sensitive grouping key, trimmed UTF-8 up to 256 bytes; same topic appends |
+| `replaces_id` |   | explicit expected live same-agent/project target; replacement is atomic |
+| `unpin_replacement` |   | acknowledge removing the inherited pin when replacing a pinned version |
+| `evidence` |   | up to 16 immutable source-reference identities; see evidence check below |
 | `rationale` |   | why this memory matters |
 | `pinned` |   | `true` to pin as core memory: immune to decay, Tier-0 prewarm slot, clears expiry |
 
-Returns `{id, title, type, source_kind, trust_tier, derived_from, pinned, created_at, deduped}`. `deduped: true` means an identical live observation already existed; its access counter was bumped instead.
+Returns `{id, title, type, source_kind, trust_tier, derived_from, pinned, created_at, deduped, topic_key, evidence}`. `deduped: true` means an identical live observation already existed; its access counter was bumped instead.
 
 ### `mnemos_search`
 BM25 + importance + recency + access-frequency ranked search.
@@ -39,6 +43,7 @@ BM25 + importance + recency + access-frequency ranked search.
 | `include_stale` |   | include invalidated/expired |
 | `include_raw` |   | include quarantined raw-tier observations |
 | `as_of` |   | ISO-8601, historical query |
+| `topic_key` |   | optional exact case-sensitive topic filter, no ranking boost |
 
 Returns `{results: [{id, title, type, tags, importance, score, relevance, policy_factor, graph_factor, contradiction_factor, expanded_from, contradicted_by, pinned, snippet, created_at, source_kind, trust_tier, derived_from}], retrieval_mode}`.
 
@@ -64,8 +69,8 @@ the bounded status envelope and transport pretty-print whitespace are not counte
 A full observation fits or is `omitted_for_size`; no partial body assertion is
 returned. The response contains `items`, `bytes_returned`, `max_bytes`, and
 `content_limited`. Each item has `id`, `status` (`ok`, `unavailable`, or
-`omitted_for_size`) and `observation` only when `ok`. Observation fields retain
-the existing PascalCase wire names; the new request/envelope fields use snake_case.
+`omitted_for_size`) and `observation` only when `ok`. Existing observation fields retain PascalCase names; new `topic_key`, `evidence`,
+request and envelope fields use snake_case.
 
 ```json
 {"project":"mnemos","ids":["01A","01B","01A"],"max_bytes":32768}
@@ -102,6 +107,44 @@ before. No database migration, cursor storage, read-event table, injection event
 used/success flag or remembered copy of results is introduced. Locators inside
 observations are returned without fetching their contents. HTTP routes and Go
 examples are documented in [API.md](API.md).
+
+### `mnemos_evidence_check`
+Record an explicit caller-reported latest result for an existing reference:
+
+```json
+{"observation_id":"01A","evidence_key":"<stored key>","status":"changed"}
+```
+
+`status` is `unverified`, `matched`, `changed`, or `unavailable`. `matched` requires
+a recorded SHA-256 fingerprint baseline. The injected service clock supplies
+`checked_at`; callers cannot certify their own timestamp. It returns the reference
+with its latest marker. No URL/file is fetched, no source body or check history is
+stored, and the check never changes trust, importance, ranking, validity or pinning.
+A matching fragment is not proof that its claim is true. A mismatch means review
+is needed, not automatic invalidation.
+
+Save references accept `locator`, `relation` (`supports`/`refutes`), optional
+`revision`, `selector`, and `fingerprint`. At most 16 references may be submitted before identity deduplication; field limits are
+2048 locator bytes, 256 revision bytes, 512 selector bytes; fingerprints are 64
+hexadecimal SHA-256 characters. No quote/body field exists. New saves always start
+`unverified`, even when a caller supplies markers through another transport.
+Output also contains a derived `key`, latest `status`, and optional `checked_at`.
+Duplicate identities count as one stored reference; this is never an independent
+proof count or confidence score. Old-version references stay with that version;
+a replacement starts with only explicitly supplied references.
+
+Topics group assertions, not truths: a rule and its exception may share one topic
+and remain live. Use `replaces_id` only for explicit replacement, in the same resolved
+agent/project scope. Omitted topic inherits from the target; a different explicit
+topic is rejected. Raw cannot replace trusted content. Pins inherit unless
+`unpin_replacement` is true, and pinned expiry remains neutralized. Future-effective
+replacement is rejected. A matching retry returns its original successor; a stale
+or different request returns a tool error with structured `{code:"conflict",error}`.
+Inspect the current version before retrying a conflict; do not guess a new target.
+
+Full-store snapshots preserve topic, references, latest markers, and historical
+supersession links; [backup guidance](BACKUP.md) describes downgrade constraints.
+Vault and skill packs are intentionally lossy for this metadata.
 
 ### `mnemos_delete`
 Hard-delete by ID. Use only for mistaken saves. For changed facts, use `mnemos_link` with `supersedes`.

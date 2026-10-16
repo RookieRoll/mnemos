@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Bounded reading delegates visibility, budgets and measurement to memory.
 	mux.Handle("POST /v1/observations/batch", scopedRead(s.mem.GetMany))
+	mux.HandleFunc("POST /v1/observations/{id}/evidence/check", s.evidenceCheck)
 	mux.Handle("POST /v1/observations/neighborhood", scopedRead(s.mem.Neighborhood))
 
 	// Search / context / link ----------------------------------------

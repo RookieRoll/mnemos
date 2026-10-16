@@ -59,22 +59,24 @@ type NeighborhoodInput struct {
 
 // ObservationSummary is bounded navigation text with original visibility metadata.
 type ObservationSummary struct {
-	ID               string     `json:"id"`
-	Title            string     `json:"title"`
-	Snippet          string     `json:"snippet"`
-	TitleTruncated   bool       `json:"title_truncated"`
-	SnippetTruncated bool       `json:"snippet_truncated"`
-	Type             string     `json:"type"`
-	AgentID          string     `json:"agent_id"`
-	Project          string     `json:"project"`
-	SessionID        string     `json:"session_id"`
-	CreatedAt        time.Time  `json:"created_at"`
-	ValidFrom        time.Time  `json:"valid_from"`
-	ValidUntil       *time.Time `json:"valid_until,omitempty"`
-	InvalidatedAt    *time.Time `json:"invalidated_at,omitempty"`
-	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
-	TrustTier        string     `json:"trust_tier"`
-	SourceKind       string     `json:"source_kind"`
+	TopicKey         string              `json:"topic_key"`
+	Evidence         []EvidenceReference `json:"evidence,omitempty"`
+	ID               string              `json:"id"`
+	Title            string              `json:"title"`
+	Snippet          string              `json:"snippet"`
+	TitleTruncated   bool                `json:"title_truncated"`
+	SnippetTruncated bool                `json:"snippet_truncated"`
+	Type             string              `json:"type"`
+	AgentID          string              `json:"agent_id"`
+	Project          string              `json:"project"`
+	SessionID        string              `json:"session_id"`
+	CreatedAt        time.Time           `json:"created_at"`
+	ValidFrom        time.Time           `json:"valid_from"`
+	ValidUntil       *time.Time          `json:"valid_until,omitempty"`
+	InvalidatedAt    *time.Time          `json:"invalidated_at,omitempty"`
+	ExpiresAt        *time.Time          `json:"expires_at,omitempty"`
+	TrustTier        string              `json:"trust_tier"`
+	SourceKind       string              `json:"source_kind"`
 }
 
 // SummaryResult is an available bounded summary or an explicit unavailable/size status.

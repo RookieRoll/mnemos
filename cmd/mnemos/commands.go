@@ -248,6 +248,9 @@ func runImport(ctx context.Context, args []string) error {
 		return fmt.Errorf("decode %s: %w", args[0], err)
 	}
 
+	if err := prepareSnapshot(&snap); err != nil {
+		return fmt.Errorf("import snapshot: %w", err)
+	}
 	d, err := loadDeps(ctx)
 	if err != nil {
 		return err
@@ -269,6 +272,20 @@ func runImport(ctx context.Context, args []string) error {
 		repointed                int
 		knownSessions            = make(map[string]bool, len(snap.Sessions))
 	)
+	// Normalize legacy dangling session links before both identity preflight
+	// and restore, so matching repeated imports compare the same owner identity.
+	for _, session := range snap.Sessions {
+		knownSessions[session.ID] = true
+	}
+	for i := range snap.Observations {
+		if id := snap.Observations[i].SessionID; id != "" && !knownSessions[id] {
+			snap.Observations[i].SessionID = ""
+			repointed++
+		}
+	}
+	if err := d.mem.ValidateRestoreMetadata(ctx, snap.Observations, snap.Links); err != nil {
+		return fmt.Errorf("import metadata preflight: %w", err)
+	}
 	for i := range snap.Sessions {
 		s := snap.Sessions[i]
 		knownSessions[s.ID] = true
@@ -286,21 +303,12 @@ func runImport(ctx context.Context, args []string) error {
 		}
 		countAddSkip(added, &skillAdded, &skillSkipped)
 	}
-	for i := range snap.Observations {
-		o := snap.Observations[i]
-		// Drop a session link the dump does not carry, so the foreign key
-		// cannot dangle. Rare in a full dump; happens with edited or partial
-		// exports.
-		if o.SessionID != "" && !knownSessions[o.SessionID] {
-			o.SessionID = ""
-			repointed++
-		}
-		added, err := d.mem.Restore(ctx, &o)
-		if err != nil {
-			return fmt.Errorf("import observation %s: %w", o.ID, err)
-		}
-		countAddSkip(added, &obsAdded, &obsSkipped)
+	var restoreErr error
+	obsAdded, restoreErr = d.mem.RestoreEvolutionSnapshot(ctx, snap.Observations, snap.Links)
+	if restoreErr != nil {
+		return fmt.Errorf("import observations and metadata: %w", restoreErr)
 	}
+	obsSkipped = len(snap.Observations) - obsAdded
 	fmt.Printf("imported from %s: observations %d added / %d skipped, sessions %d / %d, skills %d / %d\n",
 		args[0], obsAdded, obsSkipped, sessAdded, sessSkipped, skillAdded, skillSkipped)
 	if repointed > 0 {
@@ -586,23 +594,33 @@ func runDoctor(ctx context.Context, _ []string) error {
 }
 
 type snapshot struct {
-	Observations []memory.Observation `json:"observations"`
-	Sessions     []session.Session    `json:"sessions"`
-	Skills       []skills.Skill       `json:"skills"`
+	Observations  []memory.Observation `json:"observations"`
+	Sessions      []session.Session    `json:"sessions"`
+	Skills        []skills.Skill       `json:"skills"`
+	SchemaVersion int                  `json:"schema_version,omitempty"`
+	Evidence      []snapshotEvidence   `json:"evidence,omitempty"`
+	Links         []memory.LinkEdge    `json:"supersession_links,omitempty"`
 }
 
 func dumpAll(ctx context.Context, db *storage.DB) (*snapshot, error) {
-	out := &snapshot{}
-	// Single drained query, no per-id Get. The previous loop held a SELECT
+	out := &snapshot{SchemaVersion: 2}
+	// Coherent observations/evidence/links snapshot, no per-id Get. The previous loop held a SELECT
 	// cursor open while calling Get (which itself queries and writes
 	// access_count) for each row, which deadlocks the single-connection pool
 	// on any populated store and bumps access counts as a side effect of
 	// merely exporting.
-	obs, err := db.Observations().Export(ctx)
+	obs, links, err := memory.NewService(memory.Config{Store: db.Observations()}).ExportEvolutionSnapshot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("export observations: %w", err)
 	}
 	out.Observations = obs
+	out.Links = links
+	for i := range out.Observations {
+		for _, e := range out.Observations[i].Evidence {
+			out.Evidence = append(out.Evidence, snapshotEvidence{ObservationID: out.Observations[i].ID, Evidence: e})
+		}
+		out.Observations[i].Evidence = nil
+	}
 	if list, err := db.Sessions().Recent(ctx, "", 10000); err == nil {
 		out.Sessions = list
 	}

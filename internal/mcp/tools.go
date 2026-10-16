@@ -67,6 +67,11 @@ func (s *Server) registerTools() {
 		Description: "Browse bounded chronological summaries around a visible observation in its session, project and agent scope. Requires project. Defaults to 3 before and after (0-10 each), live non-raw visibility, 32 KiB encoded selected-summary budget (max 256 KiB). Explicit raw/stale/history inspection stays scoped. Returns availability, window/size limits and UTF-8-safe summary truncation; does not increment detail access counters.",
 	}, s.handleNeighborhood)
 
+	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		Name:        "mnemos_evidence_check",
+		Description: "Record the latest explicit caller-reported source check (matched, changed, unavailable or unverified) for an existing observation reference. A matched report requires a stored fingerprint baseline. Mnemos does not fetch sources or independently certify the claim. Replaces the prior marker/time only; never changes trust, validity, pinning or ranking and keeps no check history.",
+	}, s.handleEvidenceCheck)
+
 	// Sessions -----------------------------------------------------------
 	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
 		Name: "mnemos_session_start",
@@ -215,27 +220,32 @@ func (s *Server) registerTools() {
 // ---- mnemos_save -------------------------------------------------------
 
 type saveArgs struct {
-	Title       string   `json:"title" jsonschema:"short scannable label"`
-	Content     string   `json:"content" jsonschema:"the memory — structure as what/why/where/learned"`
-	Type        string   `json:"type" jsonschema:"decision|bugfix|pattern|preference|context|architecture|episodic|semantic|procedural|correction|convention"`
-	Tags        []string `json:"tags,omitempty"`
-	Importance  int      `json:"importance,omitempty" jsonschema:"1..10, defaults to 5"`
-	TTLDays     int      `json:"ttl_days,omitempty"`
-	AgentID     string   `json:"agent_id,omitempty"`
-	Project     string   `json:"project,omitempty"`
-	SessionID   string   `json:"session_id,omitempty"`
-	ValidFrom   string   `json:"valid_from,omitempty" jsonschema:"RFC3339 fact-time lower bound"`
-	ValidUntil  string   `json:"valid_until,omitempty" jsonschema:"RFC3339 fact-time upper bound"`
-	Rationale   string   `json:"rationale,omitempty" jsonschema:"the WHY — surfaced in prewarm"`
-	SourceKind  string   `json:"source_kind,omitempty" jsonschema:"user|tool|agent_inference|dream|import — defaults to user"`
-	TrustTier   string   `json:"trust_tier,omitempty" jsonschema:"raw|curated|skill — only user-sourced saves keep this; any non-user source_kind is quarantined to raw automatically regardless of this value"`
-	DerivedFrom []string `json:"derived_from,omitempty" jsonschema:"parent observation IDs this memory was derived from"`
-	Pinned      bool     `json:"pinned,omitempty" jsonschema:"true to pin as core memory: immune to decay, Tier-0 prewarm slot, clears expiry"`
+	Title            string             `json:"title" jsonschema:"short scannable label"`
+	Content          string             `json:"content" jsonschema:"the memory — structure as what/why/where/learned"`
+	Type             string             `json:"type" jsonschema:"decision|bugfix|pattern|preference|context|architecture|episodic|semantic|procedural|correction|convention"`
+	Tags             []string           `json:"tags,omitempty"`
+	Importance       int                `json:"importance,omitempty" jsonschema:"1..10, defaults to 5"`
+	TTLDays          int                `json:"ttl_days,omitempty"`
+	AgentID          string             `json:"agent_id,omitempty"`
+	Project          string             `json:"project,omitempty"`
+	SessionID        string             `json:"session_id,omitempty"`
+	ValidFrom        string             `json:"valid_from,omitempty" jsonschema:"RFC3339 fact-time lower bound"`
+	ValidUntil       string             `json:"valid_until,omitempty" jsonschema:"RFC3339 fact-time upper bound"`
+	Rationale        string             `json:"rationale,omitempty" jsonschema:"the WHY — surfaced in prewarm"`
+	SourceKind       string             `json:"source_kind,omitempty" jsonschema:"user|tool|agent_inference|dream|import — defaults to user"`
+	TrustTier        string             `json:"trust_tier,omitempty" jsonschema:"raw|curated|skill — only user-sourced saves keep this; any non-user source_kind is quarantined to raw automatically regardless of this value"`
+	DerivedFrom      []string           `json:"derived_from,omitempty" jsonschema:"parent observation IDs this memory was derived from"`
+	TopicKey         string             `json:"topic_key,omitempty" jsonschema:"optional exact case-sensitive topic; shared topic appends unless replaces_id is explicit"`
+	ReplacesID       string             `json:"replaces_id,omitempty" jsonschema:"expected live same-scope version to replace atomically"`
+	UnpinReplacement bool               `json:"unpin_replacement,omitempty" jsonschema:"explicitly allow unpinning when replacing a pinned version"`
+	Evidence         []evidenceSaveArgs `json:"evidence,omitempty" jsonschema:"at most16 bounded source references; new saves start unverified; never fetches source bodies"`
+	Pinned           bool               `json:"pinned,omitempty" jsonschema:"true to pin as core memory: immune to decay, Tier-0 prewarm slot, clears expiry"`
 }
 
 func (s *Server) handleSave(ctx context.Context, _ *mcpsdk.CallToolRequest, a saveArgs) (*mcpsdk.CallToolResult, any, error) {
 	in := memory.SaveInput{
 		Title: a.Title, Content: a.Content, Type: memory.ObsType(a.Type),
+		TopicKey: a.TopicKey, ReplacesID: a.ReplacesID, UnpinReplacement: a.UnpinReplacement, Evidence: toEvidence(a.Evidence),
 		Tags: a.Tags, Importance: a.Importance, TTLDays: a.TTLDays,
 		AgentID: a.AgentID, Project: a.Project, SessionID: a.SessionID,
 		Rationale:   a.Rationale,
@@ -256,7 +266,7 @@ func (s *Server) handleSave(ctx context.Context, _ *mcpsdk.CallToolRequest, a sa
 	}
 	res, err := s.cfg.Memory.Save(ctx, in)
 	if err != nil {
-		return nil, nil, err
+		return evolutionError(err)
 	}
 	return jsonResult(map[string]any{
 		"id":           res.Observation.ID,
@@ -268,12 +278,15 @@ func (s *Server) handleSave(ctx context.Context, _ *mcpsdk.CallToolRequest, a sa
 		"pinned":       res.Observation.Pinned,
 		"created_at":   res.Observation.CreatedAt,
 		"deduped":      res.Deduped,
+		"topic_key":    res.Observation.TopicKey,
+		"evidence":     res.Observation.Evidence,
 	})
 }
 
 // ---- mnemos_search -----------------------------------------------------
 
 type searchArgs struct {
+	TopicKey      string   `json:"topic_key,omitempty" jsonschema:"optional exact topic filter; does not change ranking"`
 	Query         string   `json:"query"`
 	Type          string   `json:"type,omitempty"`
 	Tags          []string `json:"tags,omitempty"`
@@ -288,7 +301,7 @@ type searchArgs struct {
 
 func (s *Server) handleSearch(ctx context.Context, _ *mcpsdk.CallToolRequest, a searchArgs) (*mcpsdk.CallToolResult, any, error) {
 	in := memory.SearchInput{
-		Query: a.Query, Type: memory.ObsType(a.Type), Tags: a.Tags,
+		Query: a.Query, Type: memory.ObsType(a.Type), Tags: a.Tags, TopicKey: a.TopicKey,
 		MinImportance: a.MinImportance, Limit: a.Limit,
 		AgentID: a.AgentID, Project: a.Project,
 		IncludeStale: a.IncludeStale,
@@ -320,6 +333,8 @@ func (s *Server) handleSearch(ctx context.Context, _ *mcpsdk.CallToolRequest, a 
 			"contradicted_by":      r.ContradictedBy,
 			"pinned":               r.Observation.Pinned,
 			"snippet":              r.Snippet,
+			"topic_key":            r.Observation.TopicKey,
+			"evidence":             r.Observation.Evidence,
 			"created_at":           r.Observation.CreatedAt,
 			"source_kind":          string(r.Observation.SourceKind),
 			"trust_tier":           string(r.Observation.TrustTier),
@@ -361,7 +376,7 @@ type linkArgs struct {
 
 func (s *Server) handleLink(ctx context.Context, _ *mcpsdk.CallToolRequest, a linkArgs) (*mcpsdk.CallToolResult, any, error) {
 	if err := s.cfg.Memory.Link(ctx, a.SourceID, a.TargetID, memory.LinkType(a.LinkType)); err != nil {
-		return nil, nil, err
+		return evolutionError(err)
 	}
 	return textResult(fmt.Sprintf("linked %s -[%s]-> %s", a.SourceID, a.LinkType, a.TargetID))
 }

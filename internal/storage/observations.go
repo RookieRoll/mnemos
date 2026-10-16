@@ -26,9 +26,15 @@ const obsColumns = `
 	content_hash, structured, rationale,
 	embedding, embedding_model, last_exported_at,
 	source_kind, trust_tier, derived_from,
-	pinned`
+	pinned, topic_key`
 
-const selectObsSQL = `SELECT ` + obsColumns + ` FROM observations`
+const evidenceProjection = `COALESCE((SELECT json_group_array(json_object('key', e.evidence_key, 'locator', e.locator, 'relation', e.relation, 'revision', e.revision, 'selector', e.selector, 'fingerprint', e.fingerprint, 'status', e.status, 'checked_at', e.checked_at)) FROM (SELECT * FROM observation_evidence ORDER BY evidence_key) e WHERE e.observation_id = %s.id), '[]')`
+
+const selectObsSQL = `SELECT ` + obsColumns + `, COALESCE((SELECT json_group_array(json_object('key', e.evidence_key, 'locator', e.locator, 'relation', e.relation, 'revision', e.revision, 'selector', e.selector, 'fingerprint', e.fingerprint, 'status', e.status, 'checked_at', e.checked_at)) FROM (SELECT * FROM observation_evidence ORDER BY evidence_key) e WHERE e.observation_id = observations.id), '[]') FROM observations`
+
+func observationProjection(alias string) string {
+	return prefixed(alias, obsColumns) + ", " + fmt.Sprintf(evidenceProjection, alias)
+}
 
 func liveObsSQL(alias string) string {
 	prefix := ""
@@ -41,61 +47,7 @@ func liveObsSQL(alias string) string {
 }
 
 func (s *obsStore) Insert(ctx context.Context, o *memory.Observation) error {
-	tags, err := json.Marshal(coalesceSliceStr(o.Tags))
-	if err != nil {
-		return fmt.Errorf("marshal tags: %w", err)
-	}
-	// Provenance fields default at the service layer, but defend in depth
-	// here so a store caller that bypasses the service (tests, migrations)
-	// still ends up with CHECK-constraint-valid rows.
-	sourceKind := o.SourceKind
-	if sourceKind == "" {
-		sourceKind = memory.SourceUser
-	}
-	trustTier := o.TrustTier
-	if trustTier == "" {
-		trustTier = memory.TrustCurated
-	}
-	derived, err := json.Marshal(coalesceSliceStr(o.DerivedFrom))
-	if err != nil {
-		return fmt.Errorf("marshal derived_from: %w", err)
-	}
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO observations (
-			id, session_id, agent_id, project,
-			title, content, obs_type, tags, importance,
-			created_at, valid_from, valid_until, expires_at,
-			content_hash, structured, rationale,
-			embedding, embedding_model,
-			source_kind, trust_tier, derived_from, pinned
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		o.ID,
-		nullableStr(o.SessionID),
-		o.AgentID,
-		nullableStr(o.Project),
-		o.Title,
-		o.Content,
-		string(o.Type),
-		string(tags),
-		o.Importance,
-		o.CreatedAt.UTC(),
-		o.ValidFrom.UTC(),
-		nullableTime(o.ValidUntil),
-		nullableTime(o.ExpiresAt),
-		nullableStr(o.ContentHash),
-		nullableStr(o.Structured),
-		nullableStr(o.Rationale),
-		encodeVector(o.Embedding),
-		nullableStr(o.EmbeddingModel),
-		string(sourceKind),
-		string(trustTier),
-		string(derived),
-		pinnedInt(o.Pinned),
-	)
-	if err != nil {
-		return fmt.Errorf("insert observation: %w", err)
-	}
-	return nil
+	return s.insertWithEvidence(ctx, o)
 }
 
 // Restore inserts an observation verbatim, preserving its ID, bi-temporal
@@ -106,72 +58,7 @@ func (s *obsStore) Insert(ctx context.Context, o *memory.Observation) error {
 // erroring. It never clamps the trust tier, so a quarantined raw observation
 // comes back raw. Returns true when a row was actually written.
 func (s *obsStore) Restore(ctx context.Context, o *memory.Observation) (bool, error) {
-	tags, err := json.Marshal(coalesceSliceStr(o.Tags))
-	if err != nil {
-		return false, fmt.Errorf("marshal tags: %w", err)
-	}
-	derived, err := json.Marshal(coalesceSliceStr(o.DerivedFrom))
-	if err != nil {
-		return false, fmt.Errorf("marshal derived_from: %w", err)
-	}
-	// Defense in depth for hand-edited dumps: keep CHECK-valid defaults.
-	agentID := o.AgentID
-	if agentID == "" {
-		agentID = "default"
-	}
-	sourceKind := o.SourceKind
-	if sourceKind == "" {
-		sourceKind = memory.SourceUser
-	}
-	trustTier := o.TrustTier
-	if trustTier == "" {
-		trustTier = memory.TrustCurated
-	}
-	res, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO observations (
-			id, session_id, agent_id, project,
-			title, content, obs_type, tags, importance,
-			access_count, last_accessed_at,
-			created_at, valid_from, valid_until, invalidated_at, expires_at,
-			content_hash, structured, rationale,
-			embedding, embedding_model,
-			source_kind, trust_tier, derived_from, last_exported_at, pinned
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		o.ID,
-		nullableStr(o.SessionID),
-		agentID,
-		nullableStr(o.Project),
-		o.Title,
-		o.Content,
-		string(o.Type),
-		string(tags),
-		o.Importance,
-		o.AccessCount,
-		nullableTime(o.LastAccessedAt),
-		o.CreatedAt.UTC(),
-		o.ValidFrom.UTC(),
-		nullableTime(o.ValidUntil),
-		nullableTime(o.InvalidatedAt),
-		nullableTime(o.ExpiresAt),
-		nullableStr(o.ContentHash),
-		nullableStr(o.Structured),
-		nullableStr(o.Rationale),
-		encodeVector(o.Embedding),
-		nullableStr(o.EmbeddingModel),
-		string(sourceKind),
-		string(trustTier),
-		string(derived),
-		nullableTime(o.LastExportedAt),
-		pinnedInt(o.Pinned),
-	)
-	if err != nil {
-		return false, fmt.Errorf("restore observation: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("rows affected: %w", err)
-	}
-	return n > 0, nil
+	return s.restoreWithEvidence(ctx, o)
 }
 
 // Export returns every observation, all tiers and validity states included,
@@ -299,7 +186,7 @@ func (s *obsStore) Search(ctx context.Context, in memory.SearchInput) ([]memory.
 
 	args := []any{ftsEscape(in.Query)}
 	var sb strings.Builder
-	sb.WriteString(`SELECT ` + prefixed("o", obsColumns) + `,
+	sb.WriteString(`SELECT ` + observationProjection("o") + `,
 	       bm25(observations_fts) AS score,
 	       snippet(observations_fts, 1, '', '', '…', 16) AS snip
 	  FROM observations_fts
@@ -313,6 +200,10 @@ func (s *obsStore) Search(ctx context.Context, in memory.SearchInput) ([]memory.
 	if in.Project != "" {
 		sb.WriteString(` AND o.project = ?`)
 		args = append(args, in.Project)
+	}
+	if in.TopicKey != "" {
+		sb.WriteString(` AND o.topic_key = ?`)
+		args = append(args, in.TopicKey)
 	}
 	if in.Type != "" {
 		sb.WriteString(` AND o.obs_type = ?`)
@@ -534,7 +425,7 @@ func (s *obsStore) ListByTitleSimilarity(ctx context.Context, agentID, title str
 		limit = 10
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+prefixed("o", obsColumns)+`
+		SELECT `+observationProjection("o")+`
 		  FROM observations o
 		  JOIN observations_fts fts ON fts.rowid = o.rowid
 		 WHERE o.agent_id = ? AND observations_fts MATCH ?
@@ -574,7 +465,7 @@ func (s *obsStore) FindByContentHash(ctx context.Context, agentID, project, hash
 		return nil, nil
 	}
 	args := []any{nullableStr(agentID), hash}
-	query := selectObsSQL + ` WHERE agent_id = COALESCE(?, agent_id) AND content_hash = ?`
+	query := selectObsSQL + ` WHERE agent_id = COALESCE(?, agent_id) AND content_hash = ? AND COALESCE(topic_key,'') = '' AND NOT EXISTS (SELECT 1 FROM observation_evidence e WHERE e.observation_id = observations.id)`
 	if project != "" {
 		query += ` AND project = ?`
 		args = append(args, project)
@@ -686,6 +577,10 @@ func (s *obsStore) ListEmbeddings(ctx context.Context, in memory.SearchInput) ([
 		sb.WriteString(` AND agent_id = ?`)
 		args = append(args, in.AgentID)
 	}
+	if in.TopicKey != "" {
+		sb.WriteString(` AND topic_key = ?`)
+		args = append(args, in.TopicKey)
+	}
 	if in.Project != "" {
 		sb.WriteString(` AND project = ?`)
 		args = append(args, in.Project)
@@ -747,7 +642,7 @@ func (s *obsStore) ListNeighborsFor(ctx context.Context, ids []string, perParent
 	now := time.Now().UTC()
 	ph := placeholders(len(ids))
 	query := `
-		SELECT e.parent_id, ` + prefixed("o", obsColumns) + `
+		SELECT e.parent_id, ` + observationProjection("o") + `
 		  FROM (
 		        SELECT l.source_id AS parent_id, l.target_id AS nb_id
 		          FROM observation_links l
@@ -800,7 +695,9 @@ func (s *obsStore) ListNeighborsFor(ctx context.Context, ids []string, perParent
 		if err := rows.Scan(append([]any{&parentID}, d.args()...)...); err != nil {
 			return nil, fmt.Errorf("scan neighbour: %w", err)
 		}
-		d.finalise()
+		if err := d.finalise(); err != nil {
+			return nil, err
+		}
 		if perParent > 0 && counts[parentID] >= perParent {
 			continue
 		}
@@ -825,7 +722,7 @@ func (s *obsStore) ListContradictors(ctx context.Context, ids []string) ([]memor
 	now := time.Now().UTC()
 	ph := placeholders(len(ids))
 	query := `
-		SELECT e.candidate_id, ` + prefixed("o", obsColumns) + `
+		SELECT e.candidate_id, ` + observationProjection("o") + `
 		  FROM (
 		        SELECT source_id AS candidate_id, target_id AS other_id
 		          FROM observation_links
@@ -863,7 +760,9 @@ func (s *obsStore) ListContradictors(ctx context.Context, ids []string) ([]memor
 		if err := rows.Scan(append([]any{&candidateID}, d.args()...)...); err != nil {
 			return nil, fmt.Errorf("scan contradictor: %w", err)
 		}
-		d.finalise()
+		if err := d.finalise(); err != nil {
+			return nil, err
+		}
 		out = append(out, memory.Contradictor{
 			CandidateID: candidateID,
 			Observation: *o,
@@ -887,6 +786,8 @@ type obsScanDest struct {
 	sourceKind, trustTier     *string
 	derivedFromJSON           *string
 	pinned                    *int64
+	topicKey                  *sql.NullString
+	evidenceJSON              *string
 }
 
 func newObsScanDest(o *memory.Observation) obsScanDest {
@@ -909,6 +810,8 @@ func newObsScanDest(o *memory.Observation) obsScanDest {
 		trustTier:       new(string),
 		derivedFromJSON: new(string),
 		pinned:          new(int64),
+		topicKey:        &sql.NullString{},
+		evidenceJSON:    new(string),
 	}
 }
 
@@ -922,11 +825,11 @@ func (d obsScanDest) args() []any {
 		d.contentHash, d.structured, d.rationale,
 		d.embedding, d.embeddingModel, d.lastExportedAt,
 		d.sourceKind, d.trustTier, d.derivedFromJSON,
-		d.pinned,
+		d.pinned, d.topicKey, d.evidenceJSON,
 	}
 }
 
-func (d obsScanDest) finalise() {
+func (d obsScanDest) finalise() error {
 	d.o.SessionID = d.sessID.String
 	d.o.Project = d.project.String
 	d.o.ContentHash = d.contentHash.String
@@ -944,6 +847,14 @@ func (d obsScanDest) finalise() {
 	d.o.TrustTier = memory.TrustTier(*d.trustTier)
 	_ = json.Unmarshal([]byte(*d.derivedFromJSON), &d.o.DerivedFrom)
 	d.o.Pinned = *d.pinned != 0
+	d.o.TopicKey = d.topicKey.String
+	if err := json.Unmarshal([]byte(*d.evidenceJSON), &d.o.Evidence); err != nil {
+		return fmt.Errorf("storage: decode evidence metadata: %w", err)
+	}
+	if len(d.o.Evidence) == 0 {
+		d.o.Evidence = nil
+	}
+	return nil
 }
 
 func scanObs(row scanner) (*memory.Observation, error) {
@@ -952,7 +863,9 @@ func scanObs(row scanner) (*memory.Observation, error) {
 	if err := row.Scan(d.args()...); err != nil {
 		return nil, err
 	}
-	d.finalise()
+	if err := d.finalise(); err != nil {
+		return nil, err
+	}
 	return o, nil
 }
 
@@ -965,7 +878,9 @@ func scanObsWithScore(row scanner) (*memory.Observation, float64, string, error)
 	if err := row.Scan(args...); err != nil {
 		return nil, 0, "", fmt.Errorf("scan: %w", err)
 	}
-	d.finalise()
+	if err := d.finalise(); err != nil {
+		return nil, 0, "", err
+	}
 	return o, score, snippet, nil
 }
 

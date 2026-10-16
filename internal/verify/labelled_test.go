@@ -74,7 +74,11 @@ func TestREADMEFixtureExamplesLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocks := strings.Split(string(data), "```yaml\n")
+	blocks := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "```yaml\n")
+	if len(blocks) < 2 {
+		t.Fatal("no README YAML examples found")
+	}
+	t.Logf("validated %d README YAML examples", len(blocks)-1)
 	for i, b := range blocks[1:] {
 		text := strings.SplitN(b, "```", 2)[0]
 		if strings.HasPrefix(text, "- id:") {

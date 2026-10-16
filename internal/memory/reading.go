@@ -66,22 +66,25 @@ type NeighborhoodInput struct {
 
 // ObservationSummary retains visibility metadata without a full detail body.
 type ObservationSummary struct {
-	ID               string     `json:"id"`
-	SessionID        string     `json:"session_id,omitempty"`
-	AgentID          string     `json:"agent_id"`
-	Project          string     `json:"project"`
-	Title            string     `json:"title"`
-	Type             ObsType    `json:"type"`
-	Snippet          string     `json:"snippet"`
-	TitleTruncated   bool       `json:"title_truncated"`
-	SnippetTruncated bool       `json:"snippet_truncated"`
-	CreatedAt        time.Time  `json:"created_at"`
-	ValidFrom        time.Time  `json:"valid_from"`
-	ValidUntil       *time.Time `json:"valid_until,omitempty"`
-	InvalidatedAt    *time.Time `json:"invalidated_at,omitempty"`
-	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
-	SourceKind       SourceKind `json:"source_kind"`
-	TrustTier        TrustTier  `json:"trust_tier"`
+	// TopicKey and Evidence are bounded by the complete encoded-summary budget.
+	TopicKey         string              `json:"topic_key,omitempty"`
+	Evidence         []EvidenceReference `json:"evidence,omitempty"`
+	ID               string              `json:"id"`
+	SessionID        string              `json:"session_id,omitempty"`
+	AgentID          string              `json:"agent_id"`
+	Project          string              `json:"project"`
+	Title            string              `json:"title"`
+	Type             ObsType             `json:"type"`
+	Snippet          string              `json:"snippet"`
+	TitleTruncated   bool                `json:"title_truncated"`
+	SnippetTruncated bool                `json:"snippet_truncated"`
+	CreatedAt        time.Time           `json:"created_at"`
+	ValidFrom        time.Time           `json:"valid_from"`
+	ValidUntil       *time.Time          `json:"valid_until,omitempty"`
+	InvalidatedAt    *time.Time          `json:"invalidated_at,omitempty"`
+	ExpiresAt        *time.Time          `json:"expires_at,omitempty"`
+	SourceKind       SourceKind          `json:"source_kind"`
+	TrustTier        TrustTier           `json:"trust_tier"`
 }
 
 // SummaryResult describes one visible timeline entry or unavailable anchor.
@@ -305,7 +308,7 @@ func (s *Service) Neighborhood(ctx context.Context, in NeighborhoodInput) (*Neig
 		}
 		title, titleCut := boundedSummary(o.Title, 256)
 		snippet, snippetCut := boundedSummary(o.Content, 512)
-		summary := &ObservationSummary{ID: o.ID, SessionID: o.SessionID, AgentID: o.AgentID, Project: o.Project, Title: title, Type: o.Type, Snippet: snippet, TitleTruncated: titleCut, SnippetTruncated: snippetCut, CreatedAt: o.CreatedAt, ValidFrom: o.ValidFrom, ValidUntil: o.ValidUntil, InvalidatedAt: o.InvalidatedAt, ExpiresAt: o.ExpiresAt, SourceKind: o.SourceKind, TrustTier: o.TrustTier}
+		summary := &ObservationSummary{TopicKey: o.TopicKey, Evidence: o.Evidence, ID: o.ID, SessionID: o.SessionID, AgentID: o.AgentID, Project: o.Project, Title: title, Type: o.Type, Snippet: snippet, TitleTruncated: titleCut, SnippetTruncated: snippetCut, CreatedAt: o.CreatedAt, ValidFrom: o.ValidFrom, ValidUntil: o.ValidUntil, InvalidatedAt: o.InvalidatedAt, ExpiresAt: o.ExpiresAt, SourceKind: o.SourceKind, TrustTier: o.TrustTier}
 		encoded, err := json.Marshal(summary)
 		if err != nil {
 			return nil, fmt.Errorf("memory: encode summary size: %w", err)

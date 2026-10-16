@@ -162,19 +162,21 @@ func TestScopedReadTransportParity(t *testing.T) {
 func TestScopedReadDocumentExamples(t *testing.T) {
 	h := newHarness(t)
 	for _, path := range []string{"../../docs/API.md", "../../docs/MCP_TOOLS.md"} {
+		tested := 0
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, block := range strings.Split(string(data), "```json\n")[1:] {
+		for _, block := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "```json\n")[1:] {
 			snippet := strings.SplitN(block, "```", 2)[0]
 			var args map[string]any
 			if err := json.Unmarshal([]byte(snippet), &args); err != nil {
 				t.Fatal(err)
 			}
-			if args["project"] == nil {
+			if args["project"] == nil || (args["ids"] == nil && args["id"] == nil) {
 				continue
 			}
+			tested++
 			tool := "mnemos_neighborhood"
 			if args["ids"] != nil {
 				tool = "mnemos_get_many"
@@ -184,5 +186,9 @@ func TestScopedReadDocumentExamples(t *testing.T) {
 				t.Fatalf("%s documented example: %s", path, text)
 			}
 		}
+		if tested == 0 {
+			t.Fatalf("no scoped-read examples found in %s", path)
+		}
+		t.Logf("executed %d scoped-read JSON examples from %s", tested, path)
 	}
 }
