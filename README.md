@@ -278,7 +278,7 @@ To undo: `pi remove D:\software\mnemos\pi`, then delete the directory.
 
 ### Any MCP-compatible client
 
-Stdio: point the client at `mnemos serve`. The server advertises 18 tools and 4 resources on the `initialize` handshake (22 tools when rumination is enabled).
+Stdio: point the client at `mnemos serve`. The server advertises 20 tools and 4 resources on the `initialize` handshake (24 tools when rumination is enabled).
 
 ### HTTP transport
 

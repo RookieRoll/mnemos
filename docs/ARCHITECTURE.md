@@ -104,6 +104,18 @@ per hit.
 
 `Save` returns a `SaveResult` indicating fresh insert vs dedup. Search pulls `limit × 3` raw hits per source, re-ranks, truncates to `limit`. Default filters to live-now; `IncludeStale` and `AsOf` opt into historical queries.
 
+## Progressive scoped reading
+
+`memory.Service.GetMany` and `Neighborhood` add ordinary scoped navigation alongside existing search and administrative single-ID get/replay. Both require an explicit non-empty project and resolve an omitted agent to `default`, matching save. Scope remains hard even with raw or historical options. By default, observations must be non-raw and fact-valid at the effective time: `valid_from <= AsOf`, with invalidation, valid-until, and expiry after that time. Omitted `AsOf` uses the service clock; explicit `IncludeStale` bypasses temporal predicates. Historical validity does not impose `created_at <= AsOf` or reconstruct a historical snapshot of mutable fields. Existing Search/Get/replay semantics stay unchanged.
+
+A batch accepts 1–32 requested IDs, deduplicates in first-requested order, and returns `ok`, `unavailable` (missing and filtered are indistinguishable), or `omitted_for_size`. An `ok` detail is complete except that embedding vectors and model names are excluded. Size-omitted and unavailable results contain only the requested ID/status, with no title, content, scope, or omission reason for filtered records.
+
+The response budget defaults to 32 KiB and has a 256 KiB maximum. `bytes_returned` is the sum of the JSON-encoded complete detail/summary objects, including metadata and JSON escaping. This bounds large titles, tags, rationale, and structured fields as well as content; it excludes the fixed/count-bounded status envelope. IDs must be valid UTF-8 and at most 256 bytes, projects at most 4096 bytes, and agent IDs at most 256 bytes. An oversized stored neighbourhood ID fails the request rather than leaking an unbounded ID outside the budget. Items are never partially truncated to force a detail to fit.
+
+A neighbourhood validates its anchor and reads one coherent SQLite transaction snapshot. It applies scope/trust/time filters before selecting 0–10 visible neighbours on either side, ordered by `(created_at, id)`. Omitted before/after limits default to 3; explicit zero selects none on that side and can still report more eligible neighbours. The window metadata counts visible window members before size omission, not hidden rows. A hidden anchor returns one unavailable status and no window counts. A visible anchor without a session returns just its summary and `no_session: true`. Summaries include original visibility metadata and explicitly flagged, UTF-8-safe title/snippet shortening (256/512 bytes); they do not include full bodies.
+
+Non-mutating scoped reads fully drain their cursors before a single atomic access update. Only unique `ok` batch details increment existing counters; a bookkeeping error fails the complete detail request and rolls back partial updates. Summary browsing and size-omitted/filtered items do not increment access. A counter measures a service read, not confirmed delivery, successful use, or an outcome. Neither operation creates injection events. Batch selections, windows, snippets, budgets, and status objects remain transient; no migration, cursor table, read-event table, remembered copy, or automatic source-URL/path fetch is introduced.
+
 ## Pre-warm
 
 The big one. Agents don't self-invoke memory tools reliably, so `mnemos_session_start` doesn't hand back just an ID — it returns a pre-warmed block assembled from:
@@ -147,7 +159,7 @@ Pipeline, in order:
 
 ## MCP
 
-We use the [official Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.5.x, maintained in collaboration with Google). Each tool is registered via `mcp.AddTool[In, Out]` with a typed argument struct — JSON schemas are inferred from `json` and `jsonschema` struct tags, and the SDK validates inputs before invoking the handler. Our `internal/mcp` package is a thin wrapping layer (~750 LOC) that owns (a) the Config + NewServer wiring, (b) 18 core tool handlers plus 4 optional rumination handlers, and (c) the 3 resource handlers. Protocol framing, JSON-RPC, version negotiation, cancellation, and transport plumbing are all the SDK's job.
+We use the [official Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.5.x, maintained in collaboration with Google). Each tool is registered via `mcp.AddTool[In, Out]` with a typed argument struct — JSON schemas are inferred from `json` and `jsonschema` struct tags, and the SDK validates inputs before invoking the handler. Our `internal/mcp` package is a thin wrapping layer (~750 LOC) that owns (a) the Config + NewServer wiring, (b) 20 core tool handlers plus 4 optional rumination handlers, and (c) the 3 resource handlers. Protocol framing, JSON-RPC, version negotiation, cancellation, and transport plumbing are all the SDK's job.
 
 Resources (`mnemos://session/current`, `mnemos://skills/index`, `mnemos://stats`) are read-only JSON snapshots.
 

@@ -1,6 +1,6 @@
 # MCP tools reference
 
-All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 18 core tools; enabling rumination adds 4 more (22 total).
+All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 20 core tools; enabling rumination adds 4 more (24 total).
 
 ## Save & retrieve
 
@@ -46,6 +46,62 @@ Returns `{results: [{id, title, type, tags, importance, score, relevance, policy
 
 ### `mnemos_get`
 Fetch full observation by ID. Bumps access counter.
+
+### `mnemos_get_many`
+Read selected details after searching. Accepts `ids` (1-32 requested IDs) and a
+required non-empty `project`. Optional `agent_id` defaults to the same identity as
+save (`default`). IDs are deduplicated in first-requested order. Scope is hard:
+missing, other-project/agent, and hidden IDs all return `unavailable` with no body.
+
+Optional `include_raw` and `include_stale` enable explicit inspection within that
+scope. `as_of` is an RFC3339 historical validity instant, not a full database
+snapshot; `include_stale` explicitly bypasses temporal validity filtering.
+
+`max_bytes` defaults to 32768 and accepts 1-262144. The shared budget counts compact
+JSON encoding of each selected observation, including title, tags, rationale,
+structured and validity/provenance metadata. Vectors/model names are excluded;
+the bounded status envelope and transport pretty-print whitespace are not counted.
+A full observation fits or is `omitted_for_size`; no partial body assertion is
+returned. The response contains `items`, `bytes_returned`, `max_bytes`, and
+`content_limited`. Each item has `id`, `status` (`ok`, `unavailable`, or
+`omitted_for_size`) and `observation` only when `ok`. Observation fields retain
+the existing PascalCase wire names; the new request/envelope fields use snake_case.
+
+```json
+{"project":"mnemos","ids":["01A","01B","01A"],"max_bytes":32768}
+```
+
+Only unique returned detail observations increment existing access count/time,
+after successful atomic bookkeeping. A service read count does not prove client
+receipt or agent success. Unavailable and size-omitted entries do not count.
+Retry size-omitted IDs individually with a larger allowed budget when needed.
+
+### `mnemos_neighborhood`
+Browse summaries around `id` with required `project` and the same optional agent,
+trust, history and byte-budget fields as batch. `before` and `after` each default
+to 3, accept 0-10, and preserve explicit zero. Visible neighbours share the
+anchor's session/project/agent and are ordered by `(created_at, id)`; hidden rows
+do not consume the window. This operation does not reuse historical replay reads.
+
+```json
+{"project":"mnemos","id":"01A","before":0,"after":3}
+```
+
+The response includes `anchor_id`, ordered `items` with `summary` only for `ok`
+entries, `bytes_returned`, `max_bytes`, `content_limited`, and `no_session`. A
+`window` reports before/after counts, requested limits, and `has_more_before` /
+`has_more_after`; an unavailable anchor exposes no sibling counts. A visible
+anchor with no session returns only that summary and `no_session: true`.
+Summaries preserve original scope, validity and trust metadata; titles are capped
+at 256 UTF-8 bytes and snippets at 512, with `title_truncated` and
+`snippet_truncated` flags. The budget counts encoded selected summary objects.
+Neighbourhood listing never increments detail-access counts.
+
+Both tools are additive: existing `mnemos_get` and replay semantics remain as
+before. No database migration, cursor storage, read-event table, injection event,
+used/success flag or remembered copy of results is introduced. Locators inside
+observations are returned without fetching their contents. HTTP routes and Go
+examples are documented in [API.md](API.md).
 
 ### `mnemos_delete`
 Hard-delete by ID. Use only for mistaken saves. For changed facts, use `mnemos_link` with `supersedes`.

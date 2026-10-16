@@ -85,17 +85,30 @@ type SaveResult struct {
 
 // Observation is the client-side view of a stored observation.
 type Observation struct {
-	ID          string    `json:"ID"`
-	Title       string    `json:"Title"`
-	Content     string    `json:"Content"`
-	Type        string    `json:"Type"`
-	Tags        []string  `json:"Tags"`
-	Importance  int       `json:"Importance"`
-	AccessCount int       `json:"AccessCount"`
-	Project     string    `json:"Project"`
-	SessionID   string    `json:"SessionID"`
-	Pinned      bool      `json:"Pinned"`
-	CreatedAt   time.Time `json:"CreatedAt"`
+	ID             string     `json:"ID"`
+	AgentID        string     `json:"AgentID"`
+	LastAccessedAt *time.Time `json:"LastAccessedAt"`
+	LastExportedAt *time.Time `json:"LastExportedAt"`
+	ContentHash    string     `json:"ContentHash"`
+	ValidFrom      time.Time  `json:"ValidFrom"`
+	ValidUntil     *time.Time `json:"ValidUntil"`
+	InvalidatedAt  *time.Time `json:"InvalidatedAt"`
+	ExpiresAt      *time.Time `json:"ExpiresAt"`
+	SourceKind     string     `json:"SourceKind"`
+	TrustTier      string     `json:"TrustTier"`
+	DerivedFrom    []string   `json:"DerivedFrom"`
+	Rationale      string     `json:"Rationale"`
+	Structured     string     `json:"Structured"`
+	Title          string     `json:"Title"`
+	Content        string     `json:"Content"`
+	Type           string     `json:"Type"`
+	Tags           []string   `json:"Tags"`
+	Importance     int        `json:"Importance"`
+	AccessCount    int        `json:"AccessCount"`
+	Project        string     `json:"Project"`
+	SessionID      string     `json:"SessionID"`
+	Pinned         bool       `json:"Pinned"`
+	CreatedAt      time.Time  `json:"CreatedAt"`
 }
 
 // SearchInput is the payload for POST /v1/search.

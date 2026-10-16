@@ -58,6 +58,15 @@ func (s *Server) registerTools() {
 			"'supersedes' auto-invalidates the target.",
 	}, s.handleLink)
 
+	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		Name:        "mnemos_get_many",
+		Description: "Read selected observation details in first-requested order. Requires project; agent defaults to the save identity. Accepts 1-32 IDs, deduplicated. Live non-raw by default; explicit raw/stale/history options remain scoped. Encoded selected observation objects share a 32 KiB default byte budget (max 256 KiB); per-ID statuses expose unavailable and size-omitted items. Counts only returned details as reads, never successful use.",
+	}, s.handleGetMany)
+	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		Name:        "mnemos_neighborhood",
+		Description: "Browse bounded chronological summaries around a visible observation in its session, project and agent scope. Requires project. Defaults to 3 before and after (0-10 each), live non-raw visibility, 32 KiB encoded selected-summary budget (max 256 KiB). Explicit raw/stale/history inspection stays scoped. Returns availability, window/size limits and UTF-8-safe summary truncation; does not increment detail access counters.",
+	}, s.handleNeighborhood)
+
 	// Sessions -----------------------------------------------------------
 	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
 		Name: "mnemos_session_start",
