@@ -47,7 +47,8 @@ in one SQLite file, and injects a token-budgeted block of them at session start.
 ```
 cmd/mnemos/            CLI: serve, init, doctor, prewarm, hook, dream, vault,
                        verify, skill, replay, update, digest, efficacy, ...
-internal/mcp/          official Model Context Protocol Go SDK wrapper: 22 tools,
+internal/mcp/          official Model Context Protocol Go SDK wrapper: 21 core tools,
+                       4 optional rumination tools,
                        3 resources — thin adapter only
 internal/api/          stdlib net/http REST transport + API-key middleware
 internal/memory/       observation domain: types, service, hybrid ranker, decay,
@@ -151,7 +152,7 @@ usage text lives in `printUsage` in the same file. Add a subcommand by writing a
 registering it in both places.
 
 MCP tools are registered with `mcpsdk.AddTool` in `internal/mcp/tools.go`
-(schemas inferred from struct tags). There are 22 registrations: 18 core, 4
+(schemas inferred from struct tags). There are 25 registrations: 21 core, 4
 optional `mnemos_ruminate_*` tools enabled by `[rumination].enabled`. Resources
 are read-only JSON snapshots in `internal/mcp/resources.go`. Tool descriptions are
 **load-bearing** — they are tuned from capture-rate measurements in `README.md`;
@@ -172,21 +173,26 @@ Environment variables:
 - `CLAUDE_CONFIG_DIR` — relocates Claude Code config; honoured by the installer and
   hook wiring. Keep installer and hook paths in agreement.
 
-## Version bumps — five files, one commit
+## Version bumps — eight files, one commit
 
-A release version lives in more than one manifest and CI only enforces part of it:
+A release version lives in eight distribution files. CI parses all JSON,
+compares both plugin copies byte-for-byte, and checks their version agreement:
 
 | File | CI check |
 | --- | --- |
-| `plugin.json` | `jq .` + must be **byte-identical** to `.claude-plugin/plugin.json` |
-| `.claude-plugin/plugin.json` | same diff check |
-| `marketplace.extended.json` | `jq .` |
-| `.claude-plugin/marketplace.json` | `jq .` (its plugin entry version has historically drifted) |
-| `.claude/skills/mnemos/SKILL.md`, `.agents/skills/mnemos/SKILL.md` | frontmatter `version:` |
+| `plugin.json` | JSON + byte-identical to `.claude-plugin/plugin.json` + version |
+| `.claude-plugin/plugin.json` | same checks |
+| `marketplace.extended.json` | JSON + version |
+| `.claude-plugin/marketplace.json` | JSON + plugin-entry version |
+| `pi/package.json` | JSON + version |
+| `.claude/skills/mnemos/SKILL.md` | frontmatter `version:` |
+| `.agents/skills/mnemos/SKILL.md` | frontmatter `version:` |
+| `pi/skills/mnemos/SKILL.md` | frontmatter `version:` |
 
-All five manifests are currently unified at `0.13.0` (the historical
-`marketplace.json` drift has been reconciled). Release flow is `make release V=vX.Y.Z` (tags + pushes;
-GitHub Actions + goreleaser does the rest) — never hand-build release artifacts.
+All eight distribution files are currently unified at `0.14.0`. Release flow is
+`make release V=vX.Y.Z` (tags + pushes; GitHub Actions + goreleaser does the rest) —
+never hand-build release artifacts. A local development installation is not a
+release; keep the release workflow for published artifacts.
 
 ## Efficacy harness
 

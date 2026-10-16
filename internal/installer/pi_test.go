@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/polyxmedia/mnemos/internal/installer"
@@ -26,6 +27,95 @@ func setupPiHome(t *testing.T) (string, string) {
 	// Keep the Claude Code target out of the picture.
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	return home, agentDir
+}
+
+func TestPiPackageMCPInstalledVerifiesManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name, manifest, config string
+		object, relative, want bool
+	}{
+		{"local package", `{"name":"kls-mnemos-pi","pi":{"mcp":"./mcp.json"}}`, `{"mcpServers":{"mnemos":{"command":"mnemos","args":["serve"]}}}`, false, false, true},
+		{"relative object source and paths array", `{"name":"memory","pi":{"mcp":["./mcp.json"]}}`, `{"mcpServers":{"memory":{"command":"mnemos.exe","args":["serve"],"directTools":true}}}`, true, true, true},
+		{"missing manifest", "", `{"mcpServers":{"mnemos":{"command":"mnemos","args":["serve"]}}}`, false, false, false},
+		{"bad manifest", `{`, `{}`, false, false, false},
+		{"missing MCP declaration", `{"name":"mnemos"}`, `{}`, false, false, false},
+		{"missing package name", `{"pi":{"mcp":"./mcp.json"}}`, `{}`, false, false, false},
+		{"wrong command", `{"name":"mnemos","pi":{"mcp":"./mcp.json"}}`, `{"mcpServers":{"mnemos":{"command":"other","args":["serve"]}}}`, false, false, false},
+		{"missing executable", `{"name":"mnemos","pi":{"mcp":"./mcp.json"}}`, `{"mcpServers":{"mnemos":{"command":"/definitely/missing/mnemos","args":["serve"]}}}`, false, false, false},
+		{"disabled server", `{"name":"mnemos","pi":{"mcp":"./mcp.json"}}`, `{"mcpServers":{"mnemos":{"command":"mnemos","args":["serve"],"disabled":true}}}`, false, false, false},
+		{"wrong args", `{"name":"mnemos","pi":{"mcp":"./mcp.json"}}`, `{"mcpServers":{"mnemos":{"command":"mnemos","args":["config"]}}}`, false, false, false},
+		{"bad config", `{"name":"mnemos","pi":{"mcp":"./mcp.json"}}`, `{`, false, false, false},
+		{"package escape", `{"name":"mnemos","pi":{"mcp":"../mcp.json"}}`, `{}`, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, agentDir := setupPiHome(t)
+			// Command resolution is checked without executing it; keep fixtures
+			// independent of the developer's or CI runner's installed binaries.
+			commandName := "mnemos"
+			if runtime.GOOS == "windows" {
+				commandName += ".exe"
+			} else if tc.name == "relative object source and paths array" {
+				commandName += ".exe"
+			}
+			if err := os.WriteFile(filepath.Join(agentDir, commandName), []byte("fixture"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", agentDir)
+			root := filepath.Join(agentDir, "local-package")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.manifest != "" {
+				if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(tc.manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(root, "mcp.json"), []byte(tc.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "package escape" {
+				// An otherwise valid, readable config outside the package must
+				// fail containment, rather than merely failing a missing-file check.
+				outside := `{"mcpServers":{"mnemos":{"command":"mnemos","args":["serve"]}}}`
+				if err := os.WriteFile(filepath.Join(agentDir, "mcp.json"), []byte(outside), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			source := root
+			if tc.relative {
+				source = "./local-package"
+			}
+			var entry any = source
+			if tc.object {
+				entry = map[string]any{"source": source}
+			}
+			data, _ := json.Marshal(map[string]any{"packages": []any{entry}})
+			settings := filepath.Join(agentDir, "settings.json")
+			if err := os.WriteFile(settings, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, path := installer.PiPackageMCPInstalled()
+			if got != tc.want {
+				t.Fatalf("installed=%v want=%v", got, tc.want)
+			}
+			if got && path != settings {
+				t.Fatalf("path=%q want=%q", path, settings)
+			}
+			if _, err := os.Stat(filepath.Join(agentDir, "mcp-adapter.json")); !os.IsNotExist(err) {
+				t.Fatalf("read-only check created adapter config: %v", err)
+			}
+		})
+	}
+}
+
+func TestPiPackageMCPInstalledDoesNotTrustRemoteName(t *testing.T) {
+	_, agentDir := setupPiHome(t)
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"packages":["npm:mnemos-pi","git:github.com/polyxmedia/mnemos"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := installer.PiPackageMCPInstalled(); ok {
+		t.Fatal("unresolved registration is not installation evidence")
+	}
 }
 
 func findTarget(t *testing.T, name string) (installer.Target, bool) {
@@ -192,6 +282,9 @@ func TestInstallIntoPiLeavesAdapterOnlyFieldsAlone(t *testing.T) {
 	}
 	if entry["toolPrefix"] != "mcp" {
 		t.Errorf("toolPrefix must survive init, got %v", entry["toolPrefix"])
+	}
+	if entry["lifecycle"] != "lazy-keep-alive" {
+		t.Errorf("adapter lifecycle must survive init, got %v", entry["lifecycle"])
 	}
 }
 

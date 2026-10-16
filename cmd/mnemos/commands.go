@@ -521,7 +521,18 @@ func runDoctor(ctx context.Context, _ []string) error {
 	hasClaudeCode := false
 	hasPi := false
 	for _, t := range targets {
-		check(installer.IsInstalled(t), "%s %s", t.Name, t.Path)
+		installed := installer.IsInstalled(t)
+		if t.Name == "pi" && !installed {
+			// A package manifest can supply the same server without an
+			// adapter-global entry. Verify its actual files, not its name.
+			if ok, path := installer.PiPackageMCPInstalled(); ok {
+				check(true, "pi package MCP %s", path)
+			} else {
+				check(false, "%s %s", t.Name, t.Path)
+			}
+		} else {
+			check(installed, "%s %s", t.Name, t.Path)
+		}
 		switch t.Name {
 		case "Claude Code (user)":
 			hasClaudeCode = true
