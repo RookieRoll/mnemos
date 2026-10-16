@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/memory"
@@ -63,7 +64,18 @@ func runVerifyRetrieval(ctx context.Context, args []string) error {
 	}
 	defer d.close()
 
-	rep, err := verify.RunRetrieval(ctx, d.mem, fix)
+	now := time.Now()
+	rep, err := verify.RunRetrievalWithDelivery(ctx, d.mem, fix, func(ctx context.Context, c verify.RetrievalCase, q string) ([]injection.Ref, error) {
+		if c.IncludeRaw || c.IncludeStale || c.AgentID != "" {
+			return nil, fmt.Errorf("prompt consumer does not support raw, stale or agent-filtered delivery evaluation")
+		}
+		pm := collectPromptMemoryAt(ctx, d, q, "", c.Project, "", now, false)
+		refs := make([]injection.Ref, 0, len(pm.Hits))
+		for _, h := range pm.Hits {
+			refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: h.Observation.ID})
+		}
+		return refs, nil
+	})
 	if err != nil {
 		return fmt.Errorf("retrieval: %w", err)
 	}
@@ -95,8 +107,9 @@ func runVerifyCalibrate(ctx context.Context, args []string) error {
 	defer d.close()
 
 	// Surfacing counts come from the injection log; a memory accessed more
-	// often than it was surfaced was deliberately fetched at least once,
-	// which is the surfaced-vs-used signal the sweep weighs double.
+	// often than it was surfaced carries a legacy usage proxy, which the
+	// compatibility sweep weighs double. This does not establish agent use
+	// or a successful outcome.
 	surfaced := func(ctx context.Context, id string) int {
 		evts, err := d.db.Injections().ListByRef(ctx, injection.KindObservation, id, 10000)
 		if err != nil {
@@ -105,9 +118,33 @@ func runVerifyCalibrate(ctx context.Context, args []string) error {
 		return len(evts)
 	}
 
-	rep, _, err := verify.CalibrateGate(ctx, d.mem, fix, surfaced)
+	if len(fix.Cases) > 0 {
+		labelled, err := verify.CalibrateLabelledGate(ctx, d.mem, fix)
+		if err != nil {
+			return fmt.Errorf("calibrate labelled: %w", err)
+		}
+		fmt.Fprintf(os.Stdout, "Calibration basis: %s\nCoverage: positive=%d negative=%d unlabelled=%d queries=%d separation_measured=%t\n", labelled.Basis, labelled.Coverage.Positive, labelled.Coverage.Negative, labelled.Coverage.Unlabelled, labelled.Coverage.Queries, labelled.Coverage.SeparationMeasured)
+		for _, q := range labelled.Queries {
+			fmt.Fprintf(os.Stdout, "  %s %q positive=%d negative=%d unlabelled=%d\n", q.Case, q.Query, q.Positive, q.Negative, q.Unlabelled)
+		}
+		if labelled.Coverage.SeparationMeasured {
+			printCalibrationReport(os.Stdout, labelled.Sweep)
+		} else {
+			fmt.Fprintln(os.Stdout, "Separation was not measured: empty or single-class labelled coverage.")
+		}
+		if len(fix.Probes) == 0 {
+			return nil
+		}
+	}
+	fmt.Fprintln(os.Stdout, "Calibration basis: legacy single-target proxy; access/surfacing counts are usage proxies, not verified success.")
+	legacy := &verify.RetrievalFixture{Probes: fix.Probes}
+	rep, _, err := verify.CalibrateGate(ctx, d.mem, legacy, surfaced)
 	if err != nil {
 		return fmt.Errorf("calibrate: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Legacy coverage: positive=%d negative=%d separation_measured=%t\n", rep.OnTopic, rep.Samples-rep.OnTopic, rep.OnTopic > 0 && rep.OnTopic < rep.Samples)
+	if rep.OnTopic == 0 || rep.OnTopic == rep.Samples {
+		fmt.Fprintln(os.Stdout, "Separation was not measured: empty or single-class legacy proxy coverage; the following sweep values are compatibility diagnostics, not validated recommendations.")
 	}
 	printCalibrationReport(os.Stdout, rep)
 	return nil
@@ -184,7 +221,13 @@ func printRetrievalReport(w *os.File, rep *verify.RetrievalReport) {
 			}
 		}
 	}
-	fmt.Fprintf(w, "\n  %d/%d probes passed (precision@K)\n",
+	for _, c := range rep.Cases {
+		fmt.Fprintf(w, "  case %s pass=%t mode=%s\n", c.Case.Name, c.Pass, c.Case.QueryMode)
+		for _, q := range c.Queries {
+			fmt.Fprintf(w, "    %q pass=%t labelled_recall=%.3f relevant=%v forbidden=%v unlabelled=%v delivery_measured=%t selected=%v\n", q.Query, q.Pass, q.Recall, q.RelevantIDs, q.ForbiddenIDs, q.UnlabelledIDs, q.DeliveryMeasured, q.Selected)
+		}
+	}
+	fmt.Fprintf(w, "\n  %d/%d probes/cases passed (legacy any-query; explicit labelled cases)\n",
 		rep.Passed, rep.Total)
 }
 

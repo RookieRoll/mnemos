@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/polyxmedia/mnemos/internal/contextfmt"
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/rumination"
@@ -54,6 +55,7 @@ type Service struct {
 	rumination RuminationReader
 	injections InjectionRecorder
 	maxTokens  int
+	clock      func() time.Time
 }
 
 // Config bundles dependencies. Rumination is optional; when nil the
@@ -71,6 +73,8 @@ type Config struct {
 	// the Block but nothing is persisted.
 	Injections InjectionRecorder
 	MaxTokens  int
+	// Clock is optional and defaults to time.Now.
+	Clock func() time.Time
 }
 
 // NewService constructs a pre-warm service. MaxTokens defaults to 500 —
@@ -83,6 +87,9 @@ func NewService(cfg Config) *Service {
 	if cfg.Scanner == nil {
 		cfg.Scanner = safety.NewScanner()
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
 	return &Service{
 		obs:        cfg.Observations,
 		sessions:   cfg.Sessions,
@@ -92,6 +99,7 @@ func NewService(cfg Config) *Service {
 		rumination: cfg.Rumination,
 		injections: cfg.Injections,
 		maxTokens:  cfg.MaxTokens,
+		clock:      cfg.Clock,
 	}
 }
 
@@ -161,53 +169,124 @@ func (s *Service) Build(ctx context.Context, req Request) (*Block, error) {
 		if err != nil {
 			return nil, fmt.Errorf("prewarm %s: %w", draft.title, err)
 		}
-		if draft.body == "" {
+		if draft.body == "" && len(draft.items) == 0 {
 			continue
 		}
 		sections = append(sections, draft)
 	}
 
-	// Scan each section once; flag high-risk content rather than inject silently.
-	var fullText strings.Builder
-	used := 0
+	// Scan complete candidate material before selection; section scans preserve
+	// detection across item boundaries even when compact forms are selected.
+	seen := map[injection.Ref]bool{}
 	for _, d := range sections {
-		body := d.body
-		rep := s.scanner.Scan(body)
-		if rep.MaxRisk >= safety.RiskHigh {
-			body = safety.WrapFlagged(rep.Sanitised, rep)
-		} else {
-			body = rep.Sanitised
+		var ids []string
+		for _, item := range d.items {
+			if item.ref.Kind == injection.KindObservation {
+				ids = append(ids, item.ref.ID)
+			}
+		}
+		if len(ids) > 0 {
+			if contradictions, err := s.obs.ListContradictors(ctx, ids); err == nil {
+				for i := range d.items {
+					for _, c := range contradictions {
+						if c.CandidateID == d.items[i].ref.ID && !strings.Contains(d.items[i].full, "[contradicted") {
+							warning := "[contradicted] "
+							d.items[i].full = warning + d.items[i].full
+							d.items[i].compact = warning + d.items[i].compact
+							d.items[i].minimal = warning + d.items[i].minimal
+						}
+					}
+				}
+			}
+		}
+		rep := s.scanner.Scan(d.material())
+		sanitisedReport := s.scanner.Scan(rep.Sanitised)
+		rep.Findings = append(rep.Findings, sanitisedReport.Findings...)
+		if sanitisedReport.MaxRisk > rep.MaxRisk {
+			rep.MaxRisk = sanitisedReport.MaxRisk
 		}
 		if rep.MaxRisk > block.SafetyReport.MaxRisk {
 			block.SafetyReport.MaxRisk = rep.MaxRisk
 		}
 		block.SafetyReport.Findings = append(block.SafetyReport.Findings, rep.Findings...)
-
-		entry := fmt.Sprintf("## %s\n%s", d.title, body)
-		cost := estimateTokens(entry)
-		if used+cost > budget {
-			// Truncate the last included section rather than drop it entirely
-			// so the most important context is always present.
-			remaining := budget - used
-			if remaining > 128 {
-				trimmed := truncateTokens(entry, remaining)
-				fullText.WriteString(trimmed)
-				fullText.WriteString("\n\n")
-				used += estimateTokens(trimmed)
-				block.Sections = append(block.Sections, Section{Title: d.title, Body: body})
-				block.Surfaced = append(block.Surfaced, d.refs...)
-			}
-			break
+		var selected []string
+		var refs []injection.Ref
+		total := len(d.items)
+		if total == 0 && d.body != "" {
+			d.items = []renderItem{{full: d.body}}
 		}
-		fullText.WriteString(entry)
-		fullText.WriteString("\n\n")
-		used += cost
+		frame := func(lines []string) string {
+			body := strings.Join(lines, "\n")
+			if d.pinned && len(lines) < total {
+				if body != "" {
+					body += "\n"
+				}
+				body += fmt.Sprintf("[pinned: %d of %d shown]", len(lines), total)
+			}
+			selectedReport := s.scanner.Scan(body)
+			body = selectedReport.Sanitised
+			if selectedReport.MaxRisk > rep.MaxRisk {
+				selectedReport.Findings = append(selectedReport.Findings, rep.Findings...)
+			} else {
+				selectedReport = rep
+			}
+			if body != "" && selectedReport.MaxRisk >= safety.RiskHigh {
+				body = safety.WrapFlagged(body, selectedReport)
+			}
+			return body
+		}
+		for _, item := range d.items {
+			if item.ref.ID != "" && seen[item.ref] {
+				continue
+			}
+			for _, form := range []string{item.full, item.compact, item.minimal} {
+				if form == "" {
+					continue
+				}
+				form = s.scanner.Scan(form).Sanitised
+				next := append(append([]string{}, selected...), form)
+				body := frame(next)
+				prefix := block.Text
+				if prefix != "" {
+					prefix += "\n\n"
+				}
+				entry := "## " + d.title + "\n" + body
+				if contextfmt.Choose(prefix, budget, entry) == "" {
+					continue
+				}
+				if d.pinned && contextfmt.Estimate(body) > 150 {
+					continue
+				}
+				selected = next
+				if item.ref.ID != "" {
+					refs = append(refs, item.ref)
+					seen[item.ref] = true
+				}
+				break
+			}
+		}
+		body := frame(selected)
+		if body == "" {
+			continue
+		}
+		entry := "## " + d.title + "\n" + body
+		prefix := block.Text
+		if prefix != "" {
+			prefix += "\n\n"
+		}
+		if contextfmt.Choose(prefix, budget, entry) == "" {
+			continue
+		}
+		finalReport := s.scanner.Scan(body)
+		if finalReport.MaxRisk > block.SafetyReport.MaxRisk {
+			block.SafetyReport.MaxRisk = finalReport.MaxRisk
+		}
+		block.SafetyReport.Findings = append(block.SafetyReport.Findings, finalReport.Findings...)
+		block.Text = prefix + entry
 		block.Sections = append(block.Sections, Section{Title: d.title, Body: body})
-		block.Surfaced = append(block.Surfaced, d.refs...)
+		block.Surfaced = append(block.Surfaced, refs...)
 	}
-
-	block.Text = strings.TrimRight(fullText.String(), "\n")
-	block.TokenEstimate = used
+	block.TokenEstimate = contextfmt.Estimate(block.Text)
 
 	// Fire-and-forget: the surfacing log is measurement, and measurement
 	// must never break the surface being measured.
@@ -226,13 +305,30 @@ func (s *Service) Build(ctx context.Context, req Request) (*Block, error) {
 
 // --- pipeline -----------------------------------------------------------
 
+type renderItem struct {
+	full, compact, minimal string
+	ref                    injection.Ref
+}
+
 type sectionDraft struct {
-	title string
-	body  string
-	// refs lists the observation/skill IDs rendered into body, so Build
-	// can record exactly what was surfaced (and only if the section
-	// survives token budgeting).
-	refs []injection.Ref
+	title  string
+	body   string
+	items  []renderItem
+	pinned bool
+}
+
+func (d sectionDraft) material() string {
+	parts := []string{d.body}
+	for _, item := range d.items {
+		parts = append(parts, item.full)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func observationItem(o memory.Observation, text, warning string) renderItem {
+	identity := fmt.Sprintf("- [%s id: %s]", o.Type, o.ID)
+	return renderItem{full: warning + text, compact: warning + identity + " " + oneLine(o.Title), minimal: warning + identity,
+		ref: injection.Ref{Kind: injection.KindObservation, ID: o.ID}}
 }
 
 type stepFunc func(ctx context.Context, s *Service, req Request) (sectionDraft, error)
@@ -278,32 +374,15 @@ func (s *Service) pipeline(mode Mode) []stepFunc {
 // sections in all modes. Budget: ~150 tokens. Ordering: importance desc,
 // created_at asc. Transparent overflow notes how many are shown.
 func stepPinnedCore(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
-	draft := sectionDraft{title: "core invariants (pinned)"}
+	draft := sectionDraft{title: "core invariants (pinned)", pinned: true}
 	list, err := s.obs.ListPinned(ctx, req.AgentID, req.Project, 50)
 	if err != nil {
 		return draft, err
 	}
-	if len(list) == 0 {
-		return draft, nil
-	}
-
-	const pinnedBudget = 150
-	var b strings.Builder
-	shown := 0
-	total := len(list)
 	for _, o := range list {
-		line := fmt.Sprintf("- [%s] %s — %s\n", o.Type, o.Title, oneLine(o.Content))
-		if shown > 0 && estimateTokens(b.String()+line) > pinnedBudget {
-			break
-		}
-		b.WriteString(line)
-		draft.refs = append(draft.refs, injection.Ref{Kind: injection.KindObservation, ID: o.ID})
-		shown++
+		text := fmt.Sprintf("- [%s] %s — %s", o.Type, oneLine(o.Title), oneLine(o.Content))
+		draft.items = append(draft.items, observationItem(o, text, ""))
 	}
-	if shown < total {
-		fmt.Fprintf(&b, "[pinned: %d of %d shown]\n", shown, total)
-	}
-	draft.body = strings.TrimRight(b.String(), "\n")
 	return draft, nil
 }
 
@@ -332,32 +411,22 @@ func stepPendingRumination(ctx context.Context, s *Service, req Request) (sectio
 }
 
 func stepConventions(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
+	draft := sectionDraft{title: "conventions"}
 	if req.Project == "" {
-		return sectionDraft{title: "conventions"}, nil
+		return draft, nil
 	}
 	list, err := s.obs.ListByProject(ctx, req.AgentID, req.Project, memory.TypeConvention, 10)
 	if err != nil {
-		return sectionDraft{title: "conventions"}, err
+		return draft, err
 	}
-	if len(list) == 0 {
-		return sectionDraft{title: "conventions"}, nil
-	}
-	var b strings.Builder
-	var refs []injection.Ref
 	for _, o := range list {
-		if o.Pinned {
-			continue // de-duplicate: already rendered in stepPinnedCore
-		}
-		b.WriteString("- ")
-		b.WriteString(o.Title)
+		text := "- " + oneLine(o.Title)
 		if strings.TrimSpace(o.Rationale) != "" {
-			b.WriteString(" — ")
-			b.WriteString(oneLine(o.Rationale))
+			text += " — " + oneLine(o.Rationale)
 		}
-		b.WriteString("\n")
-		refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: o.ID})
+		draft.items = append(draft.items, observationItem(o, text, ""))
 	}
-	return sectionDraft{title: "conventions", body: strings.TrimRight(b.String(), "\n"), refs: refs}, nil
+	return draft, nil
 }
 
 func stepRecentSessions(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
@@ -377,11 +446,12 @@ func stepRecentSessions(ctx context.Context, s *Service, req Request) (sectionDr
 	if len(recent) == 0 {
 		return sectionDraft{title: "recent sessions"}, nil
 	}
-	var b strings.Builder
+	draft := sectionDraft{title: "recent sessions"}
 	for i, r := range recent {
 		if i >= 3 {
 			break
 		}
+		var b strings.Builder
 		b.WriteString("- ")
 		b.WriteString(r.StartedAt.Format("2006-01-02"))
 		if r.Goal != "" {
@@ -397,9 +467,9 @@ func stepRecentSessions(ctx context.Context, s *Service, req Request) (sectionDr
 			b.WriteString(string(r.Status))
 			b.WriteString(")")
 		}
-		b.WriteString("\n")
+		draft.items = append(draft.items, renderItem{full: b.String()})
 	}
-	return sectionDraft{title: "recent sessions", body: strings.TrimRight(b.String(), "\n")}, nil
+	return draft, nil
 }
 
 func stepMatchingSkills(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
@@ -417,26 +487,21 @@ func stepMatchingSkills(ctx context.Context, s *Service, req Request) (sectionDr
 	if len(matches) == 0 {
 		return sectionDraft{title: "applicable skills"}, nil
 	}
-	var b strings.Builder
-	var refs []injection.Ref
+	draft := sectionDraft{title: "applicable skills"}
 	for _, m := range matches {
-		refs = append(refs, injection.Ref{Kind: injection.KindSkill, ID: m.Skill.ID})
-		b.WriteString("- ")
-		b.WriteString(m.Skill.Name)
-		b.WriteString(": ")
-		b.WriteString(oneLine(m.Skill.Description))
-		// Inline badge when the skill is under active rumination. The
-		// agent then knows not to just follow the procedure — it has to
-		// either resolve the candidate first or acknowledge the flag.
+		warning := ""
 		if s.rumination != nil {
 			pending, err := s.rumination.PendingByTarget(ctx, rumination.TargetSkill, m.Skill.ID)
 			if err == nil && len(pending) > 0 {
-				fmt.Fprintf(&b, " [rumination pending: %s]", pending[0].ID)
+				warning = fmt.Sprintf(" [rumination pending: %s]", pending[0].ID)
 			}
 		}
-		b.WriteString("\n")
+		identity := fmt.Sprintf("- [skill id: %s]", m.Skill.ID)
+		draft.items = append(draft.items, renderItem{full: "- " + oneLine(m.Skill.Name) + ": " + oneLine(m.Skill.Description) + warning,
+			compact: identity + " " + oneLine(m.Skill.Name) + warning, minimal: identity + warning,
+			ref: injection.Ref{Kind: injection.KindSkill, ID: m.Skill.ID}})
 	}
-	return sectionDraft{title: "applicable skills", body: strings.TrimRight(b.String(), "\n"), refs: refs}, nil
+	return draft, nil
 }
 
 func stepCorrections(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
@@ -466,7 +531,7 @@ func stepCorrections(ctx context.Context, s *Service, req Request) (sectionDraft
 			contradictedIDs[r.Observation.ID] = true
 		}
 	}
-	if len(contradictedIDs) == 0 && len(results) > 0 {
+	if len(results) > 0 {
 		cids := make([]string, len(results))
 		for i, r := range results {
 			cids[i] = r.Observation.ID
@@ -478,28 +543,19 @@ func stepCorrections(ctx context.Context, s *Service, req Request) (sectionDraft
 		}
 	}
 
-	var b strings.Builder
-	var refs []injection.Ref
-	n := 0
+	draft := sectionDraft{title: "relevant corrections"}
 	for _, r := range results {
-		if r.Observation.Pinned {
-			continue // de-duplicate: already rendered in stepPinnedCore
-		}
-		if n >= 3 {
+		if len(draft.items) >= 3 {
 			break
 		}
-		b.WriteString("- ")
-		if contradictedIDs[r.Observation.ID] {
-			b.WriteString("[contradicted] ")
+		o := r.Observation
+		warning := ""
+		if contradictedIDs[o.ID] {
+			warning = "[contradicted] "
 		}
-		b.WriteString(r.Observation.Title)
-		b.WriteString(": ")
-		b.WriteString(oneLine(r.Observation.Content))
-		b.WriteString("\n")
-		refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: r.Observation.ID})
-		n++
+		draft.items = append(draft.items, observationItem(o, "- "+oneLine(o.Title)+": "+oneLine(o.Content), warning))
 	}
-	return sectionDraft{title: "relevant corrections", body: strings.TrimRight(b.String(), "\n"), refs: refs}, nil
+	return draft, nil
 }
 
 // stepPremortemCorrections is stepCorrections with a wider cap and the
@@ -530,7 +586,7 @@ func stepPremortemCorrections(ctx context.Context, s *Service, req Request) (sec
 			contradictedIDs[r.Observation.ID] = true
 		}
 	}
-	if len(contradictedIDs) == 0 && len(results) > 0 {
+	if len(results) > 0 {
 		cids := make([]string, len(results))
 		for i, r := range results {
 			cids[i] = r.Observation.ID
@@ -542,22 +598,14 @@ func stepPremortemCorrections(ctx context.Context, s *Service, req Request) (sec
 		}
 	}
 
-	var b strings.Builder
 	for _, r := range results {
-		if r.Observation.Pinned {
-			continue // de-duplicate: already rendered in stepPinnedCore
+		o := r.Observation
+		warning := ""
+		if contradictedIDs[o.ID] {
+			warning = "[contradicted] "
 		}
-		b.WriteString("- ")
-		if contradictedIDs[r.Observation.ID] {
-			b.WriteString("[contradicted] ")
-		}
-		b.WriteString(r.Observation.Title)
-		b.WriteString(": ")
-		b.WriteString(oneLine(r.Observation.Content))
-		b.WriteString("\n")
-		draft.refs = append(draft.refs, injection.Ref{Kind: injection.KindObservation, ID: r.Observation.ID})
+		draft.items = append(draft.items, observationItem(o, "- "+oneLine(o.Title)+": "+oneLine(o.Content), warning))
 	}
-	draft.body = strings.TrimRight(b.String(), "\n")
 	return draft, nil
 }
 
@@ -599,11 +647,11 @@ func stepFailedSessions(ctx context.Context, s *Service, req Request) (sectionDr
 	if len(candidates) == 0 {
 		return draft, nil
 	}
-	var b strings.Builder
 	for i, c := range candidates {
 		if i >= 3 {
 			break
 		}
+		var b strings.Builder
 		b.WriteString("- ")
 		b.WriteString(c.sess.StartedAt.Format("2006-01-02"))
 		if c.sess.Goal != "" {
@@ -614,9 +662,9 @@ func stepFailedSessions(ctx context.Context, s *Service, req Request) (sectionDr
 			b.WriteString(" → ")
 			b.WriteString(oneLine(c.sess.Summary))
 		}
-		fmt.Fprintf(&b, " (%s)\n", c.sess.Status)
+		fmt.Fprintf(&b, " (%s)", c.sess.Status)
+		draft.items = append(draft.items, renderItem{full: b.String()})
 	}
-	draft.body = strings.TrimRight(b.String(), "\n")
 	return draft, nil
 }
 
@@ -654,11 +702,11 @@ func stepHotFiles(ctx context.Context, s *Service, req Request) (sectionDraft, e
 	if len(hot) == 0 {
 		return sectionDraft{title: "hot files"}, nil
 	}
-	var b strings.Builder
+	draft := sectionDraft{title: "hot files"}
 	for _, h := range hot {
-		fmt.Fprintf(&b, "- %s (%d touches)\n", h.Path, h.TouchCount)
+		draft.items = append(draft.items, renderItem{full: fmt.Sprintf("- %s (%d touches)", h.Path, h.TouchCount)})
 	}
-	return sectionDraft{title: "hot files", body: strings.TrimRight(b.String(), "\n")}, nil
+	return draft, nil
 }
 
 func stepCurrentSession(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
@@ -669,7 +717,7 @@ func stepCurrentSession(ctx context.Context, s *Service, req Request) (sectionDr
 	if err != nil {
 		return sectionDraft{title: "current session"}, nil
 	}
-	age := time.Since(sess.StartedAt).Truncate(time.Minute)
+	age := s.clock().Sub(sess.StartedAt).Truncate(time.Minute)
 	var b strings.Builder
 	fmt.Fprintf(&b, "started %s ago in %s", age, sess.Project)
 	if sess.Goal != "" {
@@ -688,27 +736,17 @@ func stepInSessionObservations(ctx context.Context, s *Service, req Request) (se
 	if err != nil {
 		return sectionDraft{title: "session observations"}, err
 	}
-	var b strings.Builder
-	var refs []injection.Ref
-	n := 0
+	draft := sectionDraft{title: "session observations"}
 	for _, o := range all {
 		if o.SessionID != req.SessionID {
 			continue
 		}
-		if o.Pinned {
-			continue // de-duplicate: already rendered in stepPinnedCore
-		}
-		if n >= 8 {
+		if len(draft.items) >= 8 {
 			break
 		}
-		fmt.Fprintf(&b, "- [%s] %s\n", o.Type, o.Title)
-		refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: o.ID})
-		n++
+		draft.items = append(draft.items, observationItem(o, fmt.Sprintf("- [%s] %s", o.Type, oneLine(o.Title)), ""))
 	}
-	if n == 0 {
-		return sectionDraft{title: "session observations"}, nil
-	}
-	return sectionDraft{title: "session observations", body: strings.TrimRight(b.String(), "\n"), refs: refs}, nil
+	return draft, nil
 }
 
 // --- helpers ------------------------------------------------------------
@@ -717,23 +755,7 @@ func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 200 {
-		s = s[:200] + "…"
-	}
 	return s
 }
 
-func estimateTokens(s string) int {
-	if s == "" {
-		return 0
-	}
-	return (len(s) + 3) / 4
-}
-
-func truncateTokens(s string, tokens int) string {
-	maxChars := tokens * 4
-	if len(s) <= maxChars {
-		return s
-	}
-	return s[:maxChars-1] + "…"
-}
+func estimateTokens(s string) int { return contextfmt.Estimate(s) }

@@ -116,6 +116,14 @@ The big one. Agents don't self-invoke memory tools reliably, so `mnemos_session_
 
 Each section is scanned by `safety.Scanner`. High-risk content gets a visible `[MNEMOS: FLAGGED]` banner; low-risk content is sanitised (zero-width + control chars stripped). The whole block is token-budgeted to ~500 tokens (curate aggressively; bloated context hurts more than no context).
 
+Delivery selects complete independently rendered items in pipeline order. A full item is tried first, then a complete title with its type/ID, then a minimal type/ID. Assertions are never byte-truncated. Mandatory contradiction and safety annotations stay attached even to compact items; an item is omitted if those annotations cannot fit. Full candidate sections and sanitised selected sections are scanned, including patterns spanning items. Different IDs, including a rule and its exception, remain distinct. A repeated `(kind, ID)` is emitted only at its first selected occurrence.
+
+Prewarm and explicit `memory.Context` use the same `ceil(UTF-8 bytes / 4)` estimate over final output, including headings, separators, warnings, and pinned overflow notices. This is an estimate, not a model token limit. Pinned items keep their Tier-0 priority and 150-token allocation with a complete shown/available notice when needed. Budgets too small for an entire notice can yield an empty block.
+
+Returned section bodies, selected references, and the existing injection log describe the same emitted items. Recording remains best-effort: failure does not prevent context delivery. An injection event means the service emitted an item; it does not prove the host displayed it, the agent attended to it, or the task succeeded. Historical over-recording cannot be reconstructed and is not backfilled.
+
+Candidate sets, render items, compact snippets, deduplication sets, estimates, and final bodies live only for the request/response. They are never stored as observations, cached in new tables, or copied into injection events. Existing minimal injection rows retain only reference, channel, scope, and time under the existing retention policy. Evaluation labels stay in versioned fixtures; reports go to CLI output or an explicitly requested file.
+
 Compaction-recovery mode reuses the pipeline but prioritises the current session's state: goal + in-session observations come before conventions.
 
 ## Skills

@@ -270,6 +270,11 @@ const promptMemoryMaxHits = 3
 // in the injection log (channel prompt_hook) so surfaced-vs-used ratios
 // cover this path too.
 func collectPromptMemory(ctx context.Context, d *deps, prompt, agentID, project, sessionID string) promptMemory {
+	return collectPromptMemoryAt(ctx, d, prompt, agentID, project, sessionID, time.Now(), true)
+}
+
+// collectPromptMemoryAt shares the actual gate with read-only evaluation.
+func collectPromptMemoryAt(ctx context.Context, d *deps, prompt, agentID, project, sessionID string, now time.Time, record bool) promptMemory {
 	if prompt == "" || d == nil {
 		return promptMemory{}
 	}
@@ -289,7 +294,7 @@ func collectPromptMemory(ctx context.Context, d *deps, prompt, agentID, project,
 	// single prompt for as long as the topic holds — 6879 prompt_hook
 	// injections drew on 61 distinct memories before this existed.
 	injStore := d.db.Injections()
-	suppressed := injection.Suppressed(ctx, injStore, injection.KindObservation, project, time.Now())
+	suppressed := injection.Suppressed(ctx, injStore, injection.KindObservation, project, now)
 
 	kept := hits[:0]
 	for _, h := range hits {
@@ -308,9 +313,11 @@ func collectPromptMemory(ctx context.Context, d *deps, prompt, agentID, project,
 	for _, h := range kept {
 		refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: h.Observation.ID})
 	}
-	_ = injection.NewLogger(injStore, nil).
-		Log(ctx, injection.ChannelPromptHook, agentID, project, sessionID, refs)
-	_ = d.mem.RecordSurfaced(ctx, refIDs(refs))
+	if record {
+		_ = injection.NewLogger(injStore, nil).
+			Log(ctx, injection.ChannelPromptHook, agentID, project, sessionID, refs)
+		_ = d.mem.RecordSurfaced(ctx, refIDs(refs))
+	}
 	return promptMemory{Hits: kept}
 }
 

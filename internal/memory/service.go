@@ -11,7 +11,9 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/polyxmedia/mnemos/internal/contextfmt"
 	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/safety"
 )
 
 // Embedder is the minimal interface memory.Service needs from an embedding
@@ -644,24 +646,55 @@ func (s *Service) Context(ctx context.Context, in ContextInput) (*ContextBlock, 
 	}
 
 	block := &ContextBlock{}
-	var sb strings.Builder
-	budget := maxTokens
+	seen := map[string]bool{}
+	scanner := safety.NewScanner()
+	var complete []string
 	for _, r := range results {
-		entry := formatContextEntry(r.Observation)
-		cost := estimateTokens(entry)
-		if cost > budget {
+		complete = append(complete, formatContextEntry(r.Observation))
+	}
+	report := scanner.Scan(strings.Join(complete, "\n\n"))
+	// Removing controls can join previously separated instruction tokens.
+	sanitisedReport := scanner.Scan(report.Sanitised)
+	report.Findings = append(report.Findings, sanitisedReport.Findings...)
+	if sanitisedReport.MaxRisk > report.MaxRisk {
+		report.MaxRisk = sanitisedReport.MaxRisk
+	}
+	for _, r := range results {
+		o := r.Observation
+		if seen[o.ID] {
 			continue
 		}
-		sb.WriteString(entry)
-		sb.WriteString("\n\n")
-		budget -= cost
-		block.Observations = append(block.Observations, r.Observation)
-		if budget < 64 {
-			break
+		warning := ""
+		if len(r.ContradictedBy) > 0 {
+			warning = "[contradicted by " + strings.Join(r.ContradictedBy, ", ") + "] "
 		}
+		identity := fmt.Sprintf("## [%s id: %s]", o.Type, o.ID)
+		forms := []string{formatContextEntry(o), identity + " " + strings.Join(strings.Fields(o.Title), " "), identity}
+		for i, form := range forms {
+			form = scanner.Scan(warning + form).Sanitised
+			joined := scanner.Scan(block.Text + "\n\n" + form)
+			joined.Findings = append(joined.Findings, report.Findings...)
+			if report.MaxRisk > joined.MaxRisk {
+				joined.MaxRisk = report.MaxRisk
+			}
+			if joined.MaxRisk >= safety.RiskHigh {
+				form = safety.WrapFlagged(form, joined)
+			}
+			forms[i] = form
+		}
+		prefix := block.Text
+		if prefix != "" {
+			prefix += "\n\n"
+		}
+		entry := contextfmt.Choose(prefix, maxTokens, forms...)
+		if entry == "" {
+			continue
+		}
+		block.Text = prefix + entry
+		block.Observations = append(block.Observations, o)
+		seen[o.ID] = true
 	}
-	block.Text = strings.TrimRight(sb.String(), "\n")
-	block.TokenEstimate = maxTokens - budget
+	block.TokenEstimate = contextfmt.Estimate(block.Text)
 
 	// Fire-and-forget: the surfacing log is measurement, and measurement
 	// must never break the surface being measured.
@@ -736,10 +769,7 @@ func formatContextEntry(o Observation) string {
 // good enough for budget-sized decisions; the MCP layer can swap in a real
 // tokenizer later without touching callers.
 func estimateTokens(s string) int {
-	if s == "" {
-		return 0
-	}
-	return (len(s) + 3) / 4
+	return contextfmt.Estimate(s)
 }
 
 func defaultString(s, fallback string) string {

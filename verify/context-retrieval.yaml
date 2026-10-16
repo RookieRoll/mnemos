@@ -1,0 +1,31 @@
+# Deterministic example corpus is seeded by internal/verify/delivery_fixture_test.go.
+# Run this fixture only against that isolated corpus or one with matching IDs.
+cases:
+  - name: rule-and-exception
+    project: fixture
+    queries: [transaction]
+    relevant_ids: [rule, exception]
+    forbidden_ids: [raw, stale]
+    query_mode: all
+    expect_in_top: 10
+  - name: multilingual
+    project: fixture
+    queries: [Unicode]
+    relevant_ids: [chinese]
+    expect_in_top: 5
+  - name: default-visibility
+    project: fixture
+    queries: [transaction]
+    forbidden_ids: [raw, stale]
+  - name: explicit-raw
+    project: fixture
+    queries: [transaction]
+    relevant_ids: [raw]
+    include_raw: true
+    expect_in_top: 10
+  - name: explicit-stale
+    project: fixture
+    queries: [transaction]
+    relevant_ids: [stale]
+    include_stale: true
+    expect_in_top: 10
