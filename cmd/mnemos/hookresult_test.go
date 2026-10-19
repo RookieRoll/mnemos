@@ -29,7 +29,7 @@ func TestFormatPromptMemoryMatchesOriginalBytes(t *testing.T) {
 		sampleHit(memory.TypeCorrection, "oauth retry", "refresh token first"),
 		sampleHit(memory.TypeConvention, "error wrapping", "always use %w"),
 	}})
-	want := "[mnemos: prior memory relevant to this prompt — apply or address]\n" +
+	want := "[mnemos: possibly relevant memory from earlier sessions. Use what applies to this prompt and ignore the rest.]\n" +
 		"- [correction] oauth retry — refresh token first\n" +
 		"- [convention] error wrapping — always use %w\n"
 	if got != want {
@@ -191,10 +191,15 @@ func TestCollectorsDoNoRenderingWhenStoreIsUnavailable(t *testing.T) {
 // TestPathQueryTokensStillFeedsBothRenderings guards the one pure helper
 // the collectors share with the old code path.
 func TestPathQueryTokensStillFeedsBothRenderings(t *testing.T) {
-	got := pathQueryTokens("internal/storage/sessions.go")
-	for _, want := range []string{"internal", "storage", "sessions", "go"} {
+	got := pathQueryTokens("internal/storage/sessions.go", "")
+	for _, want := range []string{"storage", "sessions"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("query %q missing %q", got, want)
+		}
+	}
+	for _, generic := range []string{"internal", "go"} {
+		if strings.Contains(got, generic) {
+			t.Errorf("query %q retained generic token %q", got, generic)
 		}
 	}
 }

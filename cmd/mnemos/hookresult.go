@@ -54,7 +54,7 @@ type preToolMemory struct {
 // promptMemoryHeader opens the prompt-time memory block. Claude Code
 // concatenates a UserPromptSubmit hook's stdout straight into context,
 // so the block has to be self-describing and say what to do with it.
-const promptMemoryHeader = "[mnemos: prior memory relevant to this prompt — apply or address]"
+const promptMemoryHeader = "[mnemos: possibly relevant memory from earlier sessions. Use what applies to this prompt and ignore the rest.]"
 
 // snippetCap bounds one memory's contribution to an injected block. The
 // cap keeps the push invisible on routine prompts: a three-hit block is

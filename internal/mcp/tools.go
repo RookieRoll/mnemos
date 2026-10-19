@@ -217,6 +217,25 @@ func (s *Server) registerTools() {
 	}, s.handleStats)
 }
 
+// GlobalProject is the project a caller names to save a memory that
+// applies to every project. It is stored as no project.
+const GlobalProject = "*"
+
+// writeProject resolves the project a write lands in. An omitted project
+// takes the server's DefaultProject: between April and September 2026, ten
+// of the eleven project-less memories in one store were really about a
+// single project, because the agent never passed one. They then surfaced
+// in every other project and took 62% of prompt-hook injections.
+func (s *Server) writeProject(project string) string {
+	switch project {
+	case "":
+		return s.cfg.DefaultProject
+	case GlobalProject:
+		return ""
+	}
+	return project
+}
+
 // ---- mnemos_save -------------------------------------------------------
 
 type saveArgs struct {
@@ -227,7 +246,7 @@ type saveArgs struct {
 	Importance       int                `json:"importance,omitempty" jsonschema:"1..10, defaults to 5"`
 	TTLDays          int                `json:"ttl_days,omitempty"`
 	AgentID          string             `json:"agent_id,omitempty"`
-	Project          string             `json:"project,omitempty"`
+	Project          string             `json:"project,omitempty" jsonschema:"defaults to the project the server runs in; pass \"*\" for a memory that applies to every project"`
 	SessionID        string             `json:"session_id,omitempty"`
 	ValidFrom        string             `json:"valid_from,omitempty" jsonschema:"RFC3339 fact-time lower bound"`
 	ValidUntil       string             `json:"valid_until,omitempty" jsonschema:"RFC3339 fact-time upper bound"`
@@ -247,7 +266,7 @@ func (s *Server) handleSave(ctx context.Context, _ *mcpsdk.CallToolRequest, a sa
 		Title: a.Title, Content: a.Content, Type: memory.ObsType(a.Type),
 		TopicKey: a.TopicKey, ReplacesID: a.ReplacesID, UnpinReplacement: a.UnpinReplacement, Evidence: toEvidence(a.Evidence),
 		Tags: a.Tags, Importance: a.Importance, TTLDays: a.TTLDays,
-		AgentID: a.AgentID, Project: a.Project, SessionID: a.SessionID,
+		AgentID: a.AgentID, Project: s.writeProject(a.Project), SessionID: a.SessionID,
 		Rationale:   a.Rationale,
 		SourceKind:  memory.SourceKind(a.SourceKind),
 		TrustTier:   memory.TrustTier(a.TrustTier),
@@ -385,13 +404,14 @@ func (s *Server) handleLink(ctx context.Context, _ *mcpsdk.CallToolRequest, a li
 
 type sessionStartArgs struct {
 	AgentID string `json:"agent_id,omitempty"`
-	Project string `json:"project,omitempty" jsonschema:"enables convention auto-injection"`
+	Project string `json:"project,omitempty" jsonschema:"enables convention auto-injection; defaults to the project the server runs in"`
 	Goal    string `json:"goal,omitempty" jsonschema:"improves skill and correction matching"`
 }
 
 func (s *Server) handleSessionStart(ctx context.Context, _ *mcpsdk.CallToolRequest, a sessionStartArgs) (*mcpsdk.CallToolResult, any, error) {
+	project := s.writeProject(a.Project)
 	sess, err := s.cfg.Sessions.Open(ctx, session.OpenInput{
-		AgentID: a.AgentID, Project: a.Project, Goal: a.Goal,
+		AgentID: a.AgentID, Project: project, Goal: a.Goal,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -401,7 +421,7 @@ func (s *Server) handleSessionStart(ctx context.Context, _ *mcpsdk.CallToolReque
 		if block, err := s.cfg.Prewarm.Build(ctx, prewarm.Request{
 			Mode:      prewarm.ModeSessionStart,
 			AgentID:   a.AgentID,
-			Project:   a.Project,
+			Project:   project,
 			Goal:      a.Goal,
 			SessionID: sess.ID,
 		}); err == nil && block != nil && block.Text != "" {
@@ -599,7 +619,7 @@ type correctArgs struct {
 	TriggerContext string   `json:"trigger_context,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
 	AgentID        string   `json:"agent_id,omitempty"`
-	Project        string   `json:"project,omitempty"`
+	Project        string   `json:"project,omitempty" jsonschema:"defaults to the project the server runs in; pass \"*\" for a memory that applies to every project"`
 	SessionID      string   `json:"session_id,omitempty"`
 	Importance     int      `json:"importance,omitempty" jsonschema:"defaults to 8 — corrections matter"`
 }
@@ -618,7 +638,7 @@ func (s *Server) handleCorrect(ctx context.Context, _ *mcpsdk.CallToolRequest, a
 	res, err := s.cfg.Memory.Save(ctx, memory.SaveInput{
 		Title: a.Title, Content: content, Type: memory.TypeCorrection,
 		Tags: a.Tags, Importance: importance,
-		AgentID: a.AgentID, Project: a.Project, SessionID: a.SessionID,
+		AgentID: a.AgentID, Project: s.writeProject(a.Project), SessionID: a.SessionID,
 		Structured: structuredJSON,
 	})
 	if err != nil {
@@ -634,7 +654,7 @@ type conventionArgs struct {
 	Rule      string   `json:"rule"`
 	Rationale string   `json:"rationale,omitempty" jsonschema:"the WHY — surfaced in pre-warm"`
 	Example   string   `json:"example,omitempty"`
-	Project   string   `json:"project"`
+	Project   string   `json:"project,omitempty" jsonschema:"defaults to the project the server runs in; pass \"*\" for a memory that applies to every project"`
 	Tags      []string `json:"tags,omitempty"`
 	AgentID   string   `json:"agent_id,omitempty"`
 }
@@ -646,7 +666,7 @@ func (s *Server) handleConvention(ctx context.Context, _ *mcpsdk.CallToolRequest
 	}
 	res, err := s.cfg.Memory.Save(ctx, memory.SaveInput{
 		Title: a.Title, Content: content, Type: memory.TypeConvention,
-		Tags: a.Tags, Project: a.Project, AgentID: a.AgentID,
+		Tags: a.Tags, Project: s.writeProject(a.Project), AgentID: a.AgentID,
 		Importance: 8, Rationale: a.Rationale,
 	})
 	if err != nil {
@@ -659,7 +679,7 @@ func (s *Server) handleConvention(ctx context.Context, _ *mcpsdk.CallToolRequest
 
 type touchArgs struct {
 	Path      string `json:"path"`
-	Project   string `json:"project"`
+	Project   string `json:"project,omitempty" jsonschema:"defaults to the project the server runs in"`
 	SessionID string `json:"session_id,omitempty"`
 	AgentID   string `json:"agent_id,omitempty"`
 	Note      string `json:"note,omitempty"`
@@ -670,7 +690,7 @@ func (s *Server) handleTouch(ctx context.Context, _ *mcpsdk.CallToolRequest, a t
 		return nil, nil, fmt.Errorf("touch store not wired")
 	}
 	if err := s.cfg.Touches.Record(ctx, memory.TouchInput{
-		Project: a.Project, AgentID: a.AgentID, Path: a.Path,
+		Project: s.writeProject(a.Project), AgentID: a.AgentID, Path: a.Path,
 		SessionID: a.SessionID, Note: a.Note,
 	}); err != nil {
 		return nil, nil, err

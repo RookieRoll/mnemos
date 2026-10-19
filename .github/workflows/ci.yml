@@ -26,6 +26,8 @@ jobs:
           cache: true
       - name: Build
         run: go build ./...
+      - name: Verify runner snapshot isolation
+        run: python verify/runners/test_snapshot.py
       # -race needs cgo. Release binaries are still built with
       # CGO_ENABLED=0; this only affects the test run.
       - name: Test

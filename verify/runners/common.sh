@@ -10,13 +10,18 @@
 #                location, so the MCP configs resolve on any checkout.
 #   mcp_on/off   VERIFY_DIR/mcp_{on,off}.json.
 #
-# The JSON hook payloads are built with printf instead of python3: the
-# harness should not require a Python install to run a Go binary.
+# Hook JSON needs only the shell. The on-arm snapshot uses Python's stdlib
+# sqlite3 backup API so a concurrent WAL is copied coherently, without the
+# sqlite3 CLI or allowing fixture writes into the developer's live database.
 set -euo pipefail
 
 _runner_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERIFY_DIR="$(cd "$_runner_dir/.." && pwd)"
 MNEMOS_BIN="${MNEMOS_BIN:-mnemos}"
+# Resolve a checkout-relative override before scratch_project changes cwd.
+if [[ "$MNEMOS_BIN" == ./* || "$MNEMOS_BIN" == ../* ]]; then
+  MNEMOS_BIN="$(pwd)/$MNEMOS_BIN"
+fi
 MCP_ON="$VERIFY_DIR/mcp_on.json"
 MCP_OFF="$VERIFY_DIR/mcp_off.json"
 
@@ -49,6 +54,21 @@ mnemos_user_prompt_hook() {
   "$MNEMOS_BIN" hook user-prompt \
     --payload "$(printf '{"hook_event_name":"UserPromptSubmit","prompt":%s}' "$(json_escape "$trigger")")" \
     2>/dev/null || true
+}
+
+# snapshot_store keeps hooks, global hooks and the MCP child on the same
+# disposable database. Fail closed if the snapshot cannot be prepared.
+snapshot_store() {
+  local python=${MNEMOS_VERIFY_PYTHON:-python3}
+  local store_dir="$SANDBOX_DIR/store"
+  mkdir -p "$store_dir"
+  # A Windows Python receives native paths when the runner uses Git Bash.
+  if command -v cygpath >/dev/null 2>&1; then
+    store_dir=$(cygpath -m "$store_dir")
+  fi
+  "$MNEMOS_BIN" config | "$python" "$_runner_dir/snapshot.py" "$store_dir" "$MNEMOS_BIN"
+  export MNEMOS_CONFIG="$store_dir/config.toml"
+  MCP_ON="$store_dir/mcp_on.json"
 }
 
 # scratch_project creates a temp cwd whose basename is "mnemos" so the

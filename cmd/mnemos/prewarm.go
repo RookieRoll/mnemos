@@ -96,18 +96,17 @@ func runPrewarm(ctx context.Context, args []string) error {
 
 	var sessID string
 	if *openSession && pwMode == prewarm.ModeSessionStart {
-		if sess := adoptableOpenSession(ctx, d, proj); sess != nil {
+		if sess := adoptableOpenSession(ctx, d, in.SessionID, proj); sess != nil {
 			sessID = sess.ID
 		} else if sess, err := d.sess.Open(ctx, session.OpenInput{
-			Project: proj, Goal: *goal,
+			Project: proj, Goal: *goal, HostSessionID: in.SessionID,
 		}); err == nil {
 			sessID = sess.ID
 		}
 	} else if pwMode == prewarm.ModeCompactionRecovery {
-		// For compaction recovery we need an existing session to scope to.
-		// The Claude Code hook payload's session_id isn't the mnemos id; we
-		// fall back to the most recent open session for this project.
-		if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+		// Recovery restores the state of the session that was compacted:
+		// the one SessionStart opened for this host conversation.
+		if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
 			sessID = sess.ID
 		}
 	}
@@ -156,10 +155,21 @@ func runPrewarm(ctx context.Context, args []string) error {
 // hour later still gets its own row.
 const sessionAdoptWindow = 90 * time.Second
 
-// adoptableOpenSession returns the newest open session for the project if
-// it started within sessionAdoptWindow, else nil. Best-effort: lookup
+// adoptableOpenSession returns the session a SessionStart firing should
+// reuse instead of opening a twin, or nil. With a host session ID only a
+// session opened for that same host conversation qualifies, so a second
+// terminal started in the same project inside the window still gets its
+// own session. Without one it falls back to the newest open session for
+// the project if it started within sessionAdoptWindow. Best-effort: lookup
 // failures mean "open a fresh one".
-func adoptableOpenSession(ctx context.Context, d *deps, project string) *session.Session {
+func adoptableOpenSession(ctx context.Context, d *deps, hostSessionID, project string) *session.Session {
+	if hostSessionID != "" {
+		owned, err := d.sess.ListOpenByHost(ctx, hostSessionID)
+		if err != nil || len(owned) == 0 {
+			return nil
+		}
+		return &owned[0]
+	}
 	if project == "" {
 		return nil
 	}

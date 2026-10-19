@@ -41,6 +41,20 @@ The arms are command templates. The default uses
 two arms see different MCP configurations; customize to match your CLI.
 `{{trigger}}` is substituted per run.
 
+The on-arm never writes to your real store. `runners/on.sh` snapshots it
+into a scratch directory and exports `MNEMOS_CONFIG` pointing there, so
+the hooks, the MCP server claude spawns, and anything the agent saves all
+hit the snapshot, which is deleted when the run ends. Set `MNEMOS_BIN` to
+run the arm against a development build.
+The on-arm requires Python 3 with its stdlib `sqlite3` module (no SQLite CLI).
+Override the interpreter with `MNEMOS_VERIFY_PYTHON` when it is not `python3`.
+Snapshot setup fails closed; it never falls back to writing the live store.
+The generated MCP config binds the exact `MNEMOS_BIN`. Registered global
+mnemos hook binaries are checked too: if an older installed binary ignores
+`MNEMOS_CONFIG`, the runner stops before launching Claude. Upgrade that binary
+first; an unparseable mnemos hook wrapper also requires review before running.
+The no-model isolation regression is `python3 verify/runners/test_snapshot.py`.
+
 ## Both
 
 ```

@@ -22,6 +22,8 @@ func homeWithConfig(t *testing.T, embedConfig string) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	// A developer's own MNEMOS_CONFIG must not steer tests at their real store.
+	t.Setenv("MNEMOS_CONFIG", "")
 	cfgDir := filepath.Join(home, ".mnemos")
 	_ = os.MkdirAll(cfgDir, 0o755)
 	if embedConfig != "" {

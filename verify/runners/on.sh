@@ -23,11 +23,14 @@ _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 trigger="$1"
 scratch_project on
 
+# Hook and MCP writes must land in a disposable snapshot, never the live store.
+snapshot_store
+
 # Empty when nothing scores >= promptMemoryMinScore.
 memory_block=$(mnemos_user_prompt_hook "$trigger")
 
 if [[ -n "$memory_block" ]]; then
-  exec claude -p "$trigger" \
+  claude -p "$trigger" \
     --append-system-prompt "$memory_block" \
     --mcp-config "$MCP_ON" \
     --strict-mcp-config \
@@ -35,7 +38,7 @@ if [[ -n "$memory_block" ]]; then
     --output-format stream-json \
     --verbose
 else
-  exec claude -p "$trigger" \
+  claude -p "$trigger" \
     --mcp-config "$MCP_ON" \
     --strict-mcp-config \
     --dangerously-skip-permissions \

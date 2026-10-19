@@ -19,15 +19,16 @@ Open work on Mnemos. Pick anything here and ship it. If you want to claim an ite
 
 ## Invocation reliability — make sure mnemos is called at the right time
 
-Claude Code exposes ~26 hook events; we ship 7, spanning passive (SessionStart, UserPromptSubmit, PostToolUse, SessionEnd, PreCompact, PostCompact) and blocking (PreToolUse guardrail). A memory system nobody invokes is zero value regardless of schema quality, so this layer gates everything downstream.
+Claude Code exposes ~26 hook events; we ship 7 hook entries, spanning passive (SessionStart for startup/resume/clear, SessionStart for compact, UserPromptSubmit, PostToolUse, SessionEnd, PreToolUse just-in-time memory) and blocking (PreToolUse guardrail). A memory system nobody invokes is zero value regardless of schema quality, so this layer gates everything downstream.
 
 **Shipped**
 
-- [x] `SessionStart` → `mnemos prewarm` (passive context injection)
+- [x] `SessionStart` (`startup|resume|clear`) → `mnemos prewarm` (passive context injection; records Claude Code's session_id so every later hook finds its own session)
 - [x] `UserPromptSubmit` → `mnemos hook user-prompt` (backfills session goal from the first prompt — kills the "agent skipped mnemos_session_start on editing tasks" failure mode)
 - [x] `PostToolUse` (`Edit|Write|MultiEdit|NotebookEdit`) → `mnemos hook post-tool` (passive file-touch capture; the heat map no longer depends on the agent remembering to call `mnemos_touch`)
 - [x] `SessionEnd` → `mnemos hook session-end` (auto-closes with derived summary; reason-mapped status: `prompt_input_exit` → `StatusAbandoned`, `bypass_permissions_disabled` → `StatusBlocked`, everything else → `StatusOK`)
-- [x] `PreCompact` / `PostCompact` → `mnemos hook pre-compact` / `post-compact` (emits a recovery block to stderr — `PreCompact`'s stderr is fed back to Claude so mnemos state survives compaction instead of being silently dropped for one turn)
+- [x] `SessionStart` (`compact`) → `mnemos prewarm --mode compaction_recovery` (restores the compacted session's goal and observations; SessionStart output is added to the model's context)
+- [x] ~~`PreCompact` / `PostCompact` → `mnemos hook pre-compact` / `post-compact`~~ retired 2026-09-30: their stderr recovery block never appeared in a transcript while every run logged its memories as surfaced. `mnemos init` removes them.
 - [x] **First blocking-hook** — `PreToolUse` matched on `mcp__mnemos__mnemos_save|mnemos_correct|mnemos_convention` runs the safety scanner; exit 2 with stderr feedback when a RiskHigh prompt-injection pattern is detected. Opens the exit-2-stderr guardrail pattern.
 
 **Next blockers — extend the exit-2-stderr guardrail pattern**

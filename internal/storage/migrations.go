@@ -116,6 +116,11 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if m.version == 8 {
+		if err := reconcileVersionSixFork(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 		return fmt.Errorf("exec: %w", err)
 	}
@@ -125,6 +130,49 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// reconcileVersionSixFork compensates for two released version-six schemas.
+// Their numeric ledger entries cannot distinguish pinned memory from host-ID
+// mapping. Probe the actual columns, drain the cursor, then add only missing
+// fields under the version-eight transaction; never rewrite migration history.
+func reconcileVersionSixFork(ctx context.Context, tx *sql.Tx) error {
+	for _, field := range []struct {
+		table, column, statement string
+	}{
+		{"observations", "pinned", "ALTER TABLE observations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))"},
+		{"sessions", "host_session_id", "ALTER TABLE sessions ADD COLUMN host_session_id TEXT"},
+	} {
+		rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+field.table+")")
+		if err != nil {
+			return fmt.Errorf("inspect version-six %s: %w", field.table, err)
+		}
+		found := false
+		for rows.Next() {
+			var ordinal, notNull, primaryKey int
+			var name, kind string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&ordinal, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan version-six %s: %w", field.table, err)
+			}
+			found = found || name == field.column
+		}
+		scanErr := rows.Err()
+		closeErr := rows.Close()
+		if scanErr != nil {
+			return fmt.Errorf("drain version-six %s: %w", field.table, scanErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close version-six %s: %w", field.table, closeErr)
+		}
+		if !found {
+			if _, err := tx.ExecContext(ctx, field.statement); err != nil {
+				return fmt.Errorf("reconcile version-six %s.%s: %w", field.table, field.column, err)
+			}
+		}
 	}
 	return nil
 }

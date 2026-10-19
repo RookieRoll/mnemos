@@ -136,9 +136,19 @@ func defaultRules() []rule {
 			re:   regexp.MustCompile(`<\s*(tool_use|tool_call|function_calls?)\b`),
 		},
 		{
+			// Content instructing the reader to invoke a mnemos tool: call
+			// syntax, or "call mnemos_x" in imperative position (opening a
+			// line, bullet or sentence, after now/please/then, or addressed
+			// as "you must call"). Prose that merely names a tool after
+			// "call" is not an instruction. The earlier pattern matched any
+			// "call mnemos_", so a correction reading "rely on the agent to
+			// call mnemos_session_start" was flagged high risk in every
+			// prewarm, and the save guard blocked memories quoting it.
 			name: "mcp-spoof",
 			risk: RiskHigh,
-			re:   regexp.MustCompile(`(?i)\bmnemos_\w+\s*\(|call\s+(the\s+)?mnemos_`),
+			re: regexp.MustCompile(`(?im)\bmnemos_\w+\s*\(` +
+				`|(?:^\s*(?:[-*>]\s*)?|[.!?;]\s+|\b(?:now|please|immediately|always|then|first)\s+|\byou\s+(?:must|should|need\s+to|have\s+to)\s+(?:now\s+|immediately\s+|always\s+)?)` +
+				`call\s+(?:the\s+)?mnemos_`),
 		},
 		{
 			name: "credential-bait",

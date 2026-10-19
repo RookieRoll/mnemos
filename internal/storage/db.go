@@ -31,7 +31,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		}
 	}
 
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", path)
+	// Reserve the writer at BEGIN, before any schema/optimistic reads can
+	// establish a snapshot that cannot later upgrade under WAL contention.
+	// modernc applies this only to writable transactions; explicit ReadOnly
+	// snapshots keep deferred BEGIN and can run alongside the reserved writer.
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_txlock=immediate", path)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open sqlite: %w", err)

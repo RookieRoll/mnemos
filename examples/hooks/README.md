@@ -47,22 +47,14 @@ current session.
 
 See `on-edit-touch.sh`.
 
-## pre-compaction: snapshot session state
+## Compaction recovery
 
-When Claude Code is about to compact context, flush a summary of in-session
-observations so compaction recovery has something to reconstruct from.
-
-```json
-{
-  "hooks": {
-    "PreCompact": [
-      {"command": "/usr/local/bin/mnemos-hook-precompact.sh"}
-    ]
-  }
-}
-```
-
-See `pre-compaction.sh`.
+`mnemos init` already wires this, so no example script is needed. A
+`SessionStart` hook with the `compact` matcher runs
+`mnemos prewarm --mode compaction_recovery` once the compacted
+conversation resumes, and its output is added to the model's context.
+An earlier example here used a `PreCompact` hook instead; its output never
+reached the model, so it was removed.
 
 ## Notes
 

@@ -429,28 +429,40 @@ func stepConventions(ctx context.Context, s *Service, req Request) (sectionDraft
 	return draft, nil
 }
 
+// recentSessionsShown caps the recent-sessions section.
+const recentSessionsShown = 3
+
+// stepRecentSessions lists the project's previous sessions. It queries the
+// project directly: taking the five newest sessions across every project
+// and then filtering usually left only the session being opened right now,
+// so the section read "- 2026-09-29" and nothing else. That session and
+// any with neither a goal nor a summary are skipped; they carry nothing to
+// continue from.
 func stepRecentSessions(ctx context.Context, s *Service, req Request) (sectionDraft, error) {
-	recent, err := s.sessions.Recent(ctx, req.AgentID, 5)
+	// Over-fetch so skipped rows do not starve the section.
+	fetch := recentSessionsShown * 4
+	var (
+		recent []session.Session
+		err    error
+	)
+	if req.Project != "" {
+		recent, err = s.sessions.RecentInProject(ctx, req.AgentID, req.Project, fetch)
+	} else {
+		recent, err = s.sessions.Recent(ctx, req.AgentID, fetch)
+	}
 	if err != nil {
 		return sectionDraft{title: "recent sessions"}, err
 	}
-	if req.Project != "" {
-		filtered := recent[:0]
-		for _, r := range recent {
-			if r.Project == req.Project {
-				filtered = append(filtered, r)
-			}
-		}
-		recent = filtered
-	}
-	if len(recent) == 0 {
-		return sectionDraft{title: "recent sessions"}, nil
-	}
 	draft := sectionDraft{title: "recent sessions"}
-	for i, r := range recent {
-		if i >= 3 {
+	shown := 0
+	for _, r := range recent {
+		if shown >= recentSessionsShown {
 			break
 		}
+		if r.ID == req.SessionID || (r.Goal == "" && r.Summary == "") {
+			continue
+		}
+		shown++
 		var b strings.Builder
 		b.WriteString("- ")
 		b.WriteString(r.StartedAt.Format("2006-01-02"))

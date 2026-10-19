@@ -95,10 +95,18 @@ async function seededProject() {
   delete env.MNEMOS_DISABLED;
 
   const seed = join(home, "seed.json");
+  // Fidelity import preserves timestamps, including a missing timestamp's
+  // zero value. These are newly seeded memories: giving them their real age
+  // prevents the recency policy from treating them as ancient observations.
+  // The specific "storage sessions" query must clear the normal score gate
+  // without relying on generic layout/extension tokens for extra matches.
+  const createdAt = new Date().toISOString();
   writeFileSync(
     seed,
     JSON.stringify({
-      observations: [{ ID: "seed-target", ...CORRECTION }, CONVENTION, ...FILLER],
+      observations: [{ ID: "seed-target", ...CORRECTION }, CONVENTION, ...FILLER].map(
+        (observation) => ({ ...observation, CreatedAt: createdAt }),
+      ),
       sessions: [],
       skills: [],
     }),

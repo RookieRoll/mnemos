@@ -2,6 +2,8 @@
 
 All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 21 core tools; enabling rumination adds 4 more (25 total).
 
+Writes that omit `project` (`mnemos_save`, `mnemos_correct`, `mnemos_convention`, `mnemos_touch`, `mnemos_session_start`) land in the project the server was started in, which is the basename of its working directory. Claude Code and Codex start the server in the project root. Pass `"project": "*"` to save a memory that applies to every project.
+
 ## Save & retrieve
 
 ### `mnemos_save`
@@ -15,7 +17,7 @@ Store an agent-curated observation.
 | `tags` |   | string array |
 | `importance` |   | 1-10, defaults to 5 |
 | `ttl_days` |   | auto-expire |
-| `agent_id`, `project`, `session_id` |   | scoping |
+| `agent_id`, `project`, `session_id` |   | scoping; `project` defaults to the server's project, `"*"` for global |
 | `valid_from`, `valid_until` |   | ISO-8601 fact-time bounds |
 | `source_kind` |   | `user`, `tool`, `agent_inference`, `dream`, `import`; defaults to `user` |
 | `trust_tier` |   | `raw`, `curated`, `skill`; defaults to `curated` |
@@ -238,16 +240,16 @@ Surfaced automatically in pre-warm when the session goal matches.
 ### `mnemos_convention`
 Declare a project convention. Auto-injected at every `mnemos_session_start` for the matching project.
 
-| `title`, `rule`, `project` | required |
-| `rationale`, `example`, `tags`, `agent_id` | optional |
+| `title`, `rule` | required |
+| `project`, `rationale`, `example`, `tags`, `agent_id` | optional; `project` defaults to the server's project |
 
 Rationale is surfaced in pre-warm — WHY matters more than what.
 
 ### `mnemos_touch`
 Record that a file was touched in the current session. Builds a heat map: frequently-touched files get priority in pre-warming.
 
-| `path`, `project` | required |
-| `session_id`, `agent_id`, `note` | optional |
+| `path` | required |
+| `project`, `session_id`, `agent_id`, `note` | optional; `project` defaults to the server's project |
 
 ## Skills
 

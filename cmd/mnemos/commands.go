@@ -358,6 +358,116 @@ func runConfig(_ context.Context, args []string) error {
 	return nil
 }
 
+// labeledHook pairs a Claude Code hook entry with the name init and doctor
+// print for it.
+type labeledHook struct {
+	label string
+	entry installer.HookEntry
+}
+
+// claudeHooks is the Claude Code hook set mnemos installs. init wires it
+// and doctor checks it, so the two cannot drift apart.
+func claudeHooks(selfPath string) []labeledHook {
+	return []labeledHook{
+		{
+			// resume and clear start a conversation with a context the old
+			// session never saw, so they get a session and a prewarm too.
+			label: "Claude Code SessionStart hook",
+			entry: installer.HookEntry{
+				Event:   "SessionStart",
+				Matcher: "startup|resume|clear",
+				Command: fmt.Sprintf("%s prewarm", selfPath),
+				Timeout: 10,
+			},
+		},
+		{
+			// SessionStart output is added to the model's context, and the
+			// compact source fires once the compacted conversation resumes,
+			// so this is where recovery state has to be delivered.
+			label: "Claude Code SessionStart compaction recovery hook",
+			entry: installer.HookEntry{
+				Event:   "SessionStart",
+				Matcher: "compact",
+				Command: fmt.Sprintf("%s prewarm --mode compaction_recovery", selfPath),
+				Timeout: 10,
+			},
+		},
+		{
+			label: "Claude Code UserPromptSubmit hook",
+			entry: installer.HookEntry{
+				Event:   "UserPromptSubmit",
+				Command: fmt.Sprintf("%s hook user-prompt", selfPath),
+				Timeout: 5,
+			},
+		},
+		{
+			label: "Claude Code PostToolUse hook",
+			entry: installer.HookEntry{
+				Event:   "PostToolUse",
+				Matcher: "Edit|Write|MultiEdit|NotebookEdit",
+				Command: fmt.Sprintf("%s hook post-tool", selfPath),
+				Timeout: 5,
+			},
+		},
+		{
+			label: "Claude Code SessionEnd hook",
+			entry: installer.HookEntry{
+				Event:   "SessionEnd",
+				Command: fmt.Sprintf("%s hook session-end", selfPath),
+				Timeout: 5,
+			},
+		},
+		{
+			label: "Claude Code PreToolUse guardrail",
+			entry: installer.HookEntry{
+				Event:   "PreToolUse",
+				Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention",
+				Command: fmt.Sprintf("%s hook pre-tool", selfPath),
+				Timeout: 5,
+			},
+		},
+		{
+			label: "Claude Code PreToolUse just-in-time memory",
+			entry: installer.HookEntry{
+				Event:   "PreToolUse",
+				Matcher: "Edit|Write|MultiEdit|NotebookEdit",
+				Command: fmt.Sprintf("%s hook pre-tool", selfPath),
+				Timeout: 5,
+			},
+		},
+	}
+}
+
+// obsoleteClaudeHooks are entries earlier releases installed that init now
+// removes. The PreCompact and PostCompact hooks wrote their recovery block
+// to stderr, which never appeared in a single transcript, while every run
+// logged its memories as surfaced. The startup-only SessionStart entry is
+// superseded by the startup|resume|clear one; leaving both would fire
+// prewarm twice on every launch.
+func obsoleteClaudeHooks(selfPath string) []labeledHook {
+	return []labeledHook{
+		{
+			label: "startup-only SessionStart hook",
+			entry: installer.HookEntry{
+				Event: "SessionStart", Matcher: "startup",
+				Command: fmt.Sprintf("%s prewarm", selfPath),
+			},
+		},
+		{
+			label: "PreCompact hook",
+			entry: installer.HookEntry{
+				Event: "PreCompact", Command: fmt.Sprintf("%s hook pre-compact", selfPath),
+			},
+		},
+		{
+			label: "PostCompact hook",
+			entry: installer.HookEntry{
+				Event: "PostCompact", Command: fmt.Sprintf("%s hook post-compact", selfPath),
+			},
+		},
+	}
+}
+
 func runInit(_ context.Context, _ []string) error {
 	selfPath, err := os.Executable()
 	if err != nil {
@@ -393,80 +503,16 @@ func runInit(_ context.Context, _ []string) error {
 	// looks like plain editing — the failure this wiring exists to fix.
 	if hasClaudeCode {
 		settings := installer.ClaudeSettingsPath()
-		hookEntries := []struct {
-			label string
-			entry installer.HookEntry
-		}{
-			{
-				label: "Claude Code SessionStart hook",
-				entry: installer.HookEntry{
-					Event:   "SessionStart",
-					Matcher: "startup",
-					Command: fmt.Sprintf("%s prewarm", selfPath),
-					Timeout: 10,
-				},
-			},
-			{
-				label: "Claude Code UserPromptSubmit hook",
-				entry: installer.HookEntry{
-					Event:   "UserPromptSubmit",
-					Command: fmt.Sprintf("%s hook user-prompt", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code PostToolUse hook",
-				entry: installer.HookEntry{
-					Event:   "PostToolUse",
-					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
-					Command: fmt.Sprintf("%s hook post-tool", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code SessionEnd hook",
-				entry: installer.HookEntry{
-					Event:   "SessionEnd",
-					Command: fmt.Sprintf("%s hook session-end", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code PreToolUse guardrail",
-				entry: installer.HookEntry{
-					Event:   "PreToolUse",
-					Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention",
-					Command: fmt.Sprintf("%s hook pre-tool", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code PreToolUse just-in-time memory",
-				entry: installer.HookEntry{
-					Event:   "PreToolUse",
-					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
-					Command: fmt.Sprintf("%s hook pre-tool", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code PreCompact hook",
-				entry: installer.HookEntry{
-					Event:   "PreCompact",
-					Command: fmt.Sprintf("%s hook pre-compact", selfPath),
-					Timeout: 10,
-				},
-			},
-			{
-				label: "Claude Code PostCompact hook",
-				entry: installer.HookEntry{
-					Event:   "PostCompact",
-					Command: fmt.Sprintf("%s hook post-compact", selfPath),
-					Timeout: 10,
-				},
-			},
+		for _, old := range obsoleteClaudeHooks(selfPath) {
+			changed, err := installer.UninstallHook(settings, old.entry)
+			switch {
+			case err != nil:
+				fmt.Printf("  ✗ removing %s (%s): %v\n", old.label, settings, err)
+			case changed:
+				fmt.Printf("  ✓ removed %s from %s\n", old.label, settings)
+			}
 		}
-		for _, h := range hookEntries {
+		for _, h := range claudeHooks(selfPath) {
 			changed, err := installer.InstallHook(settings, h.entry)
 			switch {
 			case err != nil:
@@ -557,44 +603,13 @@ func runDoctor(ctx context.Context, _ []string) error {
 
 	if hasClaudeCode {
 		settings := installer.ClaudeSettingsPath()
-		doctorHooks := []struct {
-			label string
-			entry installer.HookEntry
-		}{
-			{"Claude Code SessionStart hook", installer.HookEntry{
-				Event:   "SessionStart",
-				Matcher: "startup",
-				Command: fmt.Sprintf("%s prewarm", selfPath),
-			}},
-			{"Claude Code UserPromptSubmit hook", installer.HookEntry{
-				Event:   "UserPromptSubmit",
-				Command: fmt.Sprintf("%s hook user-prompt", selfPath),
-			}},
-			{"Claude Code PostToolUse hook", installer.HookEntry{
-				Event:   "PostToolUse",
-				Matcher: "Edit|Write|MultiEdit|NotebookEdit",
-				Command: fmt.Sprintf("%s hook post-tool", selfPath),
-			}},
-			{"Claude Code SessionEnd hook", installer.HookEntry{
-				Event:   "SessionEnd",
-				Command: fmt.Sprintf("%s hook session-end", selfPath),
-			}},
-			{"Claude Code PreToolUse guardrail", installer.HookEntry{
-				Event:   "PreToolUse",
-				Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention",
-				Command: fmt.Sprintf("%s hook pre-tool", selfPath),
-			}},
-			{"Claude Code PreCompact hook", installer.HookEntry{
-				Event:   "PreCompact",
-				Command: fmt.Sprintf("%s hook pre-compact", selfPath),
-			}},
-			{"Claude Code PostCompact hook", installer.HookEntry{
-				Event:   "PostCompact",
-				Command: fmt.Sprintf("%s hook post-compact", selfPath),
-			}},
-		}
-		for _, h := range doctorHooks {
+		for _, h := range claudeHooks(selfPath) {
 			check(installer.IsHookInstalled(settings, h.entry), "%s %s", h.label, settings)
+		}
+		for _, old := range obsoleteClaudeHooks(selfPath) {
+			if installer.IsHookInstalled(settings, old.entry) {
+				check(false, "obsolete %s still installed in %s (run `mnemos init` to remove it)", old.label, settings)
+			}
 		}
 	}
 	if !ok {

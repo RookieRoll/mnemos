@@ -58,12 +58,9 @@ func startEvolutionWrite(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: begin evolution: %w", err)
 	}
-	// Acquire the SQLite writer reservation before the optimistic read, including
-	// across independent connections/processes. No observation rows are changed.
-	if _, err := tx.ExecContext(ctx, "UPDATE observations SET id=id WHERE 0"); err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("storage: reserve evolution writer: %w", err)
-	}
+	// Open configures BEGIN IMMEDIATE for writable transactions. A deferred
+	// BEGIN followed by a no-op UPDATE can still lose a schema/read-to-write
+	// upgrade race; SQLITE_BUSY then bypasses the configured busy timeout.
 	return tx, nil
 }
 
