@@ -110,7 +110,7 @@ func (s *Service) Current(ctx context.Context, agentID string) (*Session, error)
 // ErrNotFound: an unattributed event is better than a misattributed one.
 func (s *Service) Resolve(ctx context.Context, hostSessionID, project string) (*Session, error) {
 	if hostSessionID != "" {
-		owned, err := s.store.ListOpenByHost(ctx, hostSessionID)
+		owned, err := s.ListLegacyOpenByHost(ctx, hostSessionID)
 		if err != nil {
 			return nil, err
 		}
@@ -121,7 +121,7 @@ func (s *Service) Resolve(ctx context.Context, hostSessionID, project string) (*
 	if project == "" {
 		return nil, ErrNotFound
 	}
-	open, err := s.store.ListOpen(ctx, project)
+	open, err := s.ListLegacyOpen(ctx, project)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func (s *Service) CloseForHost(ctx context.Context, hostSessionID, project strin
 		}
 		return s.CloseAllOpen(ctx, project, in)
 	}
-	targets, err := s.store.ListOpenByHost(ctx, hostSessionID)
+	targets, err := s.ListLegacyOpenByHost(ctx, hostSessionID)
 	if err != nil {
 		return 0, err
 	}
@@ -175,6 +175,35 @@ func (s *Service) ListOpen(ctx context.Context, project string) ([]Session, erro
 	return s.store.ListOpen(ctx, project)
 }
 
+// ListLegacyOpen returns only sessions eligible for heuristic adoption or closure.
+// Administrative ListOpen deliberately continues to include bound sessions.
+func (s *Service) ListLegacyOpen(ctx context.Context, project string) ([]Session, error) {
+	sessions, err := s.store.ListOpen(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return legacyOnly(sessions), nil
+}
+
+// ListLegacyOpenByHost excludes continuity identities from bare-host inference.
+func (s *Service) ListLegacyOpenByHost(ctx context.Context, hostSessionID string) ([]Session, error) {
+	sessions, err := s.store.ListOpenByHost(ctx, hostSessionID)
+	if err != nil {
+		return nil, err
+	}
+	return legacyOnly(sessions), nil
+}
+
+func legacyOnly(sessions []Session) []Session {
+	kept := sessions[:0]
+	for _, sess := range sessions {
+		if !sess.ContinuityBound {
+			kept = append(kept, sess)
+		}
+	}
+	return kept
+}
+
 // TwinWindow bounds how far apart two open sessions for the same project
 // may start and still be considered the same terminal's twins. SessionStart
 // hooks installed at both user and project scope fire within milliseconds
@@ -200,7 +229,7 @@ const TwinWindow = 90 * time.Second
 // window belong to somebody else; the 24h stale sweep collects them if
 // their terminal really is gone.
 func (s *Service) CloseAllOpen(ctx context.Context, project string, in CloseInput) (int, error) {
-	open, err := s.store.ListOpen(ctx, project)
+	open, err := s.ListLegacyOpen(ctx, project)
 	if err != nil {
 		return 0, err
 	}

@@ -201,8 +201,8 @@ func TestRunInitWiresPreToolGuardrailForClaudeCode(t *testing.T) {
 		t.Fatalf("expected two PreToolUse groups, got %v", groups)
 	}
 	wantMatchers := map[string]bool{
-		"mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention": false,
-		"Edit|Write|MultiEdit|NotebookEdit":                                                   false,
+		"mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention|mcp__mnemos__mnemos_checkpoint": false,
+		"Edit|Write|MultiEdit|NotebookEdit": false,
 	}
 	for _, g := range groups {
 		group := g.(map[string]any)

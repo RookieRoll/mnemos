@@ -10,6 +10,8 @@ import (
 
 	"github.com/polyxmedia/mnemos/internal/api"
 	"github.com/polyxmedia/mnemos/internal/config"
+	"github.com/polyxmedia/mnemos/internal/continuity"
+	"github.com/polyxmedia/mnemos/internal/continuityflow"
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/mcp"
 	"github.com/polyxmedia/mnemos/internal/memory"
@@ -75,6 +77,9 @@ func runServe(ctx context.Context, args []string) error {
 		Injections:   injLog,
 		MaxTokens:    500,
 	})
+	continuitySvc := continuityflow.New(continuityflow.Config{
+		Core: continuity.New(continuity.Config{Store: db.Continuity()}), Composer: pw,
+	})
 
 	addr := *httpAddr
 	if addr != "" || cfg.Server.Transport == "http" {
@@ -82,13 +87,14 @@ func runServe(ctx context.Context, args []string) error {
 			addr = cfg.Server.HTTPAddr
 		}
 		httpSrv := api.NewServer(api.Config{
-			Memory:   mem,
-			Sessions: sess,
-			Skills:   skl,
-			Touches:  db.Touches(),
-			Prewarm:  pw,
-			APIKey:   cfg.Server.APIKey,
-			Logger:   logger,
+			Continuity: continuitySvc,
+			Memory:     mem,
+			Sessions:   sess,
+			Skills:     skl,
+			Touches:    db.Touches(),
+			Prewarm:    pw,
+			APIKey:     cfg.Server.APIKey,
+			Logger:     logger,
 			StorageSize: func() (int64, error) {
 				fi, err := os.Stat(cfg.Storage.Path)
 				if err != nil {
@@ -102,6 +108,7 @@ func runServe(ctx context.Context, args []string) error {
 	}
 
 	srv := mcp.NewServer(mcp.Config{
+		Continuity: continuitySvc,
 		Name:       "mnemos",
 		Version:    version.Version,
 		Memory:     mem,

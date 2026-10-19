@@ -1,8 +1,98 @@
 # MCP tools reference
 
-All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 21 core tools; enabling rumination adds 4 more (25 total).
+All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 23 core tools; enabling rumination adds 4 more (27 total).
 
 Writes that omit `project` (`mnemos_save`, `mnemos_correct`, `mnemos_convention`, `mnemos_touch`, `mnemos_session_start`) land in the project the server was started in, which is the basename of its working directory. Claude Code and Codex start the server in the project root. Pass `"project": "*"` to save a memory that applies to every project.
+
+## Shared session continuity (explicit v1)
+
+Continuity restores reported progress into a new independent session, not a
+conversation transcript or running process. It uses a verified local workspace;
+separate clones/worktrees remain distinct and unbound old sessions stay excluded.
+
+Opt in through `mnemos_session_start`'s optional `continuity` object:
+
+```json
+{"agent_id":"worker-a","project":"api","goal":"finish migration","continuity":{"protocol_version":1,"cwd":"D:/work/api","harness_kind":"codex","start_key":"unique-start-invocation"}}
+```
+
+For non-Git projects also provide `workspace_root`. Omitted agent resolves to
+`default`, independently of harness. Use a new start key for each actual new,
+resumed or forked session; retain the same key/input for retries. Conflicting reuse
+or a closed target conflicts. Nonempty outer agent/project/goal overrides nested
+values. The flat v1 result contains `status=applied|replayed`, `session_id`,
+`started_at`, resolved scope, `context_status=available|unavailable`, `prewarm`
+(string), and actually delivered `continuity_refs`. Context failure preserves the
+committed ID; never open a replacement legacy session to compensate.
+
+For example, a non-Git project rooted at `D:/work/my-app` can start from its
+`src` subdirectory with this `mnemos_session_start` input:
+
+```json
+{"continuity":{"protocol_version":1,"harness_kind":"codex","start_key":"unique-start-invocation","workspace_root":"D:/work/my-app","cwd":"D:/work/my-app/src"}}
+```
+
+Supply the same absolute `workspace_root` on subsequent checkpoint and context
+requests, including calls from other subdirectories or agents. The root and
+`cwd` must exist, and the canonical `cwd` must be inside the canonical root.
+For CLI `--payload` or HTTP open, send only the inner `continuity` object above.
+This is a per-request field, not a `config.toml` setting or environment variable.
+Non-Git workspaces have unknown branch/HEAD, so choose recovery sources explicitly
+with `source_session_id`; they are not automatically selected by resume intent.
+
+### `mnemos_checkpoint`
+
+Requires `protocol_version:1`, exact `session_id`, workspace `cwd` (plus non-Git
+root), optional `agent_id`, `action=save|clear`, explicit `expected_revision`
+(initially 0) and stable `request_id`. Save replaces the complete `payload`:
+
+```json
+{"protocol_version":1,"agent_id":"worker-a","cwd":"D:/work/api","session_id":"<current-session>","action":"save","expected_revision":0,"request_id":"checkpoint-1","visibility":"workspace","payload":{"task":"migration","state":"blocked","summary":"Schema change implemented; targeted test passes.","next_steps":["Check compatibility."],"blockers":["Full regression has not run."],"references":[{"kind":"file","id":"internal/storage/sessions.go"}]}}
+```
+
+Visibility defaults to `owner`; `workspace` explicitly publishes only this body
+and bounded metadata. It never grants access to private goal/summary/reflection
+or referenced observations/files. Shared readers cannot mutate another owner.
+
+Limits in UTF-8 bytes: required task 1–256, required summary at most 4096; state
+`active|blocked|done`; next_steps/blockers at most 8 each, 512 per entry;
+references at most 16 (`kind=observation|file`, ID at most 256, files relative).
+Branch/HEAD is server sampled. Complete canonical payload is at most 16 KiB,
+raw request at most 32 KiB. Unknown fields, invalid UTF-8, oversize and high-risk
+content fail without partial writes. Hooks never invent checkpoint prose.
+
+Trust only `{protocol_version:1,status:applied|replayed,session_id,revision,
+updated_at}` receipts. Exact retries of the current request preserve revision,
+time and workspace sample; older requests after a later write conflict. Clear
+omits payload, advances revision and keeps a tombstone, preventing old body or
+summary resurrection. One latest body is retained, with no TTL/history. Closure
+rejects new bodies but allows clear and exact current-request confirmation.
+Final `mnemos_session_end` remains separate. Clear is not secure WAL/backup erasure.
+
+### `mnemos_resume_context`
+
+Requires v1, receiving current `session_id`, workspace and optional owner.
+`source_session_id` explicitly selects one visible source; unavailable never
+falls back. `task` filters exact labels. Otherwise `resume_intent=true` selects
+only if the entire visible set contains one checkpoint, at most 24 hours old,
+active/blocked, with known branch and HEAD matching this read's current sample.
+Any second visible source, including stale/done/summary, prevents selection.
+Newest does not win. Explicit older/changed sources retain warnings.
+
+Candidates default to 5, maximum 20. The full compact JSON object (envelope,
+references, warnings included) defaults to 32768 bytes, maximum 65536; outer
+MCP JSON-RPC framing is excluded. Complete oversized objects are omitted with
+`omitted_for_size`/`has_more`, never counted as delivered. Verify current files,
+diffs and relevant tests before acting. Reads do not claim, consume, execute,
+reopen or persist progress, or create observation-access/injection/success events.
+
+V1 errors expose `code=validation|unavailable|conflict|unsupported|storage_failure`;
+conflict may include the owned current revision. A timeout or malformed receipt
+after dispatch is `outcome_unknown`, not proof of failure: retry identical input.
+Legacy empty hook results are not receipts. Only side-effect-free unsupported
+discovery or confirmed unexecuted unknown-command permits legacy startup fallback.
+Restart all same-DB hosts before enabling; concurrent old/new binaries cannot
+enforce binding isolation. See [API.md](API.md) for CLI/HTTP/client mappings.
 
 ## Save & retrieve
 

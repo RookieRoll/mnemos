@@ -25,6 +25,10 @@
 import type { HookInvoker, HookPayload, PiApi } from "./hook-transport.ts";
 import { EMPTY, createSpawnInvoker } from "./hook-transport.ts";
 import { filePathFromToolInput, isFileEditTool, isMnemosWriteTool } from "./tool-match.ts";
+import { randomUUID } from "node:crypto";
+import { basename, dirname, relative, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { continuityOpen, continuitySupport, type ContinuityStart } from "./continuity-transport.ts";
 
 /**
  * Per-call timeouts, in milliseconds. Kept in the same range as the Claude
@@ -44,14 +48,19 @@ interface SessionState {  /** The mnemos session id prewarm established or adopt
   mnemosSessionId: string;
   /** The project the session is scoped to, derived once from cwd. */
   project: string;
+  /** Canonical root from the committed ACK; legacy hooks retain event cwd. */
+  workspaceRoot: string;
   /** The prewarm block, pushed on the first turn. */
   prewarm: string;
   /** Whether the prewarm block has already been delivered this session. */
   prewarmDelivered: boolean;
+  /** Unconfirmed continuity must never send an empty ID to legacy inference. */
+  binding: "legacy" | "unbound" | "bound";
 }
 
 function emptyState(): SessionState {
-  return { mnemosSessionId: "", project: "", prewarm: "", prewarmDelivered: false };
+  return { mnemosSessionId: "", project: "", workspaceRoot: "", prewarm: "", prewarmDelivered: false,
+    binding: process.env.MNEMOS_CONTINUITY === "1" ? "unbound" : "legacy" };
 }
 
 /**
@@ -82,6 +91,24 @@ export function joinContext(...parts: Array<string | undefined>): string {
     .join("\n");
 }
 
+// Edits may create a new file. Resolve the closest existing ancestor instead
+// of requiring the target to exist, including Windows short-name aliases.
+function canonicalEditPath(path: string): string {
+  let ancestor = path;
+  const suffix: string[] = [];
+  for (;;) {
+    try { return resolve(realpathSync.native(ancestor), ...suffix); } catch { /* Try its parent. */ }
+    const parent = dirname(ancestor);
+    if (parent === ancestor) return path;
+    suffix.unshift(basename(ancestor));
+    ancestor = parent;
+  }
+}
+
+function boundEditPath(root: string, cwd: string | undefined, path: string): string {
+  return relative(root, canonicalEditPath(resolve(cwd ?? process.cwd(), path))).replaceAll("\\", "/");
+}
+
 export default function mnemosPi(pi: PiApi): void {
   const invoker: HookInvoker = createSpawnInvoker(pi);
   let state = emptyState();
@@ -93,18 +120,49 @@ export default function mnemosPi(pi: PiApi): void {
     // is a different session, so the previous session's id must not carry
     // over: reusing it would scope this session's writes to the wrong row.
     state = emptyState();
-    state.project = projectFromCwd(ctx?.cwd ?? process.cwd());
+    const generation = state;
+    const cwd = ctx?.cwd ?? process.cwd();
+    generation.project = projectFromCwd(cwd);
     if (invoker.disabled()) return;
 
+    if (generation.binding === "unbound") {
+      const support = await continuitySupport(pi, TIMEOUTS.prewarm);
+      if (state !== generation || invoker.disabled()) return;
+      if (support === "unknown") return;
+      if (support === "supported") {
+        const payload: ContinuityStart = { protocol_version: 1, start_key: randomUUID(), harness_kind: "pi", cwd };
+        // One exact retry can recover a lost ACK. Never generate another key
+        // or open a legacy session when the first attempt may have committed.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const opened = await continuityOpen(pi, payload, TIMEOUTS.prewarm);
+          if (state !== generation || invoker.disabled()) return;
+          if (opened) {
+            generation.mnemosSessionId = opened.session_id;
+            generation.project = opened.project;
+            generation.workspaceRoot = opened.workspace_root;
+            generation.binding = "bound";
+            // Even when context is unavailable, flow may supply a bounded
+            // current-target marker. That identifies our session, not a source.
+            generation.prewarm = opened.prewarm ?? "";
+            return;
+          }
+        }
+        return;
+      }
+      generation.binding = "legacy";
+    }
     const payload: HookPayload = { hook_event_name: "SessionStart", cwd: ctx?.cwd };
     const result = await invoker.prewarm(payload, TIMEOUTS.prewarm);
-    state.mnemosSessionId = result.session_id ?? "";
-    state.prewarm = result.context ?? "";
+    if (state !== generation || invoker.disabled()) return;
+    generation.mnemosSessionId = result.session_id ?? "";
+    generation.prewarm = result.context ?? "";
   });
   // ------------------------------------------------------------- per prompt
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     if (invoker.disabled()) return;
+    const generation = state;
+    if (generation.binding === "unbound") return;
 
     const prompt: string = event?.prompt ?? "";
     let promptContext = "";
@@ -112,20 +170,21 @@ export default function mnemosPi(pi: PiApi): void {
     if (prompt !== "") {
       const payload: HookPayload = {
         hook_event_name: "UserPromptSubmit",
-        cwd: ctx?.cwd,
+        cwd: generation.binding === "bound" ? generation.workspaceRoot : ctx?.cwd,
         prompt,
-        session_id: state.mnemosSessionId,
+        session_id: generation.mnemosSessionId,
       };
       const result = await invoker.run(HOOK.userPrompt, payload, TIMEOUTS.prompt).catch(() => EMPTY);
       promptContext = (result.context ?? "").trim();
     }
+    if (state !== generation || invoker.disabled()) return;
 
     // Prewarm rides along on whichever turn comes first rather than being
     // stashed in session history at startup, so it is present when the
     // model is actually about to act. It is delivered exactly once, which
     // is what keeps the push from accumulating across turns.
-    const push = planPromptPush(state.prewarm, state.prewarmDelivered, promptContext);
-    state.prewarmDelivered = push.prewarmDelivered;
+    const push = planPromptPush(generation.prewarm, generation.prewarmDelivered, promptContext);
+    generation.prewarmDelivered = push.prewarmDelivered;
     const fragments = push.fragments;
 
     const injected = joinContext(...fragments);
@@ -158,12 +217,25 @@ export default function mnemosPi(pi: PiApi): void {
 
     const payload: HookPayload = {
       hook_event_name: "PreToolUse",
-      cwd: ctx?.cwd,
+      cwd: state.binding === "bound" ? state.workspaceRoot : ctx?.cwd,
       tool_name: toolName,
       tool_input: toolInput as Record<string, unknown>,
       session_id: state.mnemosSessionId,
     };
-    const result = await invoker.run(HOOK.preTool, payload, TIMEOUTS.preTool).catch(() => EMPTY);
+    const unbound = state.binding === "unbound";
+    if (state.binding === "bound" && isFileEditTool(toolName)) {
+      const path = filePathFromToolInput(toolInput);
+      if (path !== "") {
+        payload.tool_input = { ...toolInput, file_path: boundEditPath(state.workspaceRoot, ctx?.cwd, path) };
+        // Preserve the overwritten spelling for the recursive safety scanner;
+        // a symlink/alias must not hide instructions in the original path.
+        if (typeof toolInput.file_path === "string") payload.tool_input._mnemos_original_file_path =
+          [toolInput._mnemos_original_file_path, toolInput.file_path];
+      }
+    }
+    if (unbound) delete payload.session_id;
+    const subcommand = unbound ? [...HOOK.preTool, "--guardrail-only"] : [...HOOK.preTool];
+    const result = await invoker.run(subcommand, payload, TIMEOUTS.preTool).catch(() => EMPTY);
 
     if (result.block) {
       return {
@@ -177,6 +249,7 @@ export default function mnemosPi(pi: PiApi): void {
 
   pi.on("tool_result", async (event: any, ctx: any) => {
     if (invoker.disabled()) return;
+    if (state.binding === "unbound") return;
     if (!isFileEditTool(event?.toolName ?? "")) return;
 
     // Only a call that succeeded touched anything. The harness reports
@@ -190,9 +263,9 @@ export default function mnemosPi(pi: PiApi): void {
 
     const payload: HookPayload = {
       hook_event_name: "PostToolUse",
-      cwd: ctx?.cwd,
+      cwd: state.binding === "bound" ? state.workspaceRoot : ctx?.cwd,
       tool_name: event?.toolName,
-      tool_input: { file_path: path },
+      tool_input: { file_path: state.binding === "bound" ? boundEditPath(state.workspaceRoot, ctx?.cwd, path) : path },
       session_id: state.mnemosSessionId,
     };
     // Side-effect only: stdout is intentionally ignored, and the
@@ -204,17 +277,21 @@ export default function mnemosPi(pi: PiApi): void {
 
   pi.on("session_shutdown", async (_event: any, ctx: any) => {
     if (invoker.disabled()) return;
+    const generation = state;
+    // Invalidate pending calls before awaiting shutdown; an old close response
+    // must not clear a newly started session's state.
+    state = emptyState();
+    if (generation.binding === "unbound") return;
     const payload: HookPayload = {
       hook_event_name: "SessionEnd",
-      cwd: ctx?.cwd,
+      cwd: generation.binding === "bound" ? generation.workspaceRoot : ctx?.cwd,
       reason: "session_shutdown",
-      session_id: state.mnemosSessionId,
+      session_id: generation.mnemosSessionId,
     };
     await invoker.run(HOOK.sessionEnd, payload, TIMEOUTS.sessionEnd).catch(() => EMPTY);
     // Release session-scoped state. The handler is idempotent: a second
     // call with an already-empty state is a no-op, which matters because
     // session replacement can fire this more than once.
-    state = emptyState();
   });
 }
 /**

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/polyxmedia/mnemos/internal/continuity"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
 	"github.com/polyxmedia/mnemos/internal/rumination"
@@ -78,6 +79,14 @@ func (s *Server) registerTools() {
 		Description: "Open a session. Returns session_id AND a pre-warmed context block composed " +
 			"of conventions, recent sessions, matching skills, corrections, and hot files. Push, not pull.",
 	}, s.handleSessionStart)
+	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		Name:        "mnemos_checkpoint",
+		Description: "Explicitly save or clear the exact current session's latest progress checkpoint. Requires continuity v1, exact session/workspace/owner, expected_revision (0 initially) and stable request_id. Save agent-authored task/state/summary, optional next_steps/blockers/references; visibility defaults to owner, workspace explicitly publishes it. Full replacement, no merge. Trust only applied/replayed receipts; retry unknown outcomes with the identical request. Does not save permanent knowledge or close the session.",
+	}, s.handleCheckpoint)
+	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		Name:        "mnemos_resume_context",
+		Description: "Read bounded progress candidates or an exact source from the current continuity-bound workspace. Requires v1 and exact current session, never creates/claims/consumes work. No automatic selection without resume_intent and one fresh matching checkpoint; ambiguous, stale and changed-workspace sources need explicit choice and verification of current files/tests. References do not grant access to private memories.",
+	}, s.handleResumeContext)
 
 	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
 		Name: "mnemos_session_end",
@@ -403,12 +412,38 @@ func (s *Server) handleLink(ctx context.Context, _ *mcpsdk.CallToolRequest, a li
 // ---- sessions ----------------------------------------------------------
 
 type sessionStartArgs struct {
-	AgentID string `json:"agent_id,omitempty"`
-	Project string `json:"project,omitempty" jsonschema:"enables convention auto-injection; defaults to the project the server runs in"`
-	Goal    string `json:"goal,omitempty" jsonschema:"improves skill and correction matching"`
+	AgentID    string                `json:"agent_id,omitempty"`
+	Project    string                `json:"project,omitempty" jsonschema:"enables convention auto-injection; defaults to the project the server runs in"`
+	Goal       string                `json:"goal,omitempty" jsonschema:"improves skill and correction matching"`
+	Continuity *continuity.OpenInput `json:"continuity,omitempty" jsonschema:"optional explicit v1 workspace/start-key protocol; agent/project/goal are resolved from the outer fields when supplied"`
 }
 
-func (s *Server) handleSessionStart(ctx context.Context, _ *mcpsdk.CallToolRequest, a sessionStartArgs) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) handleSessionStart(ctx context.Context, req *mcpsdk.CallToolRequest, a sessionStartArgs) (*mcpsdk.CallToolResult, any, error) {
+	if a.Continuity != nil {
+		if s.cfg.Continuity == nil {
+			return continuityError(continuity.ErrUnsupported)
+		}
+		if req != nil && req.Params != nil {
+			if err := continuity.DecodeJSON(req.Params.Arguments, &a); err != nil {
+				return continuityError(err)
+			}
+		}
+		in := *a.Continuity
+		if a.AgentID != "" {
+			in.AgentID = a.AgentID
+		}
+		if a.Project != "" {
+			in.Project = a.Project
+		}
+		if a.Goal != "" {
+			in.Goal = a.Goal
+		}
+		out, err := s.cfg.Continuity.Open(ctx, in)
+		if err != nil {
+			return continuityError(err)
+		}
+		return continuityResult(out)
+	}
 	project := s.writeProject(a.Project)
 	sess, err := s.cfg.Sessions.Open(ctx, session.OpenInput{
 		AgentID: a.AgentID, Project: project, Goal: a.Goal,

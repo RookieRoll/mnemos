@@ -25,6 +25,54 @@ There is a known correction already stored about this exact failure mode: _"agen
 
 ## Instructions
 
+### Shared progress checkpoints (continuity v1)
+
+These rules take precedence over legacy startup fallback when continuity is in
+use. Opt in through `mnemos_session_start`'s `continuity` object with
+`protocol_version=1`, verified `cwd` (plus an explicit non-Git `workspace_root`),
+`harness_kind` and one new `start_key` per actual startup. Reuse that key and
+complete input only to confirm the same invocation. Owner is `agent_id`, default
+`default`, independently of the host product name.
+
+Use the confirmed **current** `mnemos_session_id` as the checkpoint write target;
+a recovery source session ID is not the current session. If startup may have run
+but its outcome is unknown, do not call legacy startup, pick a newest session or
+close another open session. Retry the original start key/input to confirm it.
+Context failure after a valid receipt preserves the committed current identity.
+
+At a meaningful milestone, blocker, requested agent switch or before compaction,
+explicitly call `mnemos_checkpoint` with `action=save`, protocol version, exact
+current ID and workspace/owner, `expected_revision` (explicitly 0 initially),
+stable `request_id` and a complete agent-authored `payload`: task, reported
+`active|blocked|done` state, summary, optional next_steps/blockers/references.
+Record what was verified and what remains uncertain. Never fabricate this body
+from a raw prompt, transcript or tool output, or infer a passing test from a file
+edit. Task labels match exactly, not semantically.
+
+Visibility defaults to `owner`. Choose `workspace` only to publish that specific
+body to other agents in the same worktree; omit sensitive private material.
+References are locators, not permission to read another owner's memories.
+
+Trust only v1 `applied`/`replayed` committed receipts. On an unknown write outcome,
+retry the identical request. On conflict, read the current revision before
+choosing a new request; never force an old body over newer progress. `action=clear`
+omits payload, uses CAS and advances revision; it retains no checkpoint history,
+and does not securely erase WAL/backups. Final summary and `mnemos_session_end`
+remain separate. A closed session rejects new bodies but permits clear and an
+exact retry of its current committed request.
+
+On another agent's startup, use `mnemos_resume_context` with that new current
+session. Choose an explicit visible `source_session_id` or exact task when several
+candidates exist. Do not treat the newest candidate as selected. Check source,
+revision, recorded time and stale/workspace-change warnings, then verify current
+files, diffs and relevant tests before executing reported next steps. Recovery
+restores reported progress, not the full conversation or a process, and does not
+claim or consume work; several sessions may read the same source.
+
+Use the actual tool names advertised by the host (pi package prefixes can differ).
+See `docs/MCP_TOOLS.md` for field/byte limits and error codes. The main binary
+must be continuity-capable; restart all same-DB clients before enabling it.
+
 ### Session lifecycle
 
 **Start.** The Claude Code SessionStart hook runs `mnemos prewarm`, which opens a mnemos session by default and injects a `mnemos_session_id:` line into context. If that ID is present, reuse it for `session_id` fields and do **not** call `mnemos_session_start` again. If no ID is present (manual MCP setup, non-Claude client, or hook disabled) and you are about to do real work, open one:

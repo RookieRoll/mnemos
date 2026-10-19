@@ -273,7 +273,7 @@ Copy-Item bin/mnemos.exe D:\software\mnemos\mnemos.exe -Force
 $piPackage = Join-Path $env:USERPROFILE '.pi\agent\local-packages\mnemos'
 New-Item -ItemType Directory -Force (Join-Path $piPackage 'extensions'), (Join-Path $piPackage 'skills\mnemos') | Out-Null
 Copy-Item pi\package.json, pi\mcp.json $piPackage -Force
-Copy-Item pi\extensions\index.ts, pi\extensions\hook-transport.ts, pi\extensions\tool-match.ts (Join-Path $piPackage 'extensions') -Force
+Copy-Item pi\extensions\index.ts, pi\extensions\hook-transport.ts, pi\extensions\continuity-transport.ts, pi\extensions\tool-match.ts (Join-Path $piPackage 'extensions') -Force
 Copy-Item pi\skills\mnemos\SKILL.md (Join-Path $piPackage 'skills\mnemos') -Force
 
 # Keep MCP command resolution independent of pi's working directory/PATH.
@@ -289,13 +289,13 @@ pi install $piPackage
 [Environment]::SetEnvironmentVariable('MNEMOS_BIN', 'D:\software\mnemos\mnemos.exe', 'User')
 ```
 
-Only the three product `.ts` files are copied — the package's `*.test.ts` files are development-only. The installed copy's `mcp.json` uses the absolute binary path; `MNEMOS_BIN` separately selects the binary used by the extension's hooks. Open a new shell after step 5 so the variable is visible. For upgrades, repeat the binary/package copy and absolute-command configuration, then reload pi. Local-path packages are skipped by pi's package updater: `pi update <local-path>` does not fetch or overwrite this copy, even if it prints `Updated`. If pi currently references a checkout, remove that exact package registration before installing the copy so only one mnemos package route remains.
+Only the four product `.ts` files are copied — the package's `*.test.ts` files are development-only. The installed copy's `mcp.json` uses the absolute binary path; `MNEMOS_BIN` separately selects the binary used by the extension's hooks. Open a new shell after step 5 so the variable is visible. For upgrades, repeat the binary/package copy and absolute-command configuration, then reload pi. Local-path packages are skipped by pi's package updater: `pi update <local-path>` does not fetch or overwrite this copy, even if it prints `Updated`. If pi currently references a checkout, remove that exact package registration before installing the copy so only one mnemos package route remains.
 
 To unregister the copy, run `pi remove "$env:USERPROFILE\.pi\agent\local-packages\mnemos"`. Its files can then be removed from that directory.
 
 ### Any MCP-compatible client
 
-Stdio: point the client at `mnemos serve`. The server advertises 21 tools and 4 resources on the `initialize` handshake (25 tools when rumination is enabled).
+Stdio: point the client at `mnemos serve`. The server advertises 23 tools and 4 resources on the `initialize` handshake (27 tools when rumination is enabled).
 
 ### HTTP transport
 

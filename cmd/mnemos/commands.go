@@ -220,6 +220,7 @@ func runExport(ctx context.Context, args []string) error {
 		defer f.Close()
 		out = f
 	}
+	warnContinuityOmission(ctx, d.db, os.Stderr)
 
 	snap, err := dumpAll(ctx, d.db)
 	if err != nil {
@@ -231,6 +232,15 @@ func runExport(ctx context.Context, args []string) error {
 		return fmt.Errorf("encode: %w", err)
 	}
 	return nil
+}
+
+func warnContinuityOmission(ctx context.Context, db *storage.DB, w io.Writer) {
+	present, err := db.HasContinuity(ctx)
+	if err != nil {
+		fmt.Fprintln(w, "warning: continuity backup scope unknown (state detection failed); logical JSON export excludes continuity bindings/checkpoints; use a consistent same-machine SQLite backup")
+	} else if present {
+		fmt.Fprintln(w, "warning: logical JSON export omits continuity bindings/checkpoints, revisions and retry identities; use a consistent same-machine SQLite backup to preserve them")
+	}
 }
 
 func runImport(ctx context.Context, args []string) error {
@@ -421,7 +431,7 @@ func claudeHooks(selfPath string) []labeledHook {
 			label: "Claude Code PreToolUse guardrail",
 			entry: installer.HookEntry{
 				Event:   "PreToolUse",
-				Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention",
+				Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention|mcp__mnemos__mnemos_checkpoint",
 				Command: fmt.Sprintf("%s hook pre-tool", selfPath),
 				Timeout: 5,
 			},

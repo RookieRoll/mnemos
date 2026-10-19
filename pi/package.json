@@ -25,6 +25,7 @@
   "files": [
     "extensions/index.ts",
     "extensions/hook-transport.ts",
+    "extensions/continuity-transport.ts",
     "extensions/tool-match.ts",
     "mcp.json",
     "skills/"

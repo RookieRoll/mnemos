@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/polyxmedia/mnemos/internal/continuityflow"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
 	"github.com/polyxmedia/mnemos/internal/session"
@@ -29,6 +30,7 @@ type Server struct {
 	log         *slog.Logger
 	apiKey      string
 	storageSize func() (int64, error)
+	continuity  *continuityflow.Service
 }
 
 // Config bundles dependencies. APIKey is optional; when empty, auth is off.
@@ -41,6 +43,8 @@ type Config struct {
 	Logger      *slog.Logger
 	APIKey      string
 	StorageSize func() (int64, error)
+	// Continuity enables the explicit versioned session-progress endpoints.
+	Continuity *continuityflow.Service
 }
 
 // NewServer wires a Config into an HTTP server.
@@ -57,6 +61,7 @@ func NewServer(cfg Config) *Server {
 		log:         cfg.Logger,
 		apiKey:      cfg.APIKey,
 		storageSize: cfg.StorageSize,
+		continuity:  cfg.Continuity,
 	}
 }
 
@@ -65,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /v1/capabilities", s.capabilities)
+	s.registerContinuity(mux)
 
 	// Observations ---------------------------------------------------
 	mux.Handle("POST /v1/observations", jsonIn(

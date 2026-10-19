@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/polyxmedia/mnemos/internal/contextfmt"
+	"github.com/polyxmedia/mnemos/internal/continuity"
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/rumination"
@@ -131,6 +132,9 @@ type Request struct {
 	SessionID string
 	Goal      string
 	MaxTokens int
+	// Continuity is a prevalidated read result for an opt-in independent
+	// session start. Nil retains the legacy pipeline, including recent sessions.
+	Continuity *continuity.ContextResult
 }
 
 // Block is the composed pre-warm payload. Surfaced lists the observation
@@ -142,6 +146,9 @@ type Block struct {
 	Sections      []Section
 	Surfaced      []injection.Ref
 	SafetyReport  safety.Report
+	// ContinuityRefs identifies only source bodies actually rendered in Text.
+	// These are not observation/skill injection references or consumption events.
+	ContinuityRefs []continuity.Ref
 }
 
 // Section is one labeled piece of the block.
@@ -155,12 +162,30 @@ type Section struct {
 // sanitised before inclusion — memory stores are an attack surface and
 // we never inject raw content blindly.
 func (s *Service) Build(ctx context.Context, req Request) (*Block, error) {
+	if req.Continuity != nil {
+		if req.Mode != ModeSessionStart || strings.TrimSpace(req.AgentID) == "" || req.SessionID == "" {
+			return nil, fmt.Errorf("prewarm: continuity requires session-start with an explicit owner and session")
+		}
+		current, err := s.sessions.Get(ctx, req.SessionID)
+		if err != nil {
+			return nil, fmt.Errorf("prewarm: continuity current session: %w", err)
+		}
+		if current.AgentID != req.AgentID || current.Project != req.Project {
+			return nil, fmt.Errorf("prewarm: continuity current session scope mismatch")
+		}
+	}
 	budget := req.MaxTokens
 	if budget <= 0 {
 		budget = s.maxTokens
 	}
 
 	pipeline := s.pipeline(req.Mode)
+	if req.Continuity != nil {
+		// The scoped continuity result replaces all legacy session-history
+		// delivery, including when it contains no candidate or selected source.
+		pipeline = []stepFunc{stepPinnedCore, stepContinuity, stepConventions,
+			stepPendingRumination, stepMatchingSkills, stepCorrections, stepHotFiles}
+	}
 
 	block := &Block{}
 	var sections []sectionDraft
@@ -211,6 +236,7 @@ func (s *Service) Build(ctx context.Context, req Request) (*Block, error) {
 		block.SafetyReport.Findings = append(block.SafetyReport.Findings, rep.Findings...)
 		var selected []string
 		var refs []injection.Ref
+		var continuityRefs []continuity.Ref
 		total := len(d.items)
 		if total == 0 && d.body != "" {
 			d.items = []renderItem{{full: d.body}}
@@ -262,6 +288,9 @@ func (s *Service) Build(ctx context.Context, req Request) (*Block, error) {
 					refs = append(refs, item.ref)
 					seen[item.ref] = true
 				}
+				if item.continuityRef != nil {
+					continuityRefs = append(continuityRefs, *item.continuityRef)
+				}
 				break
 			}
 		}
@@ -285,6 +314,7 @@ func (s *Service) Build(ctx context.Context, req Request) (*Block, error) {
 		block.Text = prefix + entry
 		block.Sections = append(block.Sections, Section{Title: d.title, Body: body})
 		block.Surfaced = append(block.Surfaced, refs...)
+		block.ContinuityRefs = append(block.ContinuityRefs, continuityRefs...)
 	}
 	block.TokenEstimate = contextfmt.Estimate(block.Text)
 
@@ -308,6 +338,8 @@ func (s *Service) Build(ctx context.Context, req Request) (*Block, error) {
 type renderItem struct {
 	full, compact, minimal string
 	ref                    injection.Ref
+	continuityRef          *continuity.Ref
+	safetyMaterial         string
 }
 
 type sectionDraft struct {
@@ -321,6 +353,9 @@ func (d sectionDraft) material() string {
 	parts := []string{d.body}
 	for _, item := range d.items {
 		parts = append(parts, item.full)
+		if item.safetyMaterial != "" {
+			parts = append(parts, item.safetyMaterial)
+		}
 	}
 	return strings.Join(parts, "\n")
 }

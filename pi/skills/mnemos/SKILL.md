@@ -1,7 +1,7 @@
 ---
 name: mnemos
 description: Persistent memory and learning-loop skills for AI coding agents using mnemos MCP tools. Use whenever mnemos_* MCP tools are available and you are doing work worth remembering. Cross-session memory, conventions, corrections, and architectural decisions surface back into context automatically. Triggers on session start (record a goal), session end (record a summary), the user says "save", "remember", "record this", "we were wrong about", and on any genuine correction or architectural decision. Keeps mnemos's memory store alive across sessions so the next session starts smarter. Without this skill, agents silently edit and the store goes empty.
-allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_pin
+allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_pin mcp__mnemos_mnemos_checkpoint mcp__mnemos_mnemos_resume_context
 version: 0.14.0
 author: André Figueira <andre@polyxmedia.com>
 license: MIT
@@ -27,7 +27,7 @@ There is a known correction already stored about this exact failure mode: _"agen
 
 ### Session lifecycle
 
-**Start.** The agent SessionStart hook runs `mnemos prewarm`, which opens a mnemos session by default and injects a `mnemos_session_id:` line into context. If that ID is present, reuse it for `session_id` fields and do **not** call `mnemos_session_start` again. If no ID is present (manual MCP setup, non-hooked client, or hook disabled) and you are about to do real work, open one:
+**Start.** The agent SessionStart hook runs `mnemos prewarm`, which opens a mnemos session by default and injects a `mnemos_session_id:` line into context. If that ID is present, reuse it for `session_id` fields and do **not** call `mnemos_session_start` again. With pi continuity enabled, an unconfirmed startup must be checked using its original start key: a missing ID does not authorize another startup. Otherwise, if no ID is present (manual MCP setup, non-hooked client, or hook disabled) and you are about to do real work, open one:
 
 ```
 mnemos_session_start(
@@ -49,6 +49,45 @@ mnemos_session_end(
 ```
 
 Status values: `ok` | `failed` | `blocked` | `abandoned`. An open session with no summary is dead weight in the next session's prewarm.
+
+### Shared progress checkpoints in pi
+
+When the installed binary supports continuity and `MNEMOS_CONTINUITY=1` is set,
+pi opens an independent, workspace-bound session on each startup/reload/new/resume/
+fork. Reuse its confirmed ID. If startup's result is unknown, do not open a
+replacement or borrow a recovery source's ID; confirm using the original start
+key. An unavailable prewarm does not undo a committed startup.
+
+At a meaningful milestone, blocker, requested handoff or before compaction,
+use the available tool ending in `mnemos_checkpoint` to save explicit progress:
+task label, reported state (`active`, `blocked` or `done`), a short summary of
+what you verified, and bounded next steps/blockers/references. Use the exact
+current session ID, workspace and owner, expected revision and a fresh request
+ID. Default visibility is `owner`; explicitly choose `workspace` only for content
+you intend to share. Shared progress never grants access to private observations,
+final summaries or reflection. Do not generate a checkpoint from tool output or
+save each routine edit. The core does not call a model to summarize anything.
+
+Only a version-1 `applied` or `replayed` receipt confirms a committed save/clear.
+On an unknown result, retry the same request ID and unchanged payload; on conflict,
+read the current revision before deciding. Clear uses the same CAS rules and
+retains a revision marker; it does not promise secure erasure or delete backups.
+Checkpoints keep only the latest body, without automatic TTL or version history.
+They do not replace the final `mnemos_session_end` summary, and shutdown does not
+promise to write a checkpoint.
+
+Use the available tool ending in `mnemos_resume_context` to inspect candidates or
+choose an exact source. Adapter prefixes vary; use the actual registered name.
+No candidate is claimed or consumed. A candidate offer is not a selected task;
+narrow an exact task label or choose a source when several match. Old progress,
+reported `done`, unknown or changed branch/HEAD require explicit selection. The
+24-hour stale mark is a caution, not expiry. Verify current files, differences and
+relevant tests before acting even when HEAD matches. References are locators and
+do not automatically fetch files or bypass scoped memory reads.
+
+See `pi/README.md` for activation and package-copy updates. All hosts sharing the
+database must restart onto the new binary before activation; old adapters on the
+new binary are supported, old binaries concurrently sharing the database are not.
 
 ### Which tool for which signal
 

@@ -1,5 +1,45 @@
 # Scoped observation reading API
 
+## Continuity v1
+
+| Method and route | Operation |
+|---|---|
+| `GET /v1/continuity/capabilities` | Side-effect-free v1 support discovery |
+| `POST /v1/continuity/open` | New independent session or same start-key confirmation |
+| `POST /v1/continuity/checkpoint` | Exact owned save/clear with revision CAS |
+| `POST /v1/continuity/context` | Read candidates or one explicit source without consuming it |
+
+Existing API-key authentication applies. POST bodies use the same flat snake_case
+v1 fields as `mnemos continuity <open|checkpoint|context> --payload JSON`; open
+uses the inner object described in [MCP_TOOLS.md](MCP_TOOLS.md#shared-session-continuity-explicit-v1).
+Legacy `POST /v1/sessions` remains unchanged. Supply Git `cwd`, or also explicit
+`workspace_root` for non-Git projects. Project labels cannot substitute for roots.
+
+Strict raw requests are at most 32 KiB: valid UTF-8, no unknown fields/trailing
+values. Payloads are at most 16 KiB. Context budgets the entire compact JSON
+response (default 32 KiB, maximum 64 KiB); headers are outside that budget.
+Open keeps the committed identity even if `context_status=unavailable`.
+
+Success is HTTP 200. Error envelopes contain `protocol_version:1`, `code` and safe
+`error`: validation 400, unavailable 404, conflict 409 (owned revision when known),
+unsupported 501, storage_failure 500. Missing/out-of-scope sources are equivalent.
+Mutation timeouts or invalid receipts mean unknown outcome; repeat the original
+key/input to confirm, without generating a new fallback session or request ID.
+
+Go client methods: `ContinuityCapabilities`, `ContinuityOpen`,
+`ContinuityCheckpoint`, `ContinuityContext`, all taking context first. Matching
+input/result types use the `Continuity` prefix. `ExpectedRevision` is a pointer
+so zero is explicit. Mutation transport/receipt failures return
+`OutcomeUnknownError`; server errors retain `APIError` status/body and work with
+`IsConflict`. The client never retries automatically with another identity.
+
+Default visibility is owner; workspace publication is explicit. Source references
+do not expand memory access. Recovery never restores a process, executes next
+steps or claims work. Always verify current files/tests. Ordinary logical JSON
+dumps omit this state; consistent same-machine SQLite backups preserve it.
+
+## Observation reading
+
 These additive routes share the domain operations behind `mnemos_get_many` and
 `mnemos_neighborhood`. They require non-empty `project`; omitted `agent_id`
 resolves to `default`, matching save. This scope is additive and does not redefine

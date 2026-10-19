@@ -16,7 +16,7 @@ func (d *DB) Sessions() session.Store { return &sessStore{db: d.sql} }
 
 type sessStore struct{ db *sql.DB }
 
-const sessColumns = `id, agent_id, project, goal, summary, reflection, status, outcome_tags, started_at, ended_at, host_session_id`
+const sessColumns = `id, agent_id, project, goal, summary, reflection, status, outcome_tags, started_at, ended_at, host_session_id, EXISTS(SELECT 1 FROM session_continuity_bindings b WHERE b.session_id=sessions.id)`
 
 func (s *sessStore) Insert(ctx context.Context, sess *session.Session) error {
 	status := sess.Status
@@ -248,7 +248,7 @@ func (s *sessStore) list(ctx context.Context, query string, args ...any) ([]sess
 
 func (s *sessStore) Current(ctx context.Context, agentID string) (*session.Session, error) {
 	args := []any{}
-	query := `SELECT ` + sessColumns + ` FROM sessions WHERE ended_at IS NULL`
+	query := `SELECT ` + sessColumns + ` FROM sessions WHERE ended_at IS NULL AND NOT EXISTS(SELECT 1 FROM session_continuity_bindings b WHERE b.session_id=sessions.id)`
 	if agentID != "" {
 		query += ` AND agent_id = ?`
 		args = append(args, agentID)
@@ -277,7 +277,7 @@ func scanSession(row scanner) (*session.Session, error) {
 	var endedAt sql.NullTime
 	if err := row.Scan(
 		&sess.ID, &sess.AgentID, &project, &goal, &summary, &reflection,
-		&status, &outcomeTags, &sess.StartedAt, &endedAt, &hostSessionID,
+		&status, &outcomeTags, &sess.StartedAt, &endedAt, &hostSessionID, &sess.ContinuityBound,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, session.ErrNotFound

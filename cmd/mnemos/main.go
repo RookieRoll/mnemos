@@ -40,33 +40,34 @@ func main() {
 type handler func(ctx context.Context, args []string) error
 
 var commands = map[string]handler{
-	"serve":     runServe,
-	"search":    runSearch,
-	"stats":     runStats,
-	"digest":    runDigest,
-	"efficacy":  runEfficacy,
-	"sessions":  runSessions,
-	"export":    runExport,
-	"import":    runImport,
-	"prune":     runPrune,
-	"dream":     runDream,
-	"vault":     runVault,
-	"embed":     runEmbed,
-	"skill":     runSkill,
-	"replay":    runReplay,
-	"prewarm":   runPrewarm,
-	"hook":      runHook,
-	"version":   runVersion,
-	"config":    runConfig,
-	"init":      runInit,
-	"update":    runUpdate,
-	"doctor":    runDoctor,
-	"verify":    runVerify,
-	"-v":        runVersion,
-	"--version": runVersion,
-	"-h":        runHelp,
-	"--help":    runHelp,
-	"help":      runHelp,
+	"serve":      runServe,
+	"search":     runSearch,
+	"stats":      runStats,
+	"digest":     runDigest,
+	"efficacy":   runEfficacy,
+	"sessions":   runSessions,
+	"export":     runExport,
+	"import":     runImport,
+	"prune":      runPrune,
+	"dream":      runDream,
+	"vault":      runVault,
+	"embed":      runEmbed,
+	"skill":      runSkill,
+	"replay":     runReplay,
+	"prewarm":    runPrewarm,
+	"continuity": runContinuity,
+	"hook":       runHook,
+	"version":    runVersion,
+	"config":     runConfig,
+	"init":       runInit,
+	"update":     runUpdate,
+	"doctor":     runDoctor,
+	"verify":     runVerify,
+	"-v":         runVersion,
+	"--version":  runVersion,
+	"-h":         runHelp,
+	"--help":     runHelp,
+	"help":       runHelp,
 }
 
 func runVersion(_ context.Context, _ []string) error {
@@ -106,6 +107,8 @@ Commands:
   skill import <src>     Import a pack from a file path or https URL
   replay <session_id>    Markdown recap of a prior session + what you've learned since
   prewarm [flags]        Print the session_start prewarm block (used by the Claude Code hook)
+  continuity capabilities  Query continuity v1 support without opening storage
+  continuity <open|checkpoint|context> --payload JSON  Explicit scoped progress
   init                   Register mnemos with Claude Code / Cursor / Windsurf
   update [--yes]         Download the latest release and replace this binary
   doctor                 Check installation health

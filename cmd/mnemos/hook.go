@@ -629,7 +629,7 @@ const staleSessionMaxAge = 24 * time.Hour
 // across all projects as abandoned. Runs piggybacked on SessionEnd — the
 // next clean exit anywhere tidies the whole store.
 func sweepStaleSessions(ctx context.Context, d *deps) {
-	open, err := d.sess.ListOpen(ctx, "")
+	open, err := d.sess.ListLegacyOpen(ctx, "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mnemos hook session-end:", err)
 		return
@@ -709,6 +709,7 @@ func sanitizeReason(r string) string {
 //     decision point, not 40 turns earlier in the session-start block.
 func runHookPreTool(ctx context.Context, args []string) error {
 	fs, flags := hookFlagSet("pre-tool")
+	guardrailOnly := fs.Bool("guardrail-only", false, "scan writes without resolving a session or retrieving memory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -720,6 +721,10 @@ func runHookPreTool(ctx context.Context, args []string) error {
 	msg, block := decidePreToolFor(in, flags.neutral())
 	if block {
 		flags.writeBlocked(msg)
+		return nil
+	}
+	if *guardrailOnly {
+		flags.write(hookResult{}, func() {})
 		return nil
 	}
 	// The guardrail ran first and let the call through, so a refused edit
@@ -919,7 +924,7 @@ func decidePreToolFor(in hookInput, allowPrefixed bool) (string, bool) {
 // bare names are the matching unit for the prefixed path below, and the
 // Claude-literal table is derived from them so the two spellings cannot
 // drift apart.
-var mnemosWriteToolNames = []string{"mnemos_save", "mnemos_correct", "mnemos_convention"}
+var mnemosWriteToolNames = []string{"mnemos_save", "mnemos_correct", "mnemos_convention", "mnemos_checkpoint"}
 
 // isMnemosWriteTool matches the MCP-namespaced names Claude Code assigns
 // to our write tools. The PreToolUse matcher we install already narrows

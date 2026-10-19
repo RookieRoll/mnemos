@@ -50,6 +50,8 @@ type Session struct {
 	// Empty for sessions opened through mnemos_session_start or by a host
 	// that sends none.
 	HostSessionID string
+	// ContinuityBound excludes this session from legacy heuristic inference only.
+	ContinuityBound bool `json:"-"`
 }
 
 // OpenInput is the payload for mnemos_session_start.

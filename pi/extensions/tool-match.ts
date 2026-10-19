@@ -22,7 +22,7 @@
 // silently drop write-boundary coverage for the rest.
 
 /** mnemos' write tools, without any prefix. */
-export const MNEMOS_WRITE_TOOLS = ["mnemos_save", "mnemos_correct", "mnemos_convention"] as const;
+export const MNEMOS_WRITE_TOOLS = ["mnemos_save", "mnemos_correct", "mnemos_convention", "mnemos_checkpoint"] as const;
 
 /**
  * pi's file-editing tools. pi registers these lowercase; Claude Code's

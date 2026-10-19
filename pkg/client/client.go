@@ -263,6 +263,10 @@ func (c *Client) Healthz(ctx context.Context) error {
 // --- transport ---------------------------------------------------------
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doJSON(ctx, method, path, body, out, false)
+}
+
+func (c *Client) doJSON(ctx context.Context, method, path string, body, out any, strict bool) error {
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -295,8 +299,28 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if out == nil || resp.StatusCode == http.StatusNoContent {
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	var readerOut io.Reader = resp.Body
+	if strict {
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 65537))
+		if err != nil {
+			return fmt.Errorf("client: read continuity response: %w", err)
+		}
+		if len(raw) > 65536 {
+			return fmt.Errorf("client: continuity response exceeds byte limit")
+		}
+		readerOut = bytes.NewReader(raw)
+	}
+	decoder := json.NewDecoder(readerOut)
+	if err := decoder.Decode(out); err != nil {
 		return fmt.Errorf("client: decode: %w", err)
+	}
+	if strict {
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			if err != nil {
+				return fmt.Errorf("client: trailing continuity response: %w", err)
+			}
+			return fmt.Errorf("client: multiple continuity response values")
+		}
 	}
 	return nil
 }

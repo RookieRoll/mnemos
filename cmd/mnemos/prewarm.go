@@ -164,7 +164,7 @@ const sessionAdoptWindow = 90 * time.Second
 // failures mean "open a fresh one".
 func adoptableOpenSession(ctx context.Context, d *deps, hostSessionID, project string) *session.Session {
 	if hostSessionID != "" {
-		owned, err := d.sess.ListOpenByHost(ctx, hostSessionID)
+		owned, err := d.sess.ListLegacyOpenByHost(ctx, hostSessionID)
 		if err != nil || len(owned) == 0 {
 			return nil
 		}
@@ -173,7 +173,7 @@ func adoptableOpenSession(ctx context.Context, d *deps, hostSessionID, project s
 	if project == "" {
 		return nil
 	}
-	open, err := d.sess.ListOpen(ctx, project)
+	open, err := d.sess.ListLegacyOpen(ctx, project)
 	if err != nil || len(open) == 0 {
 		return nil
 	}

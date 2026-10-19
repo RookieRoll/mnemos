@@ -11,6 +11,7 @@ import (
 	"os"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/polyxmedia/mnemos/internal/continuityflow"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
 	"github.com/polyxmedia/mnemos/internal/rumination"
@@ -43,6 +44,8 @@ type Config struct {
 	// started in, which Claude Code and Codex both set to the project
 	// root. Empty keeps such writes project-less.
 	DefaultProject string
+	// Continuity is optional; its explicit v1 operations never use legacy inference.
+	Continuity *continuityflow.Service
 }
 
 // NewServer constructs an MCP server with all Mnemos tools and resources
@@ -65,6 +68,7 @@ func NewServer(cfg Config) *Server {
 	}, nil)
 
 	s := &Server{sdk: sdk, cfg: cfg}
+	sdk.AddReceivingMiddleware(continuityValidationMiddleware)
 	s.registerTools()
 	s.registerResources()
 	return s
