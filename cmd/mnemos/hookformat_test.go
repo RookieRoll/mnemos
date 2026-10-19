@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"flag"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/memory"
 )
 
 // decodeOneResult parses exactly one neutral envelope and fails on
@@ -48,6 +51,93 @@ func runHookNeutral(t *testing.T, ctx context.Context, sub, payload string) hook
 }
 
 func strptr(s string) *string { return &s }
+
+func TestNeutralPromptSkipsSyntheticAndResolvesHostSession(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+	mine := openHostSession(t, "mnemos", "", "")
+	other := openHostSession(t, "mnemos", "", "")
+	payload := func(prompt string) string {
+		return hookPayload(t, map[string]any{"session_id": mine.ID, "cwd": filepath.Join(os.Getenv("HOME"), "mnemos"), "prompt": prompt})
+	}
+	synthetic := runHookNeutral(t, ctx, "user-prompt", payload("<agent-message>we were wrong, going forward use explicit timestamps</agent-message>"))
+	if synthetic.Context != "" || synthetic.SessionID != "" || synthetic.Block {
+		t.Fatalf("synthetic neutral turn must carry no decision: %+v", synthetic)
+	}
+	if got := getSession(t, mine.ID); got.Goal != "" {
+		t.Fatalf("synthetic goal=%q", got.Goal)
+	}
+	typed := runHookNeutral(t, ctx, "user-prompt", payload("remember this database design"))
+	if typed.SessionID != mine.ID || !strings.Contains(typed.Context, "mnemos_save") {
+		t.Fatalf("host-specific neutral result: %+v", typed)
+	}
+	if got := getSession(t, mine.ID); got.Goal != "remember this database design" {
+		t.Fatalf("host goal=%q", got.Goal)
+	}
+	if got := getSession(t, other.ID); got.Goal != "" {
+		t.Fatalf("unrelated host goal=%q", got.Goal)
+	}
+	edit := hookPayload(t, map[string]any{"session_id": mine.ID, "cwd": filepath.Join(os.Getenv("HOME"), "mnemos"), "tool_name": "edit", "tool_input": map[string]any{"path": "mine.go"}})
+	runHookNeutral(t, ctx, "post-tool", edit)
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	touches, err := d.db.Touches().SessionHot(ctx, mine.ID, 10)
+	d.close()
+	if err != nil || len(touches) != 1 || touches[0].Path != "mine.go" {
+		t.Fatalf("explicit neutral touch owner: %+v %v", touches, err)
+	}
+	runHookNeutral(t, ctx, "session-end", payload(""))
+	if got := getSession(t, mine.ID); got.EndedAt == nil {
+		t.Fatal("explicit neutral session did not close")
+	}
+	if got := getSession(t, other.ID); got.EndedAt != nil {
+		t.Fatal("neutral session-end closed another terminal")
+	}
+	// Replaying a closed ID must not fall back to the remaining open session.
+	runHookNeutral(t, ctx, "session-end", payload(""))
+	if got := getSession(t, other.ID); got.EndedAt != nil {
+		t.Fatal("closed neutral ID fell back to another terminal")
+	}
+}
+
+func TestLegacyCompactionSilentWhileNeutralRecoveryUsesHost(t *testing.T) {
+	withHome(t)
+	ctx := context.Background()
+	mine := openHostSession(t, "mnemos", "", "recover only this host")
+	openHostSession(t, "mnemos", "", "other terminal private goal")
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := d.mem.Save(ctx, memory.SaveInput{Title: "host recovery decision", Content: "carry this decision through recovery", Type: memory.TypeDecision, Project: "mnemos", SessionID: mine.ID})
+	d.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := hookPayload(t, map[string]any{"session_id": mine.ID, "cwd": filepath.Join(os.Getenv("HOME"), "mnemos")})
+	for _, sub := range []string{"pre-compact", "post-compact"} {
+		withStdin(t, payload, func() {
+			if out := runHookCapture(t, ctx, sub); out != "" {
+				t.Fatalf("legacy %s stdout=%q", sub, out)
+			}
+		})
+	}
+	d, err = loadDeps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := d.db.Injections().ListByRef(ctx, injection.KindObservation, saved.Observation.ID, 10)
+	d.close()
+	if err != nil || len(events) != 0 {
+		t.Fatalf("silent legacy hooks must not log recovery: %+v %v", events, err)
+	}
+	res := runHookNeutral(t, ctx, "post-compact", payload)
+	if !strings.Contains(res.Context, "recover only this host") || !strings.Contains(res.Context, "host recovery decision") || strings.Contains(res.Context, "other terminal private goal") {
+		t.Fatalf("neutral recovery selected wrong host: %s", res.Context)
+	}
+}
 
 // ---------------------------------------------------------------------
 // 3.1 the envelope itself

@@ -10,7 +10,7 @@
       "name": "mnemos",
       "source": "./",
       "description": "The mnemos server provides a persistent memory system for AI coding agents that compounds corrections into skills via deterministic promotion. Single Go binary, MCP-native, runs locally.",
-      "version": "0.13.0",
+      "version": "0.14.0",
       "author": {
         "name": "André Figueira",
         "email": "andre@polyxmedia.com",

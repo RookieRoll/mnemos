@@ -17,7 +17,7 @@ _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 trigger="$1"
 scratch_project off
 
-MNEMOS_DISABLED=1 exec claude -p "$trigger" \
+MNEMOS_DISABLED=1 claude -p "$trigger" \
   --mcp-config "$MCP_OFF" \
   --strict-mcp-config \
   --dangerously-skip-permissions \

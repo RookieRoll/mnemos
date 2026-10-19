@@ -45,13 +45,19 @@ type Session struct {
 	OutcomeTags []string
 	StartedAt   time.Time
 	EndedAt     *time.Time
+	// HostSessionID is the host's own identifier for the conversation this
+	// session tracks (Claude Code's session_id from the hook payload).
+	// Empty for sessions opened through mnemos_session_start or by a host
+	// that sends none.
+	HostSessionID string
 }
 
 // OpenInput is the payload for mnemos_session_start.
 type OpenInput struct {
-	AgentID string
-	Project string
-	Goal    string
+	AgentID       string
+	Project       string
+	Goal          string
+	HostSessionID string
 }
 
 // CloseInput is the payload for mnemos_session_end. Reflection is the
@@ -75,6 +81,8 @@ type Store interface {
 	Get(ctx context.Context, id string) (*Session, error)
 	Close(ctx context.Context, in CloseInput) error
 	Recent(ctx context.Context, agentID string, limit int) ([]Session, error)
+	// RecentInProject is Recent scoped to one project.
+	RecentInProject(ctx context.Context, agentID, project string, limit int) ([]Session, error)
 	Current(ctx context.Context, agentID string) (*Session, error)
 	// ListOpen returns every open (ended_at IS NULL) session, newest
 	// first, optionally scoped to a project. Empty project means all.
@@ -83,6 +91,10 @@ type Store interface {
 	// session is a set, not a row — SessionEnd needs the whole set to
 	// close cleanly.
 	ListOpen(ctx context.Context, project string) ([]Session, error)
+	// ListOpenByHost returns the open sessions carrying hostSessionID,
+	// newest first. More than one means duplicate SessionStart installs
+	// each opened a session for the same host conversation.
+	ListOpenByHost(ctx context.Context, hostSessionID string) ([]Session, error)
 	// SetGoalIfEmpty fills in the goal only when the session has none yet
 	// and is still open. No-op (and nil error) when either guard fails.
 	// Used by the UserPromptSubmit hook so the first real user prompt

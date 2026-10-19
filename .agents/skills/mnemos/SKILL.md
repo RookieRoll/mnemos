@@ -2,7 +2,7 @@
 name: mnemos
 description: Persistent memory and learning-loop skills for AI coding agents using mnemos MCP tools. Use whenever mnemos_* MCP tools are available and you are doing work worth remembering. Cross-session memory, conventions, corrections, and architectural decisions surface back into context automatically. Triggers on session start (record a goal), session end (record a summary), the user says "save", "remember", "record this", "we were wrong about", and on any genuine correction or architectural decision. Keeps mnemos's memory store alive across sessions so the next session starts smarter. Without this skill, agents silently edit and the store goes empty.
 allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_pin
-version: 0.13.0
+version: 0.14.0
 author: André Figueira <andre@polyxmedia.com>
 license: MIT
 compatibility: "Designed for any MCP-capable agent host (Claude Code, Claude Desktop, Cursor, Windsurf, OpenAI Codex CLI, pi). Requires the mnemos binary on PATH — run mnemos init to wire the MCP server and mnemos doctor to verify. On pi, the package in this repo also adds the harness hooks."
@@ -67,6 +67,30 @@ Status values: `ok` | `failed` | `blocked` | `abandoned`. An open session with n
 | At the top of a long session, or when the user questions a stored rule | `mnemos_ruminate_list` → pick one → `mnemos_ruminate_pack` |
 | Replacing a weak skill or stale rule after hostile review | `mnemos_ruminate_resolve(id, resolved_by, why_better)` |
 | Leaving a rule intact because the evidence was noise | `mnemos_ruminate_dismiss(id, reason)` |
+
+### Progressive reading, topics, and source checks
+
+When search finds useful candidates, `mnemos_get_many(ids, project)` reads selected
+full details in one call; `mnemos_neighborhood(id, project, before, after)` browses
+bounded same-session summaries. Both require a project and keep agent/project,
+trust, and historical visibility explicit. `unavailable` covers missing or filtered
+IDs; `omitted_for_size` means retry selected IDs with a larger permitted byte budget
+if those details matter. Neighbourhood summaries do not count as detail reads.
+
+Optional `topic_key` groups related assertions, including a rule and its exception.
+It does not replace existing knowledge. Use `mnemos_save(..., replaces_id=...)`
+only to revise the named live version in the same scope; on conflict inspect the
+current version before choosing a new target. A pinned predecessor stays pinned
+unless `unpin_replacement=true` explicitly acknowledges removing that protection.
+
+Evidence stores up to 16 submitted locator/revision/selector/fingerprint references,
+without copying source bodies. New references start `unverified`; replacements do
+not inherit the old version's evidence. After inspecting a source when the task
+calls for it, `mnemos_evidence_check(observation_id, evidence_key, status)` records
+only the latest **caller-reported** result/time. `matched` requires a stored
+fingerprint baseline. Mnemos never fetches the source or automatically certifies a
+claim; a changed/unavailable source does not itself invalidate memory, and distinct
+references are not independent proof. See `docs/MCP_TOOLS.md` for limits and fields.
 
 ### What not to do
 

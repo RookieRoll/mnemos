@@ -26,6 +26,8 @@ jobs:
           cache: true
       - name: Build
         run: go build ./...
+      - name: Verify runner snapshot isolation
+        run: python verify/runners/test_snapshot.py
       # -race needs cgo. Release binaries are still built with
       # CGO_ENABLED=0; this only affects the test run.
       - name: Test
@@ -58,7 +60,7 @@ jobs:
       - name: Manifests parse
         run: |
           for f in plugin.json .claude-plugin/plugin.json \
-                   .claude-plugin/marketplace.json marketplace.extended.json; do
+                   .claude-plugin/marketplace.json marketplace.extended.json pi/package.json; do
             jq . "$f" > /dev/null
           done
       # The Claude Code plugin loader reads .claude-plugin/plugin.json while
@@ -67,3 +69,34 @@ jobs:
       # can't leave the other stale.
       - name: Plugin manifests in sync
         run: diff plugin.json .claude-plugin/plugin.json
+
+      - name: Distribution versions agree
+        run: |
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          expected = json.loads(Path("plugin.json").read_text(encoding="utf-8"))["version"]
+          versions = {}
+          for name in ("plugin.json", ".claude-plugin/plugin.json", "marketplace.extended.json", "pi/package.json"):
+              versions[name] = json.loads(Path(name).read_text(encoding="utf-8"))["version"]
+          marketplace = json.loads(Path(".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
+          entries = [p for p in marketplace["plugins"] if p["name"] == "mnemos"]
+          if len(entries) != 1:
+              raise SystemExit("marketplace must contain exactly one mnemos entry")
+          versions[".claude-plugin/marketplace.json"] = entries[0]["version"]
+          for name in (".claude/skills/mnemos/SKILL.md", ".agents/skills/mnemos/SKILL.md", "pi/skills/mnemos/SKILL.md"):
+              text = Path(name).read_text(encoding="utf-8")
+              if not text.startswith("---\n"):
+                  raise SystemExit(f"{name}: missing YAML frontmatter")
+              frontmatter = text.split("---", 2)[1]
+              found = re.findall(r"^version:\s*(\S+)\s*$", frontmatter, re.MULTILINE)
+              if len(found) != 1:
+                  raise SystemExit(f"{name}: expected one frontmatter version")
+              versions[name] = found[0]
+          mismatches = {name: version for name, version in versions.items() if version != expected}
+          if mismatches:
+              raise SystemExit(f"version mismatch; expected {expected}: {mismatches}")
+          print(f"{len(versions)} distribution versions agree at {expected}")
+          PY

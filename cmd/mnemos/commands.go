@@ -248,6 +248,9 @@ func runImport(ctx context.Context, args []string) error {
 		return fmt.Errorf("decode %s: %w", args[0], err)
 	}
 
+	if err := prepareSnapshot(&snap); err != nil {
+		return fmt.Errorf("import snapshot: %w", err)
+	}
 	d, err := loadDeps(ctx)
 	if err != nil {
 		return err
@@ -269,6 +272,20 @@ func runImport(ctx context.Context, args []string) error {
 		repointed                int
 		knownSessions            = make(map[string]bool, len(snap.Sessions))
 	)
+	// Normalize legacy dangling session links before both identity preflight
+	// and restore, so matching repeated imports compare the same owner identity.
+	for _, session := range snap.Sessions {
+		knownSessions[session.ID] = true
+	}
+	for i := range snap.Observations {
+		if id := snap.Observations[i].SessionID; id != "" && !knownSessions[id] {
+			snap.Observations[i].SessionID = ""
+			repointed++
+		}
+	}
+	if err := d.mem.ValidateRestoreMetadata(ctx, snap.Observations, snap.Links); err != nil {
+		return fmt.Errorf("import metadata preflight: %w", err)
+	}
 	for i := range snap.Sessions {
 		s := snap.Sessions[i]
 		knownSessions[s.ID] = true
@@ -286,21 +303,12 @@ func runImport(ctx context.Context, args []string) error {
 		}
 		countAddSkip(added, &skillAdded, &skillSkipped)
 	}
-	for i := range snap.Observations {
-		o := snap.Observations[i]
-		// Drop a session link the dump does not carry, so the foreign key
-		// cannot dangle. Rare in a full dump; happens with edited or partial
-		// exports.
-		if o.SessionID != "" && !knownSessions[o.SessionID] {
-			o.SessionID = ""
-			repointed++
-		}
-		added, err := d.mem.Restore(ctx, &o)
-		if err != nil {
-			return fmt.Errorf("import observation %s: %w", o.ID, err)
-		}
-		countAddSkip(added, &obsAdded, &obsSkipped)
+	var restoreErr error
+	obsAdded, restoreErr = d.mem.RestoreEvolutionSnapshot(ctx, snap.Observations, snap.Links)
+	if restoreErr != nil {
+		return fmt.Errorf("import observations and metadata: %w", restoreErr)
 	}
+	obsSkipped = len(snap.Observations) - obsAdded
 	fmt.Printf("imported from %s: observations %d added / %d skipped, sessions %d / %d, skills %d / %d\n",
 		args[0], obsAdded, obsSkipped, sessAdded, sessSkipped, skillAdded, skillSkipped)
 	if repointed > 0 {
@@ -350,6 +358,116 @@ func runConfig(_ context.Context, args []string) error {
 	return nil
 }
 
+// labeledHook pairs a Claude Code hook entry with the name init and doctor
+// print for it.
+type labeledHook struct {
+	label string
+	entry installer.HookEntry
+}
+
+// claudeHooks is the Claude Code hook set mnemos installs. init wires it
+// and doctor checks it, so the two cannot drift apart.
+func claudeHooks(selfPath string) []labeledHook {
+	return []labeledHook{
+		{
+			// resume and clear start a conversation with a context the old
+			// session never saw, so they get a session and a prewarm too.
+			label: "Claude Code SessionStart hook",
+			entry: installer.HookEntry{
+				Event:   "SessionStart",
+				Matcher: "startup|resume|clear",
+				Command: fmt.Sprintf("%s prewarm", selfPath),
+				Timeout: 10,
+			},
+		},
+		{
+			// SessionStart output is added to the model's context, and the
+			// compact source fires once the compacted conversation resumes,
+			// so this is where recovery state has to be delivered.
+			label: "Claude Code SessionStart compaction recovery hook",
+			entry: installer.HookEntry{
+				Event:   "SessionStart",
+				Matcher: "compact",
+				Command: fmt.Sprintf("%s prewarm --mode compaction_recovery", selfPath),
+				Timeout: 10,
+			},
+		},
+		{
+			label: "Claude Code UserPromptSubmit hook",
+			entry: installer.HookEntry{
+				Event:   "UserPromptSubmit",
+				Command: fmt.Sprintf("%s hook user-prompt", selfPath),
+				Timeout: 5,
+			},
+		},
+		{
+			label: "Claude Code PostToolUse hook",
+			entry: installer.HookEntry{
+				Event:   "PostToolUse",
+				Matcher: "Edit|Write|MultiEdit|NotebookEdit",
+				Command: fmt.Sprintf("%s hook post-tool", selfPath),
+				Timeout: 5,
+			},
+		},
+		{
+			label: "Claude Code SessionEnd hook",
+			entry: installer.HookEntry{
+				Event:   "SessionEnd",
+				Command: fmt.Sprintf("%s hook session-end", selfPath),
+				Timeout: 5,
+			},
+		},
+		{
+			label: "Claude Code PreToolUse guardrail",
+			entry: installer.HookEntry{
+				Event:   "PreToolUse",
+				Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention",
+				Command: fmt.Sprintf("%s hook pre-tool", selfPath),
+				Timeout: 5,
+			},
+		},
+		{
+			label: "Claude Code PreToolUse just-in-time memory",
+			entry: installer.HookEntry{
+				Event:   "PreToolUse",
+				Matcher: "Edit|Write|MultiEdit|NotebookEdit",
+				Command: fmt.Sprintf("%s hook pre-tool", selfPath),
+				Timeout: 5,
+			},
+		},
+	}
+}
+
+// obsoleteClaudeHooks are entries earlier releases installed that init now
+// removes. The PreCompact and PostCompact hooks wrote their recovery block
+// to stderr, which never appeared in a single transcript, while every run
+// logged its memories as surfaced. The startup-only SessionStart entry is
+// superseded by the startup|resume|clear one; leaving both would fire
+// prewarm twice on every launch.
+func obsoleteClaudeHooks(selfPath string) []labeledHook {
+	return []labeledHook{
+		{
+			label: "startup-only SessionStart hook",
+			entry: installer.HookEntry{
+				Event: "SessionStart", Matcher: "startup",
+				Command: fmt.Sprintf("%s prewarm", selfPath),
+			},
+		},
+		{
+			label: "PreCompact hook",
+			entry: installer.HookEntry{
+				Event: "PreCompact", Command: fmt.Sprintf("%s hook pre-compact", selfPath),
+			},
+		},
+		{
+			label: "PostCompact hook",
+			entry: installer.HookEntry{
+				Event: "PostCompact", Command: fmt.Sprintf("%s hook post-compact", selfPath),
+			},
+		},
+	}
+}
+
 func runInit(_ context.Context, _ []string) error {
 	selfPath, err := os.Executable()
 	if err != nil {
@@ -385,80 +503,16 @@ func runInit(_ context.Context, _ []string) error {
 	// looks like plain editing — the failure this wiring exists to fix.
 	if hasClaudeCode {
 		settings := installer.ClaudeSettingsPath()
-		hookEntries := []struct {
-			label string
-			entry installer.HookEntry
-		}{
-			{
-				label: "Claude Code SessionStart hook",
-				entry: installer.HookEntry{
-					Event:   "SessionStart",
-					Matcher: "startup",
-					Command: fmt.Sprintf("%s prewarm", selfPath),
-					Timeout: 10,
-				},
-			},
-			{
-				label: "Claude Code UserPromptSubmit hook",
-				entry: installer.HookEntry{
-					Event:   "UserPromptSubmit",
-					Command: fmt.Sprintf("%s hook user-prompt", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code PostToolUse hook",
-				entry: installer.HookEntry{
-					Event:   "PostToolUse",
-					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
-					Command: fmt.Sprintf("%s hook post-tool", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code SessionEnd hook",
-				entry: installer.HookEntry{
-					Event:   "SessionEnd",
-					Command: fmt.Sprintf("%s hook session-end", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code PreToolUse guardrail",
-				entry: installer.HookEntry{
-					Event:   "PreToolUse",
-					Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention",
-					Command: fmt.Sprintf("%s hook pre-tool", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code PreToolUse just-in-time memory",
-				entry: installer.HookEntry{
-					Event:   "PreToolUse",
-					Matcher: "Edit|Write|MultiEdit|NotebookEdit",
-					Command: fmt.Sprintf("%s hook pre-tool", selfPath),
-					Timeout: 5,
-				},
-			},
-			{
-				label: "Claude Code PreCompact hook",
-				entry: installer.HookEntry{
-					Event:   "PreCompact",
-					Command: fmt.Sprintf("%s hook pre-compact", selfPath),
-					Timeout: 10,
-				},
-			},
-			{
-				label: "Claude Code PostCompact hook",
-				entry: installer.HookEntry{
-					Event:   "PostCompact",
-					Command: fmt.Sprintf("%s hook post-compact", selfPath),
-					Timeout: 10,
-				},
-			},
+		for _, old := range obsoleteClaudeHooks(selfPath) {
+			changed, err := installer.UninstallHook(settings, old.entry)
+			switch {
+			case err != nil:
+				fmt.Printf("  ✗ removing %s (%s): %v\n", old.label, settings, err)
+			case changed:
+				fmt.Printf("  ✓ removed %s from %s\n", old.label, settings)
+			}
 		}
-		for _, h := range hookEntries {
+		for _, h := range claudeHooks(selfPath) {
 			changed, err := installer.InstallHook(settings, h.entry)
 			switch {
 			case err != nil:
@@ -513,7 +567,18 @@ func runDoctor(ctx context.Context, _ []string) error {
 	hasClaudeCode := false
 	hasPi := false
 	for _, t := range targets {
-		check(installer.IsInstalled(t), "%s %s", t.Name, t.Path)
+		installed := installer.IsInstalled(t)
+		if t.Name == "pi" && !installed {
+			// A package manifest can supply the same server without an
+			// adapter-global entry. Verify its actual files, not its name.
+			if ok, path := installer.PiPackageMCPInstalled(); ok {
+				check(true, "pi package MCP %s", path)
+			} else {
+				check(false, "%s %s", t.Name, t.Path)
+			}
+		} else {
+			check(installed, "%s %s", t.Name, t.Path)
+		}
 		switch t.Name {
 		case "Claude Code (user)":
 			hasClaudeCode = true
@@ -538,44 +603,13 @@ func runDoctor(ctx context.Context, _ []string) error {
 
 	if hasClaudeCode {
 		settings := installer.ClaudeSettingsPath()
-		doctorHooks := []struct {
-			label string
-			entry installer.HookEntry
-		}{
-			{"Claude Code SessionStart hook", installer.HookEntry{
-				Event:   "SessionStart",
-				Matcher: "startup",
-				Command: fmt.Sprintf("%s prewarm", selfPath),
-			}},
-			{"Claude Code UserPromptSubmit hook", installer.HookEntry{
-				Event:   "UserPromptSubmit",
-				Command: fmt.Sprintf("%s hook user-prompt", selfPath),
-			}},
-			{"Claude Code PostToolUse hook", installer.HookEntry{
-				Event:   "PostToolUse",
-				Matcher: "Edit|Write|MultiEdit|NotebookEdit",
-				Command: fmt.Sprintf("%s hook post-tool", selfPath),
-			}},
-			{"Claude Code SessionEnd hook", installer.HookEntry{
-				Event:   "SessionEnd",
-				Command: fmt.Sprintf("%s hook session-end", selfPath),
-			}},
-			{"Claude Code PreToolUse guardrail", installer.HookEntry{
-				Event:   "PreToolUse",
-				Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention",
-				Command: fmt.Sprintf("%s hook pre-tool", selfPath),
-			}},
-			{"Claude Code PreCompact hook", installer.HookEntry{
-				Event:   "PreCompact",
-				Command: fmt.Sprintf("%s hook pre-compact", selfPath),
-			}},
-			{"Claude Code PostCompact hook", installer.HookEntry{
-				Event:   "PostCompact",
-				Command: fmt.Sprintf("%s hook post-compact", selfPath),
-			}},
-		}
-		for _, h := range doctorHooks {
+		for _, h := range claudeHooks(selfPath) {
 			check(installer.IsHookInstalled(settings, h.entry), "%s %s", h.label, settings)
+		}
+		for _, old := range obsoleteClaudeHooks(selfPath) {
+			if installer.IsHookInstalled(settings, old.entry) {
+				check(false, "obsolete %s still installed in %s (run `mnemos init` to remove it)", old.label, settings)
+			}
 		}
 	}
 	if !ok {
@@ -586,23 +620,33 @@ func runDoctor(ctx context.Context, _ []string) error {
 }
 
 type snapshot struct {
-	Observations []memory.Observation `json:"observations"`
-	Sessions     []session.Session    `json:"sessions"`
-	Skills       []skills.Skill       `json:"skills"`
+	Observations  []memory.Observation `json:"observations"`
+	Sessions      []session.Session    `json:"sessions"`
+	Skills        []skills.Skill       `json:"skills"`
+	SchemaVersion int                  `json:"schema_version,omitempty"`
+	Evidence      []snapshotEvidence   `json:"evidence,omitempty"`
+	Links         []memory.LinkEdge    `json:"supersession_links,omitempty"`
 }
 
 func dumpAll(ctx context.Context, db *storage.DB) (*snapshot, error) {
-	out := &snapshot{}
-	// Single drained query, no per-id Get. The previous loop held a SELECT
+	out := &snapshot{SchemaVersion: 2}
+	// Coherent observations/evidence/links snapshot, no per-id Get. The previous loop held a SELECT
 	// cursor open while calling Get (which itself queries and writes
 	// access_count) for each row, which deadlocks the single-connection pool
 	// on any populated store and bumps access counts as a side effect of
 	// merely exporting.
-	obs, err := db.Observations().Export(ctx)
+	obs, links, err := memory.NewService(memory.Config{Store: db.Observations()}).ExportEvolutionSnapshot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("export observations: %w", err)
 	}
 	out.Observations = obs
+	out.Links = links
+	for i := range out.Observations {
+		for _, e := range out.Observations[i].Evidence {
+			out.Evidence = append(out.Evidence, snapshotEvidence{ObservationID: out.Observations[i].ID, Evidence: e})
+		}
+		out.Observations[i].Evidence = nil
+	}
 	if list, err := db.Sessions().Recent(ctx, "", 10000); err == nil {
 		out.Sessions = list
 	}

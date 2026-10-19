@@ -159,18 +159,26 @@ Export a skill as a JSON pack, share by file or URL, install with `mnemos skill 
 }
 ```
 
-`mnemos init` also writes a `SessionStart` hook to `~/.claude/settings.json` calling `mnemos prewarm`. Honours `CLAUDE_CONFIG_DIR`. Manual hook shape:
+`mnemos init` also writes hooks to `~/.claude/settings.json` (honours `CLAUDE_CONFIG_DIR`) and removes ones earlier releases installed that are no longer used. The two `SessionStart` hooks open a session with a prewarm block, and restore that session's state after a compaction:
 
 ```json
 {
   "hooks": {
-    "SessionStart": [{
-      "matcher": "startup",
-      "hooks": [{ "type": "command", "command": "/full/path/to/mnemos prewarm", "timeout": 10 }]
-    }]
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [{ "type": "command", "command": "/full/path/to/mnemos prewarm", "timeout": 10 }]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [{ "type": "command", "command": "/full/path/to/mnemos prewarm --mode compaction_recovery", "timeout": 10 }]
+      }
+    ]
   }
 }
 ```
+
+`mnemos doctor` lists the rest (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SessionEnd`) and flags any obsolete entry still installed.
 
 ### Cursor / Windsurf / Claude Desktop / Codex CLI
 
@@ -212,7 +220,7 @@ It is named `kls-mnemos-pi` and is **not published to npm** — the unscoped `mn
 
 The name is not cosmetic: the adapter derives tool names from it, so a package install exposes `mcp__kls-mnemos-pi__mnemos_mnemos_save` rather than `mcp__mnemos_mnemos_save`. The guardrail matches on the tool-name suffix, so it covers the write boundary under either. The shipped skill names mnemos tools without a prefix for the same reason.
 
-For a self-contained install that does not depend on the checkout, copy the package next to the binary and install the copy — see the Windows section below.
+For a self-contained install that does not depend on the checkout, copy the package into pi's user directory and install the copy — see the Windows section below.
 
 The extension shells out to the `mnemos` executable, so it needs to be findable. Either put it on `PATH`, or point `MNEMOS_BIN` at it — which is what the Windows install below does, since the binary lives outside any standard bin directory there:
 
@@ -239,6 +247,8 @@ MCP config for `pi-mcp-adapter` is separate, at `~/.pi/agent/mcp-adapter.json` (
 
 `directTools` registers the tools directly instead of behind the adapter's single proxy tool, so the model can call them without a discovery step. Neither `directTools` nor `toolPrefix` is load-bearing for the guardrail, and the name the adapter actually derives is not always the one these settings imply — routing through a package manifest prefixes the package name as well. The guardrail therefore matches on the tool-name **suffix**, so it keeps covering mnemos writes under every naming scheme.
 
+After upgrading the binary, reload pi or start a new session so its adapter reconnects and discovers the current tool schemas. A local package registration reads the package directory directly; a copied package also needs its files updated. With `directTools: true`, new tools such as `mnemos_get_many`, `mnemos_neighborhood`, and `mnemos_evidence_check` are discovered automatically. If a running session still shows older tools, use the adapter's `mcp` tool with `connect` set to the configured server name to refresh its metadata, then reload pi to register the refreshed direct tools (especially when `freezeDirectTools` is enabled). Cache behavior depends on the adapter version and configured TTL; do not delete unrelated server caches or add a duplicate global server just to refresh a package route. `mnemos doctor` recognizes a local package route after checking its manifest-backed `mnemos serve` entry.
+
 What pi gets, and what it does not yet have measured:
 
 - Three of the four pushes mnemos delivers to Claude Code are delivered here: session prewarm, per-prompt memory recall plus the capture directive, and passive file touches. The fourth — memory relevant to the file about to be edited — is retrieved and logged, but pi's `tool_call` event accepts only a block/reason return, so it cannot reach the model from there. The write-boundary guardrail on that same event works unchanged.
@@ -247,7 +257,7 @@ What pi gets, and what it does not yet have measured:
 
 #### Windows: a self-contained install
 
-This is the layout mnemos is developed and verified against on Windows: the binary and the pi package side by side, in one directory that is neither the repository nor a standard bin path. Nothing here depends on the repository, so the checkout can be moved or deleted.
+Keep the binary in its installation directory and the copied package under pi's user directory (`~/.pi/agent/local-packages/mnemos`). Neither installed component depends on the repository, so the checkout can be moved or deleted.
 
 ```powershell
 # 1. Build (from the repo root)
@@ -259,26 +269,33 @@ go build -ldflags "-s -w -X github.com/polyxmedia/mnemos/internal/version.Versio
 New-Item -ItemType Directory -Force D:\software\mnemos | Out-Null
 Copy-Item bin/mnemos.exe D:\software\mnemos\mnemos.exe -Force
 
-# 3. Copy the pi package next to it
-New-Item -ItemType Directory -Force D:\software\mnemos\pi\extensions, D:\software\mnemos\pi\skills\mnemos | Out-Null
-Copy-Item pi\package.json, pi\mcp.json D:\software\mnemos\pi\
-Copy-Item pi\extensions\index.ts, pi\extensions\hook-transport.ts, pi\extensions\tool-match.ts D:\software\mnemos\pi\extensions\
-Copy-Item pi\skills\mnemos\SKILL.md D:\software\mnemos\pi\skills\mnemos\
+# 3. Copy the package into pi's user directory
+$piPackage = Join-Path $env:USERPROFILE '.pi\agent\local-packages\mnemos'
+New-Item -ItemType Directory -Force (Join-Path $piPackage 'extensions'), (Join-Path $piPackage 'skills\mnemos') | Out-Null
+Copy-Item pi\package.json, pi\mcp.json $piPackage -Force
+Copy-Item pi\extensions\index.ts, pi\extensions\hook-transport.ts, pi\extensions\tool-match.ts (Join-Path $piPackage 'extensions') -Force
+Copy-Item pi\skills\mnemos\SKILL.md (Join-Path $piPackage 'skills\mnemos') -Force
+
+# Keep MCP command resolution independent of pi's working directory/PATH.
+$mcpPath = Join-Path $piPackage 'mcp.json'
+$mcp = Get-Content -LiteralPath $mcpPath -Raw | ConvertFrom-Json
+$mcp.mcpServers.mnemos.command = 'D:\software\mnemos\mnemos.exe'
+[System.IO.File]::WriteAllText($mcpPath, ($mcp | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new($false))
 
 # 4. Point pi at the copy, not the checkout
-pi install D:\software\mnemos\pi
+pi install $piPackage
 
 # 5. Tell the extension where the binary is
 [Environment]::SetEnvironmentVariable('MNEMOS_BIN', 'D:\software\mnemos\mnemos.exe', 'User')
 ```
 
-Only the three product `.ts` files are copied — the package's `*.test.ts` files are development-only. Step 5 matters because the package's own `mcp.json` and the extension both use the bare command name `mnemos`; `MNEMOS_BIN` is what resolves it. Open a new shell after step 5 so the variable is visible.
+Only the three product `.ts` files are copied — the package's `*.test.ts` files are development-only. The installed copy's `mcp.json` uses the absolute binary path; `MNEMOS_BIN` separately selects the binary used by the extension's hooks. Open a new shell after step 5 so the variable is visible. For upgrades, repeat the binary/package copy and absolute-command configuration, then reload pi. Local-path packages are skipped by pi's package updater: `pi update <local-path>` does not fetch or overwrite this copy, even if it prints `Updated`. If pi currently references a checkout, remove that exact package registration before installing the copy so only one mnemos package route remains.
 
-To undo: `pi remove D:\software\mnemos\pi`, then delete the directory.
+To unregister the copy, run `pi remove "$env:USERPROFILE\.pi\agent\local-packages\mnemos"`. Its files can then be removed from that directory.
 
 ### Any MCP-compatible client
 
-Stdio: point the client at `mnemos serve`. The server advertises 18 tools and 4 resources on the `initialize` handshake (22 tools when rumination is enabled).
+Stdio: point the client at `mnemos serve`. The server advertises 21 tools and 4 resources on the `initialize` handshake (25 tools when rumination is enabled).
 
 ### HTTP transport
 

@@ -1,6 +1,8 @@
 # MCP tools reference
 
-All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 18 core tools; enabling rumination adds 4 more (22 total).
+All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 21 core tools; enabling rumination adds 4 more (25 total).
+
+Writes that omit `project` (`mnemos_save`, `mnemos_correct`, `mnemos_convention`, `mnemos_touch`, `mnemos_session_start`) land in the project the server was started in, which is the basename of its working directory. Claude Code and Codex start the server in the project root. Pass `"project": "*"` to save a memory that applies to every project.
 
 ## Save & retrieve
 
@@ -15,15 +17,19 @@ Store an agent-curated observation.
 | `tags` |   | string array |
 | `importance` |   | 1-10, defaults to 5 |
 | `ttl_days` |   | auto-expire |
-| `agent_id`, `project`, `session_id` |   | scoping |
+| `agent_id`, `project`, `session_id` |   | scoping; `project` defaults to the server's project, `"*"` for global |
 | `valid_from`, `valid_until` |   | ISO-8601 fact-time bounds |
 | `source_kind` |   | `user`, `tool`, `agent_inference`, `dream`, `import`; defaults to `user` |
 | `trust_tier` |   | `raw`, `curated`, `skill`; defaults to `curated` |
 | `derived_from` |   | parent observation IDs |
+| `topic_key` |   | optional case-sensitive grouping key, trimmed UTF-8 up to 256 bytes; same topic appends |
+| `replaces_id` |   | explicit expected live same-agent/project target; replacement is atomic |
+| `unpin_replacement` |   | acknowledge removing the inherited pin when replacing a pinned version |
+| `evidence` |   | up to 16 immutable source-reference identities; see evidence check below |
 | `rationale` |   | why this memory matters |
 | `pinned` |   | `true` to pin as core memory: immune to decay, Tier-0 prewarm slot, clears expiry |
 
-Returns `{id, title, type, source_kind, trust_tier, derived_from, pinned, created_at, deduped}`. `deduped: true` means an identical live observation already existed; its access counter was bumped instead.
+Returns `{id, title, type, source_kind, trust_tier, derived_from, pinned, created_at, deduped, topic_key, evidence}`. `deduped: true` means an identical live observation already existed; its access counter was bumped instead.
 
 ### `mnemos_search`
 BM25 + importance + recency + access-frequency ranked search.
@@ -39,6 +45,7 @@ BM25 + importance + recency + access-frequency ranked search.
 | `include_stale` |   | include invalidated/expired |
 | `include_raw` |   | include quarantined raw-tier observations |
 | `as_of` |   | ISO-8601, historical query |
+| `topic_key` |   | optional exact case-sensitive topic filter, no ranking boost |
 
 Returns `{results: [{id, title, type, tags, importance, score, relevance, policy_factor, graph_factor, contradiction_factor, expanded_from, contradicted_by, pinned, snippet, created_at, source_kind, trust_tier, derived_from}], retrieval_mode}`.
 
@@ -46,6 +53,100 @@ Returns `{results: [{id, title, type, tags, importance, score, relevance, policy
 
 ### `mnemos_get`
 Fetch full observation by ID. Bumps access counter.
+
+### `mnemos_get_many`
+Read selected details after searching. Accepts `ids` (1-32 requested IDs) and a
+required non-empty `project`. Optional `agent_id` defaults to the same identity as
+save (`default`). IDs are deduplicated in first-requested order. Scope is hard:
+missing, other-project/agent, and hidden IDs all return `unavailable` with no body.
+
+Optional `include_raw` and `include_stale` enable explicit inspection within that
+scope. `as_of` is an RFC3339 historical validity instant, not a full database
+snapshot; `include_stale` explicitly bypasses temporal validity filtering.
+
+`max_bytes` defaults to 32768 and accepts 1-262144. The shared budget counts compact
+JSON encoding of each selected observation, including title, tags, rationale,
+structured and validity/provenance metadata. Vectors/model names are excluded;
+the bounded status envelope and transport pretty-print whitespace are not counted.
+A full observation fits or is `omitted_for_size`; no partial body assertion is
+returned. The response contains `items`, `bytes_returned`, `max_bytes`, and
+`content_limited`. Each item has `id`, `status` (`ok`, `unavailable`, or
+`omitted_for_size`) and `observation` only when `ok`. Existing observation fields retain PascalCase names; new `topic_key`, `evidence`,
+request and envelope fields use snake_case.
+
+```json
+{"project":"mnemos","ids":["01A","01B","01A"],"max_bytes":32768}
+```
+
+Only unique returned detail observations increment existing access count/time,
+after successful atomic bookkeeping. A service read count does not prove client
+receipt or agent success. Unavailable and size-omitted entries do not count.
+Retry size-omitted IDs individually with a larger allowed budget when needed.
+
+### `mnemos_neighborhood`
+Browse summaries around `id` with required `project` and the same optional agent,
+trust, history and byte-budget fields as batch. `before` and `after` each default
+to 3, accept 0-10, and preserve explicit zero. Visible neighbours share the
+anchor's session/project/agent and are ordered by `(created_at, id)`; hidden rows
+do not consume the window. This operation does not reuse historical replay reads.
+
+```json
+{"project":"mnemos","id":"01A","before":0,"after":3}
+```
+
+The response includes `anchor_id`, ordered `items` with `summary` only for `ok`
+entries, `bytes_returned`, `max_bytes`, `content_limited`, and `no_session`. A
+`window` reports before/after counts, requested limits, and `has_more_before` /
+`has_more_after`; an unavailable anchor exposes no sibling counts. A visible
+anchor with no session returns only that summary and `no_session: true`.
+Summaries preserve original scope, validity and trust metadata; titles are capped
+at 256 UTF-8 bytes and snippets at 512, with `title_truncated` and
+`snippet_truncated` flags. The budget counts encoded selected summary objects.
+Neighbourhood listing never increments detail-access counts.
+
+Both tools are additive: existing `mnemos_get` and replay semantics remain as
+before. No database migration, cursor storage, read-event table, injection event,
+used/success flag or remembered copy of results is introduced. Locators inside
+observations are returned without fetching their contents. HTTP routes and Go
+examples are documented in [API.md](API.md).
+
+### `mnemos_evidence_check`
+Record an explicit caller-reported latest result for an existing reference:
+
+```json
+{"observation_id":"01A","evidence_key":"<stored key>","status":"changed"}
+```
+
+`status` is `unverified`, `matched`, `changed`, or `unavailable`. `matched` requires
+a recorded SHA-256 fingerprint baseline. The injected service clock supplies
+`checked_at`; callers cannot certify their own timestamp. It returns the reference
+with its latest marker. No URL/file is fetched, no source body or check history is
+stored, and the check never changes trust, importance, ranking, validity or pinning.
+A matching fragment is not proof that its claim is true. A mismatch means review
+is needed, not automatic invalidation.
+
+Save references accept `locator`, `relation` (`supports`/`refutes`), optional
+`revision`, `selector`, and `fingerprint`. At most 16 references may be submitted before identity deduplication; field limits are
+2048 locator bytes, 256 revision bytes, 512 selector bytes; fingerprints are 64
+hexadecimal SHA-256 characters. No quote/body field exists. New saves always start
+`unverified`, even when a caller supplies markers through another transport.
+Output also contains a derived `key`, latest `status`, and optional `checked_at`.
+Duplicate identities count as one stored reference; this is never an independent
+proof count or confidence score. Old-version references stay with that version;
+a replacement starts with only explicitly supplied references.
+
+Topics group assertions, not truths: a rule and its exception may share one topic
+and remain live. Use `replaces_id` only for explicit replacement, in the same resolved
+agent/project scope. Omitted topic inherits from the target; a different explicit
+topic is rejected. Raw cannot replace trusted content. Pins inherit unless
+`unpin_replacement` is true, and pinned expiry remains neutralized. Future-effective
+replacement is rejected. A matching retry returns its original successor; a stale
+or different request returns a tool error with structured `{code:"conflict",error}`.
+Inspect the current version before retrying a conflict; do not guess a new target.
+
+Full-store snapshots preserve topic, references, latest markers, and historical
+supersession links; [backup guidance](BACKUP.md) describes downgrade constraints.
+Vault and skill packs are intentionally lossy for this metadata.
 
 ### `mnemos_delete`
 Hard-delete by ID. Use only for mistaken saves. For changed facts, use `mnemos_link` with `supersedes`.
@@ -139,16 +240,16 @@ Surfaced automatically in pre-warm when the session goal matches.
 ### `mnemos_convention`
 Declare a project convention. Auto-injected at every `mnemos_session_start` for the matching project.
 
-| `title`, `rule`, `project` | required |
-| `rationale`, `example`, `tags`, `agent_id` | optional |
+| `title`, `rule` | required |
+| `project`, `rationale`, `example`, `tags`, `agent_id` | optional; `project` defaults to the server's project |
 
 Rationale is surfaced in pre-warm — WHY matters more than what.
 
 ### `mnemos_touch`
 Record that a file was touched in the current session. Builds a heat map: frequently-touched files get priority in pre-warming.
 
-| `path`, `project` | required |
-| `session_id`, `agent_id`, `note` | optional |
+| `path` | required |
+| `project`, `session_id`, `agent_id`, `note` | optional; `project` defaults to the server's project |
 
 ## Skills
 

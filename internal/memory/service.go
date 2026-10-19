@@ -11,7 +11,9 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/polyxmedia/mnemos/internal/contextfmt"
 	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/safety"
 )
 
 // Embedder is the minimal interface memory.Service needs from an embedding
@@ -138,16 +140,34 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 	// honest callers that don't set the field keep working.
 	trustTier = clampTrustTier(sourceKind, trustTier)
 
-	// Dedup: if the same (agent, project, content_hash) already lives, bump
-	// access and return without writing. Invalidated rows don't count — a
-	// re-save can legitimately resurrect a superseded fact.
-	if existing, err := s.store.FindByContentHash(ctx, agent, in.Project, hash); err != nil {
-		return nil, fmt.Errorf("dedup lookup: %w", err)
-	} else if existing != nil {
-		if err := s.store.BumpAccess(ctx, existing.ID); err != nil {
-			return nil, err
+	topic, err := NormalizeTopic(in.TopicKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := scanTopicWrite(topic); err != nil {
+		return nil, err
+	}
+	evidence, err := NormalizeEvidence(in.Evidence, false)
+	if err != nil {
+		return nil, err
+	}
+	evolution, atomic := s.store.(EvolutionStore)
+	if !atomic {
+		if topic != "" || len(evidence) > 0 || in.ReplacesID != "" {
+			return nil, fmt.Errorf("memory: store does not support transactional metadata")
 		}
-		return &SaveResult{Observation: existing, Deduped: true}, nil
+		// Dedup: if the same (agent, project, content_hash) already lives, bump
+		// access and return without writing. Invalidated rows don't count — a
+		// re-save can legitimately resurrect a superseded fact.
+		if existing, err := s.store.FindByContentHash(ctx, agent, in.Project, hash); err != nil {
+			return nil, fmt.Errorf("dedup lookup: %w", err)
+		} else if existing != nil {
+			if err := s.store.BumpAccess(ctx, existing.ID); err != nil {
+				return nil, err
+			}
+			return &SaveResult{Observation: existing, Deduped: true}, nil
+		}
+
 	}
 
 	o := &Observation{
@@ -170,6 +190,7 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 		TrustTier:   trustTier,
 		DerivedFrom: in.DerivedFrom,
 		Pinned:      in.Pinned,
+		TopicKey:    topic, Evidence: evidence,
 	}
 	// Pinning wins over TTL: core memory cannot silently expire.
 	if in.TTLDays > 0 && !in.Pinned {
@@ -177,20 +198,27 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 		o.ExpiresAt = &t
 	}
 
-	if err := s.store.Insert(ctx, o); err != nil {
-		return nil, err
-	}
-
-	// Embed in the background-ish way: if an embedder is configured, try
-	// to generate the vector and attach it. A failure here is non-fatal —
-	// the observation still exists; hybrid search just misses this one
-	// candidate until the next backfill pass.
+	// Optional embedding happens outside the write transaction. Failures remain
+	// non-fatal; locators/evidence never enter embedding input or trigger I/O.
 	if s.HybridEnabled() {
 		if vec, err := s.embedder.Embed(ctx, embedText(o)); err == nil && len(vec) > 0 {
 			o.Embedding = vec
 			o.EmbeddingModel = s.embedder.Model()
-			_ = s.store.UpdateEmbedding(ctx, o.ID, s.embedder.Model(), vec)
 		}
+	}
+	if atomic {
+		requestHash := ""
+		if in.ReplacesID != "" {
+			var err error
+			requestHash, err = replacementRequestHash(in, sourceKind, trustTier, agent, topic, evidence)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return evolution.SaveEvolution(ctx, EvolutionSave{Observation: o, ReplacesID: in.ReplacesID, UnpinReplacement: in.UnpinReplacement, TopicExplicit: topic != "", RequestHash: requestHash, Now: now})
+	}
+	if err := s.store.Insert(ctx, o); err != nil {
+		return nil, err
 	}
 
 	return &SaveResult{Observation: o, Deduped: false}, nil
@@ -206,19 +234,11 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 // does not quarantine or re-scan. Returns true when a row was written, false
 // when an observation with the same ID was already present and skipped.
 func (s *Service) Restore(ctx context.Context, o *Observation) (bool, error) {
-	if strings.TrimSpace(o.Title) == "" {
-		return false, fmt.Errorf("restore: title is required")
+	normalized, err := NormalizeRestoreObservation(*o)
+	if err != nil {
+		return false, err
 	}
-	if !o.Type.Valid() {
-		return false, fmt.Errorf("restore: invalid type %q", o.Type)
-	}
-	if o.SourceKind != "" && !o.SourceKind.Valid() {
-		return false, fmt.Errorf("restore: invalid source_kind %q", o.SourceKind)
-	}
-	if o.TrustTier != "" && !o.TrustTier.Valid() {
-		return false, fmt.Errorf("restore: invalid trust_tier %q", o.TrustTier)
-	}
-	return s.store.Restore(ctx, o)
+	return s.store.Restore(ctx, &normalized)
 }
 
 // clampTrustTier enforces the quarantine invariant: only user-authored
@@ -284,11 +304,11 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 // X, now we do Y" — preserves provenance, hides the stale fact from default
 // searches.
 func (s *Service) Supersede(ctx context.Context, newID, oldID string) error {
-	now := s.clock().UTC()
-	if err := s.store.Link(ctx, newID, oldID, LinkSupersedes); err != nil {
-		return err
+	store, ok := s.store.(EvolutionStore)
+	if !ok {
+		return fmt.Errorf("memory: store does not support atomic supersession")
 	}
-	return s.store.Invalidate(ctx, oldID, now)
+	return store.SupersedeAtomic(ctx, newID, oldID, s.clock().UTC())
 }
 
 // Invalidate marks an observation as no longer true as of now.
@@ -362,6 +382,7 @@ const crossProjectPenalty = 0.05
 // recency, access, project affinity), bounded to (0, ScoreCeiling]. See
 // docs/ARCHITECTURE.md and the memory-retrieval spec for the contract.
 func (s *Service) Search(ctx context.Context, in SearchInput) ([]SearchResult, error) {
+
 	res, _, err := s.SearchWithMode(ctx, in)
 	return res, err
 }
@@ -380,6 +401,12 @@ func (s *Service) Search(ctx context.Context, in SearchInput) ([]SearchResult, e
 // to ScoreCeiling; hits with zero relevance are dropped, keeping the bound
 // (0, ScoreCeiling] honest.
 func (s *Service) SearchWithMode(ctx context.Context, in SearchInput) ([]SearchResult, RetrievalMode, error) {
+	topic, err := NormalizeTopic(in.TopicKey)
+	if err != nil {
+		return nil, RetrievalFTS, err
+	}
+	in.TopicKey = topic
+
 	limit := in.Limit
 	if limit <= 0 {
 		limit = 20
@@ -583,6 +610,9 @@ func (s *Service) unionVectorRecall(ctx context.Context, in SearchInput, qvec []
 // constrain type and project, and surfacing quarantined raw content through
 // a link would breach the trust boundary the search filter enforces.
 func expansionVisible(in SearchInput, o Observation) bool {
+	if in.TopicKey != "" && o.TopicKey != in.TopicKey {
+		return false
+	}
 	if o.TrustTier == TrustRaw && !in.IncludeRaw {
 		return false
 	}
@@ -644,24 +674,55 @@ func (s *Service) Context(ctx context.Context, in ContextInput) (*ContextBlock, 
 	}
 
 	block := &ContextBlock{}
-	var sb strings.Builder
-	budget := maxTokens
+	seen := map[string]bool{}
+	scanner := safety.NewScanner()
+	var complete []string
 	for _, r := range results {
-		entry := formatContextEntry(r.Observation)
-		cost := estimateTokens(entry)
-		if cost > budget {
+		complete = append(complete, formatContextEntry(r.Observation))
+	}
+	report := scanner.Scan(strings.Join(complete, "\n\n"))
+	// Removing controls can join previously separated instruction tokens.
+	sanitisedReport := scanner.Scan(report.Sanitised)
+	report.Findings = append(report.Findings, sanitisedReport.Findings...)
+	if sanitisedReport.MaxRisk > report.MaxRisk {
+		report.MaxRisk = sanitisedReport.MaxRisk
+	}
+	for _, r := range results {
+		o := r.Observation
+		if seen[o.ID] {
 			continue
 		}
-		sb.WriteString(entry)
-		sb.WriteString("\n\n")
-		budget -= cost
-		block.Observations = append(block.Observations, r.Observation)
-		if budget < 64 {
-			break
+		warning := ""
+		if len(r.ContradictedBy) > 0 {
+			warning = "[contradicted by " + strings.Join(r.ContradictedBy, ", ") + "] "
 		}
+		identity := fmt.Sprintf("## [%s id: %s]", o.Type, o.ID)
+		forms := []string{formatContextEntry(o), identity + " " + strings.Join(strings.Fields(o.Title), " "), identity}
+		for i, form := range forms {
+			form = scanner.Scan(warning + form).Sanitised
+			joined := scanner.Scan(block.Text + "\n\n" + form)
+			joined.Findings = append(joined.Findings, report.Findings...)
+			if report.MaxRisk > joined.MaxRisk {
+				joined.MaxRisk = report.MaxRisk
+			}
+			if joined.MaxRisk >= safety.RiskHigh {
+				form = safety.WrapFlagged(form, joined)
+			}
+			forms[i] = form
+		}
+		prefix := block.Text
+		if prefix != "" {
+			prefix += "\n\n"
+		}
+		entry := contextfmt.Choose(prefix, maxTokens, forms...)
+		if entry == "" {
+			continue
+		}
+		block.Text = prefix + entry
+		block.Observations = append(block.Observations, o)
+		seen[o.ID] = true
 	}
-	block.Text = strings.TrimRight(sb.String(), "\n")
-	block.TokenEstimate = maxTokens - budget
+	block.TokenEstimate = contextfmt.Estimate(block.Text)
 
 	// Fire-and-forget: the surfacing log is measurement, and measurement
 	// must never break the surface being measured.
@@ -736,10 +797,7 @@ func formatContextEntry(o Observation) string {
 // good enough for budget-sized decisions; the MCP layer can swap in a real
 // tokenizer later without touching callers.
 func estimateTokens(s string) int {
-	if s == "" {
-		return 0
-	}
-	return (len(s) + 3) / 4
+	return contextfmt.Estimate(s)
 }
 
 func defaultString(s, fallback string) string {

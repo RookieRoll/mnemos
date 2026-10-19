@@ -63,18 +63,27 @@ func New(baseURL string, opts ...Option) *Client {
 
 // SaveInput is the payload for POST /v1/observations.
 type SaveInput struct {
-	Title      string   `json:"Title"`
-	Content    string   `json:"Content"`
-	Type       string   `json:"Type"`
-	Tags       []string `json:"Tags,omitempty"`
-	Importance int      `json:"Importance,omitempty"`
-	TTLDays    int      `json:"TTLDays,omitempty"`
-	Project    string   `json:"Project,omitempty"`
-	AgentID    string   `json:"AgentID,omitempty"`
-	SessionID  string   `json:"SessionID,omitempty"`
-	Rationale  string   `json:"Rationale,omitempty"`
-	Structured string   `json:"Structured,omitempty"`
-	Pinned     bool     `json:"Pinned,omitzero"`
+	TopicKey         string              `json:"TopicKey,omitempty"`
+	ReplacesID       string              `json:"ReplacesID,omitempty"`
+	UnpinReplacement bool                `json:"UnpinReplacement,omitempty"`
+	Evidence         []EvidenceReference `json:"Evidence,omitempty"`
+	SourceKind       string              `json:"SourceKind,omitempty"`
+	TrustTier        string              `json:"TrustTier,omitempty"`
+	DerivedFrom      []string            `json:"DerivedFrom,omitempty"`
+	ValidFrom        *time.Time          `json:"ValidFrom,omitempty"`
+	ValidUntil       *time.Time          `json:"ValidUntil,omitempty"`
+	Title            string              `json:"Title"`
+	Content          string              `json:"Content"`
+	Type             string              `json:"Type"`
+	Tags             []string            `json:"Tags,omitempty"`
+	Importance       int                 `json:"Importance,omitempty"`
+	TTLDays          int                 `json:"TTLDays,omitempty"`
+	Project          string              `json:"Project,omitempty"`
+	AgentID          string              `json:"AgentID,omitempty"`
+	SessionID        string              `json:"SessionID,omitempty"`
+	Rationale        string              `json:"Rationale,omitempty"`
+	Structured       string              `json:"Structured,omitempty"`
+	Pinned           bool                `json:"Pinned,omitzero"`
 }
 
 // SaveResult is the response from POST /v1/observations.
@@ -85,29 +94,47 @@ type SaveResult struct {
 
 // Observation is the client-side view of a stored observation.
 type Observation struct {
-	ID          string    `json:"ID"`
-	Title       string    `json:"Title"`
-	Content     string    `json:"Content"`
-	Type        string    `json:"Type"`
-	Tags        []string  `json:"Tags"`
-	Importance  int       `json:"Importance"`
-	AccessCount int       `json:"AccessCount"`
-	Project     string    `json:"Project"`
-	SessionID   string    `json:"SessionID"`
-	Pinned      bool      `json:"Pinned"`
-	CreatedAt   time.Time `json:"CreatedAt"`
+	TopicKey       string              `json:"topic_key"`
+	Evidence       []EvidenceReference `json:"evidence"`
+	ID             string              `json:"ID"`
+	AgentID        string              `json:"AgentID"`
+	LastAccessedAt *time.Time          `json:"LastAccessedAt"`
+	LastExportedAt *time.Time          `json:"LastExportedAt"`
+	ContentHash    string              `json:"ContentHash"`
+	ValidFrom      time.Time           `json:"ValidFrom"`
+	ValidUntil     *time.Time          `json:"ValidUntil"`
+	InvalidatedAt  *time.Time          `json:"InvalidatedAt"`
+	ExpiresAt      *time.Time          `json:"ExpiresAt"`
+	SourceKind     string              `json:"SourceKind"`
+	TrustTier      string              `json:"TrustTier"`
+	DerivedFrom    []string            `json:"DerivedFrom"`
+	Rationale      string              `json:"Rationale"`
+	Structured     string              `json:"Structured"`
+	Title          string              `json:"Title"`
+	Content        string              `json:"Content"`
+	Type           string              `json:"Type"`
+	Tags           []string            `json:"Tags"`
+	Importance     int                 `json:"Importance"`
+	AccessCount    int                 `json:"AccessCount"`
+	Project        string              `json:"Project"`
+	SessionID      string              `json:"SessionID"`
+	Pinned         bool                `json:"Pinned"`
+	CreatedAt      time.Time           `json:"CreatedAt"`
 }
 
 // SearchInput is the payload for POST /v1/search.
 type SearchInput struct {
-	Query         string   `json:"Query"`
-	Type          string   `json:"Type,omitempty"`
-	Tags          []string `json:"Tags,omitempty"`
-	MinImportance int      `json:"MinImportance,omitempty"`
-	Limit         int      `json:"Limit,omitempty"`
-	AgentID       string   `json:"AgentID,omitempty"`
-	Project       string   `json:"Project,omitempty"`
-	IncludeStale  bool     `json:"IncludeStale,omitempty"`
+	TopicKey      string    `json:"TopicKey,omitempty"`
+	IncludeRaw    bool      `json:"IncludeRaw,omitempty"`
+	AsOf          time.Time `json:"AsOf,omitzero"`
+	Query         string    `json:"Query"`
+	Type          string    `json:"Type,omitempty"`
+	Tags          []string  `json:"Tags,omitempty"`
+	MinImportance int       `json:"MinImportance,omitempty"`
+	Limit         int       `json:"Limit,omitempty"`
+	AgentID       string    `json:"AgentID,omitempty"`
+	Project       string    `json:"Project,omitempty"`
+	IncludeStale  bool      `json:"IncludeStale,omitempty"`
 }
 
 // SearchHit is one ranked search result.
@@ -292,4 +319,10 @@ func IsNotFound(err error) bool {
 		return apiErr.Status == http.StatusNotFound
 	}
 	return false
+}
+
+// IsConflict reports whether the server rejected an optimistic version or evidence operation.
+func IsConflict(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict
 }

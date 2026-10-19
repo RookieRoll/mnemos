@@ -38,6 +38,11 @@ type Config struct {
 	Rumination  *rumination.Service // optional; enables the mnemos_ruminate_* tools
 	Logger      *slog.Logger
 	StorageSize func() (int64, error) // optional: reports storage_bytes in mnemos_stats
+	// DefaultProject is the project a write lands in when the tool call
+	// names none. serve sets it to the basename of the directory it was
+	// started in, which Claude Code and Codex both set to the project
+	// root. Empty keeps such writes project-less.
+	DefaultProject string
 }
 
 // NewServer constructs an MCP server with all Mnemos tools and resources

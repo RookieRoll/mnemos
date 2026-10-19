@@ -24,6 +24,8 @@ func withHome(t *testing.T) {
 	// Ensure Claude Code's config-dir override doesn't leak from the host
 	// environment and redirect installer targets outside the temp HOME.
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	// A developer's own MNEMOS_CONFIG must not steer tests at their real store.
+	t.Setenv("MNEMOS_CONFIG", "")
 }
 
 // captureStdout runs fn with os.Stdout redirected to a buffer, returns
@@ -191,5 +193,24 @@ func TestEmbedStatus(t *testing.T) {
 	})
 	if !strings.Contains(out, "provider:") {
 		t.Errorf("embed status missing provider line: %s", out)
+	}
+}
+
+func TestProjectFromDir(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "andre")
+	root := filepath.VolumeName(home) + string(filepath.Separator)
+	cases := []struct {
+		dir, want string
+	}{
+		{filepath.Join(home, "Code", "taken"), "taken"},
+		{filepath.Join(home, "Code", "3dsolarsystem.online") + string(filepath.Separator), "3dsolarsystem.online"},
+		{home, ""},
+		{root, ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := projectFromDir(tc.dir, home); got != tc.want {
+			t.Errorf("projectFromDir(%q) = %q, want %q", tc.dir, got, tc.want)
+		}
 	}
 }

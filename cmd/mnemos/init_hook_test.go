@@ -20,6 +20,8 @@ func setupClaudeCodeHome(t *testing.T) string {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	// A developer's own MNEMOS_CONFIG must not steer tests at their real store.
+	t.Setenv("MNEMOS_CONFIG", "")
 	// Seed .claude.json so DetectTargets picks up Claude Code (user).
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatalf("seed .claude.json: %v", err)
@@ -57,17 +59,29 @@ func TestRunInitWiresHookForClaudeCode(t *testing.T) {
 		t.Fatal("hooks key missing")
 	}
 	sessionStart, ok := hooks["SessionStart"].([]any)
-	if !ok || len(sessionStart) != 1 {
-		t.Fatalf("expected exactly one SessionStart group, got %v", sessionStart)
+	if !ok || len(sessionStart) != 2 {
+		t.Fatalf("expected the session-start and compaction-recovery groups, got %v", sessionStart)
 	}
-	group := sessionStart[0].(map[string]any)
-	if group["matcher"] != "startup" {
-		t.Errorf("matcher should be 'startup', got %v", group["matcher"])
+	want := map[string]string{
+		"startup|resume|clear": "prewarm",
+		"compact":              "prewarm --mode compaction_recovery",
 	}
-	inner := group["hooks"].([]any)
-	cmd := inner[0].(map[string]any)
-	if !strings.HasSuffix(cmd["command"].(string), "prewarm") {
-		t.Errorf("hook command should end with 'prewarm', got %v", cmd["command"])
+	for _, raw := range sessionStart {
+		group := raw.(map[string]any)
+		matcher, _ := group["matcher"].(string)
+		suffix, known := want[matcher]
+		if !known {
+			t.Errorf("unexpected SessionStart matcher %q", matcher)
+			continue
+		}
+		cmd := group["hooks"].([]any)[0].(map[string]any)["command"].(string)
+		if !strings.HasSuffix(cmd, suffix) {
+			t.Errorf("matcher %q: command should end with %q, got %q", matcher, suffix, cmd)
+		}
+		delete(want, matcher)
+	}
+	if len(want) != 0 {
+		t.Errorf("missing SessionStart groups: %v", want)
 	}
 }
 
@@ -211,35 +225,66 @@ func TestRunInitWiresPreToolGuardrailForClaudeCode(t *testing.T) {
 	}
 }
 
-func TestRunInitWiresCompactionHooksForClaudeCode(t *testing.T) {
+func TestRunInitRemovesObsoleteHooks(t *testing.T) {
 	home := setupClaudeCodeHome(t)
+	selfPath, _ := os.Executable()
+	settings := filepath.Join(home, "settings.json")
+
+	// What an install from before this release left behind.
+	for _, old := range obsoleteClaudeHooks(selfPath) {
+		if _, err := installer.InstallHook(settings, old.entry); err != nil {
+			t.Fatalf("seed %s: %v", old.label, err)
+		}
+	}
+	// A hook the user added themselves must survive.
+	userHook := installer.HookEntry{Event: "PreCompact", Command: "/usr/local/bin/notify-compact"}
+	if _, err := installer.InstallHook(settings, userHook); err != nil {
+		t.Fatalf("seed user hook: %v", err)
+	}
 
 	out := captureStdout(t, func() {
 		if err := runInit(context.Background(), nil); err != nil {
 			t.Fatalf("init: %v", err)
 		}
 	})
-	for _, want := range []string{"PreCompact hook wired", "PostCompact hook wired"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q in init output: %s", want, out)
+	for _, old := range obsoleteClaudeHooks(selfPath) {
+		if installer.IsHookInstalled(settings, old.entry) {
+			t.Errorf("%s must be removed", old.label)
+		}
+		if !strings.Contains(out, "removed "+old.label) {
+			t.Errorf("init output should report removing %s: %s", old.label, out)
 		}
 	}
+	if !installer.IsHookInstalled(settings, userHook) {
+		t.Error("a user's own PreCompact hook must be left alone")
+	}
 
-	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
-	var cfg map[string]any
-	_ = json.Unmarshal(data, &cfg)
-	hooks := cfg["hooks"].(map[string]any)
-	for _, event := range []string{"PreCompact", "PostCompact"} {
-		groups, ok := hooks[event].([]any)
-		if !ok || len(groups) != 1 {
-			t.Fatalf("expected one %s group, got %v", event, groups)
+	doctorOut := captureStdout(t, func() {
+		if err := runDoctor(context.Background(), nil); err != nil {
+			t.Errorf("doctor should pass once init has migrated the hooks: %v", err)
 		}
-		inner := groups[0].(map[string]any)["hooks"].([]any)
-		cmd := inner[0].(map[string]any)["command"].(string)
-		wantSuffix := strings.ToLower(strings.ReplaceAll(event, "Compact", "-compact"))
-		if !strings.HasSuffix(cmd, "hook "+wantSuffix) {
-			t.Errorf("%s command should end with %q, got %q", event, "hook "+wantSuffix, cmd)
-		}
+	})
+	if strings.Contains(doctorOut, "obsolete") {
+		t.Errorf("doctor must not report obsolete hooks after init: %s", doctorOut)
+	}
+}
+
+func TestRunDoctorFlagsObsoleteHooks(t *testing.T) {
+	home := setupClaudeCodeHome(t)
+	_ = captureStdout(t, func() { _ = runInit(context.Background(), nil) })
+	selfPath, _ := os.Executable()
+	settings := filepath.Join(home, "settings.json")
+	if _, err := installer.InstallHook(settings, obsoleteClaudeHooks(selfPath)[1].entry); err != nil {
+		t.Fatalf("seed obsolete hook: %v", err)
+	}
+
+	var err error
+	out := captureStdout(t, func() { err = runDoctor(context.Background(), nil) })
+	if err == nil {
+		t.Error("doctor must fail while an obsolete hook is installed")
+	}
+	if !strings.Contains(out, "obsolete PreCompact hook") {
+		t.Errorf("doctor should name the obsolete hook: %s", out)
 	}
 }
 

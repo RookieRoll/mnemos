@@ -28,6 +28,9 @@ func LoadRetrievalFixture(path string) (*RetrievalFixture, error) {
 			f.Probes[i].ExpectInTop = 5
 		}
 	}
+	if err := validateCases(f.Cases); err != nil {
+		return nil, err
+	}
 	return &f, nil
 }
 
@@ -91,4 +94,53 @@ func LoadBehaviorFixture(path string) (*BehaviorFixture, error) {
 		}
 	}
 	return &f, nil
+}
+
+func validateCases(cases []RetrievalCase) error {
+	names := make(map[string]bool)
+	for i := range cases {
+		c := &cases[i]
+		if c.Name == "" || names[c.Name] {
+			return fmt.Errorf("verify: case %d requires a unique name", i)
+		}
+		names[c.Name] = true
+		if len(c.Queries) == 0 {
+			return fmt.Errorf("verify: case %s requires queries", c.Name)
+		}
+		for _, q := range c.Queries {
+			if q == "" {
+				return fmt.Errorf("verify: case %s has an empty query", c.Name)
+			}
+		}
+		if c.ExpectInTop < 0 {
+			return fmt.Errorf("verify: case %s has negative cutoff", c.Name)
+		}
+		if c.ExpectInTop == 0 {
+			c.ExpectInTop = 5
+		}
+		if c.QueryMode == "" {
+			c.QueryMode = "all"
+		}
+		if c.QueryMode != "all" && c.QueryMode != "any" {
+			return fmt.Errorf("verify: case %s query_mode must be any or all", c.Name)
+		}
+		if len(c.RelevantIDs)+len(c.ForbiddenIDs) == 0 && c.ExpectNoInjection == nil {
+			return fmt.Errorf("verify: case %s requires labels or delivery expectation", c.Name)
+		}
+		labels := make(map[string]bool)
+		for _, id := range c.RelevantIDs {
+			if id == "" || labels[id] {
+				return fmt.Errorf("verify: case %s invalid relevant ID", c.Name)
+			}
+			labels[id] = true
+		}
+		forbidden := make(map[string]bool)
+		for _, id := range c.ForbiddenIDs {
+			if id == "" || labels[id] || forbidden[id] {
+				return fmt.Errorf("verify: case %s overlapping or invalid forbidden ID", c.Name)
+			}
+			forbidden[id] = true
+		}
+	}
+	return nil
 }

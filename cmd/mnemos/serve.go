@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/polyxmedia/mnemos/internal/api"
 	"github.com/polyxmedia/mnemos/internal/config"
@@ -117,6 +118,7 @@ func runServe(ctx context.Context, args []string) error {
 			}
 			return fi.Size(), nil
 		},
+		DefaultProject: serverProject(),
 	})
 
 	logger.Info("mnemos serve (stdio)", "version", version.Version, "db", cfg.Storage.Path)
@@ -124,4 +126,32 @@ func runServe(ctx context.Context, args []string) error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// serverProject names the project writes default to: the basename of the
+// directory the server was started in. Claude Code and Codex start stdio
+// servers in the project root; a client that starts them in / or the home
+// directory has no project to offer, and writes stay project-less.
+func serverProject() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	home, _ := os.UserHomeDir()
+	return projectFromDir(cwd, home)
+}
+
+// projectFromDir is serverProject's pure core.
+func projectFromDir(dir, home string) string {
+	if dir == "" {
+		return ""
+	}
+	dir = filepath.Clean(dir)
+	if filepath.Dir(dir) == dir { // filesystem or volume root
+		return ""
+	}
+	if home != "" && dir == filepath.Clean(home) {
+		return ""
+	}
+	return filepath.Base(dir)
 }

@@ -16,7 +16,7 @@ func (d *DB) Sessions() session.Store { return &sessStore{db: d.sql} }
 
 type sessStore struct{ db *sql.DB }
 
-const sessColumns = `id, agent_id, project, goal, summary, reflection, status, outcome_tags, started_at, ended_at`
+const sessColumns = `id, agent_id, project, goal, summary, reflection, status, outcome_tags, started_at, ended_at, host_session_id`
 
 func (s *sessStore) Insert(ctx context.Context, sess *session.Session) error {
 	status := sess.Status
@@ -28,8 +28,8 @@ func (s *sessStore) Insert(ctx context.Context, sess *session.Session) error {
 		return fmt.Errorf("marshal outcome_tags: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, agent_id, project, goal, status, outcome_tags, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO sessions (id, agent_id, project, goal, status, outcome_tags, started_at, host_session_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID,
 		sess.AgentID,
 		nullableStr(sess.Project),
@@ -37,6 +37,7 @@ func (s *sessStore) Insert(ctx context.Context, sess *session.Session) error {
 		string(status),
 		string(tags),
 		sess.StartedAt.UTC(),
+		nullableStr(sess.HostSessionID),
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -64,8 +65,8 @@ func (s *sessStore) Restore(ctx context.Context, sess *session.Session) (bool, e
 	}
 	res, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO sessions
-			(id, agent_id, project, goal, summary, reflection, status, outcome_tags, started_at, ended_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			(id, agent_id, project, goal, summary, reflection, status, outcome_tags, started_at, ended_at, host_session_id)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		sess.ID,
 		agentID,
 		nullableStr(sess.Project),
@@ -76,6 +77,7 @@ func (s *sessStore) Restore(ctx context.Context, sess *session.Session) (bool, e
 		string(tags),
 		sess.StartedAt.UTC(),
 		nullableTime(sess.EndedAt),
+		nullableStr(sess.HostSessionID),
 	)
 	if err != nil {
 		return false, fmt.Errorf("restore session: %w", err)
@@ -157,6 +159,25 @@ func (s *sessStore) Recent(ctx context.Context, agentID string, limit int) ([]se
 	return out, rows.Err()
 }
 
+func (s *sessStore) RecentInProject(ctx context.Context, agentID, project string, limit int) ([]session.Session, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	query := `SELECT ` + sessColumns + ` FROM sessions WHERE project = ?`
+	args := []any{project}
+	if agentID != "" {
+		query += ` AND agent_id = ?`
+		args = append(args, agentID)
+	}
+	query += ` ORDER BY started_at DESC LIMIT ?`
+	args = append(args, limit)
+	out, err := s.list(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("recent in project: %w", err)
+	}
+	return out, nil
+}
+
 // SetGoalIfEmpty updates goal only when the session is still open (ended_at
 // IS NULL) and has no goal yet (NULL or empty string). A missed update is
 // not an error — the UserPromptSubmit hook calls this on every prompt and
@@ -186,10 +207,31 @@ func (s *sessStore) ListOpen(ctx context.Context, project string) ([]session.Ses
 		args = append(args, project)
 	}
 	query += ` ORDER BY started_at DESC`
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	out, err := s.list(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list open: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sessStore) ListOpenByHost(ctx context.Context, hostSessionID string) ([]session.Session, error) {
+	if hostSessionID == "" {
+		return nil, nil
+	}
+	out, err := s.list(ctx, `SELECT `+sessColumns+` FROM sessions
+		 WHERE ended_at IS NULL AND host_session_id = ?
+		 ORDER BY started_at DESC`, hostSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list open by host: %w", err)
+	}
+	return out, nil
+}
+
+// list runs a session query and scans every row.
+func (s *sessStore) list(ctx context.Context, query string, args ...any) ([]session.Session, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -229,13 +271,13 @@ type scanner interface {
 
 func scanSession(row scanner) (*session.Session, error) {
 	var sess session.Session
-	var project, goal, summary, reflection sql.NullString
+	var project, goal, summary, reflection, hostSessionID sql.NullString
 	var status string
 	var outcomeTags string
 	var endedAt sql.NullTime
 	if err := row.Scan(
 		&sess.ID, &sess.AgentID, &project, &goal, &summary, &reflection,
-		&status, &outcomeTags, &sess.StartedAt, &endedAt,
+		&status, &outcomeTags, &sess.StartedAt, &endedAt, &hostSessionID,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, session.ErrNotFound
@@ -246,6 +288,7 @@ func scanSession(row scanner) (*session.Session, error) {
 	sess.Goal = goal.String
 	sess.Summary = summary.String
 	sess.Reflection = reflection.String
+	sess.HostSessionID = hostSessionID.String
 	sess.Status = session.Status(status)
 	_ = json.Unmarshal([]byte(outcomeTags), &sess.OutcomeTags)
 	sess.EndedAt = nullableTimePtr(endedAt)

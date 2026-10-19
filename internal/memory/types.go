@@ -136,6 +136,10 @@ func (l LinkType) Valid() bool {
 // An observation is "live" when InvalidatedAt is nil and ValidUntil is either
 // nil or in the future.
 type Observation struct {
+	// TopicKey is optional scoped grouping, never an implicit replacement.
+	TopicKey string `json:"topic_key,omitempty"`
+	// Evidence belongs to this version; checks are caller-reported metadata.
+	Evidence       []EvidenceReference `json:"evidence,omitempty"`
 	ID             string
 	SessionID      string
 	AgentID        string
@@ -212,6 +216,14 @@ func (o Observation) Live(t time.Time) bool {
 // SaveInput is the narrow set of fields an agent provides when calling save.
 // The service fills ID, timestamps, defaults, and session binding.
 type SaveInput struct {
+	// TopicKey groups related assertions without invalidating another member.
+	TopicKey string
+	// ReplacesID names the expected live target for atomic replacement.
+	ReplacesID string
+	// UnpinReplacement explicitly permits dropping an inherited pin.
+	UnpinReplacement bool
+	// Evidence stores bounded locators without fetching their source material.
+	Evidence   []EvidenceReference
 	SessionID  string
 	AgentID    string
 	Project    string
@@ -255,6 +267,8 @@ type SaveResult struct {
 // SearchInput parameterises a search query. Query is the BM25 pattern; filters
 // narrow the candidate set before ranking.
 type SearchInput struct {
+	// TopicKey is an optional exact, case-sensitive topic filter.
+	TopicKey      string
 	Query         string
 	AgentID       string
 	Project       string
@@ -372,6 +386,8 @@ type RecentSession struct {
 // link-graph queries (e.g. monitor_contradiction's scan) so callers do
 // not have to round-trip to observations on every edge they inspect.
 type LinkEdge struct {
+	// ReplacementHash preserves original replacement request identity for replay.
+	ReplacementHash string `json:"replacement_hash,omitempty"`
 	LinkType        LinkType
 	SourceID        string
 	SourceTitle     string

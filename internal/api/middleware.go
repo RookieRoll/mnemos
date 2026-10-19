@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/polyxmedia/mnemos/internal/memory"
 )
 
 // withAuth enforces a bearer token on every route except the unauthenticated
@@ -94,6 +96,10 @@ func jsonIn[In any, Out any](
 		}
 		status, out, err := fn(r, in)
 		if err != nil {
+			if errors.Is(err, memory.ErrConflict) {
+				writeJSON(w, http.StatusConflict, map[string]string{"code": "conflict", "error": err.Error()})
+				return
+			}
 			if notFound != nil && errors.Is(err, notFound) {
 				writeErr(w, http.StatusNotFound, "not found")
 				return
@@ -119,6 +125,10 @@ func pathOnly[Out any](
 	return func(w http.ResponseWriter, r *http.Request) {
 		status, out, err := fn(r)
 		if err != nil {
+			if errors.Is(err, memory.ErrConflict) {
+				writeJSON(w, http.StatusConflict, map[string]string{"code": "conflict", "error": err.Error()})
+				return
+			}
 			if notFound != nil && errors.Is(err, notFound) {
 				writeErr(w, http.StatusNotFound, "not found")
 				return

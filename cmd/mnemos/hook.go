@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/memory"
@@ -33,6 +35,24 @@ func projectFromHook(in hookInput) string {
 		return ""
 	}
 	return filepath.Base(cwd)
+}
+
+// resolveHookSession keeps the two payload ID contracts distinct. Claude sends
+// its host conversation ID; neutral consumers send the Mnemos ID prewarm returned.
+// An explicit neutral ID must never fall back to another terminal's session.
+func resolveHookSession(ctx context.Context, d *deps, in hookInput, neutral bool) (*session.Session, error) {
+	project := projectFromHook(in)
+	if neutral && in.SessionID != "" {
+		sess, err := d.sess.Get(ctx, in.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		if sess.EndedAt != nil || sess.Project != project {
+			return nil, session.ErrNotFound
+		}
+		return sess, nil
+	}
+	return d.sess.Resolve(ctx, in.SessionID, project)
 }
 
 // runHook is the parent dispatcher for harness-side hook subcommands. Each
@@ -88,6 +108,8 @@ func hookFlagSet(sub string) (*flag.FlagSet, hookFlags) {
 //     was saved precisely because LLMs skip optional tool calls; this
 //     promotes mnemos from optional to ambient.
 //
+// Turns the user did not type (see isSyntheticPrompt) get neither.
+//
 // Both effects degrade silently. UserPromptSubmit stdout is injected into
 // the model context, so a failed search must produce zero stdout.
 func runHookUserPrompt(ctx context.Context, args []string) error {
@@ -96,7 +118,7 @@ func runHookUserPrompt(ctx context.Context, args []string) error {
 		return err
 	}
 	in := flags.resolve()
-	result := collectUserPrompt(ctx, in)
+	result := collectUserPrompt(ctx, in, flags.neutral())
 	flags.write(hookResult{
 		SessionID: result.SessionID,
 		Context:   result.context(),
@@ -138,8 +160,8 @@ type userPromptResult struct {
 // suppression window, the injection-log write, and the surfaced counter.
 // It holds no writer, so a second harness can consume the same decisions
 // without reimplementing any of them.
-func collectUserPrompt(ctx context.Context, in hookInput) userPromptResult {
-	if in.Prompt == "" {
+func collectUserPrompt(ctx context.Context, in hookInput, neutral ...bool) userPromptResult {
+	if in.Prompt == "" || isSyntheticPrompt(in.Prompt) {
 		return userPromptResult{}
 	}
 
@@ -150,7 +172,8 @@ func collectUserPrompt(ctx context.Context, in hookInput) userPromptResult {
 	}
 	defer d.close()
 
-	sess, err := d.sess.Current(ctx, "")
+	project := projectFromHook(in)
+	sess, err := resolveHookSession(ctx, d, in, len(neutral) > 0 && neutral[0])
 	switch {
 	case err != nil && !errors.Is(err, session.ErrNotFound):
 		fmt.Fprintln(os.Stderr, "mnemos hook user-prompt:", err)
@@ -164,7 +187,7 @@ func collectUserPrompt(ctx context.Context, in hookInput) userPromptResult {
 	if sess != nil {
 		sessID, agentID = sess.ID, sess.AgentID
 	}
-	m := collectPromptMemory(ctx, d, in.Prompt, agentID, projectFromHook(in), sessID)
+	m := collectPromptMemory(ctx, d, in.Prompt, agentID, project, sessID)
 	return userPromptResult{
 		SessionID:   sessID,
 		MemoryBlock: formatPromptMemory(m),
@@ -175,6 +198,93 @@ func collectUserPrompt(ctx context.Context, in hookInput) userPromptResult {
 // maxAutoGoalChars caps the goal we backfill from a user prompt. Goals are
 // shown in prewarm output and session lists, so we keep them one-line.
 const maxAutoGoalChars = 120
+
+// isSyntheticPrompt reports whether a UserPromptSubmit prompt is a turn the
+// harness generated rather than one the user typed: a background task
+// notification, a report from a subagent or another session, the summary
+// Claude Code writes after a compaction, or a slash-command echo. The hook
+// payload carries no field that tells these apart, so the check reads the
+// markers they open with.
+//
+// Between 2026-07-27 and 2026-09-30 these were 17% of prompt_hook events
+// and 24 of the 30 capture directives. A subagent's report is full of
+// "we tried" and "going forward", which the capture patterns read as the
+// user correcting the agent.
+func isSyntheticPrompt(prompt string) bool {
+	p := strings.TrimSpace(prompt)
+	prefixes := []string{
+		"<task-notification>",
+		"<agent-message",
+		"Another Claude session sent a message",
+		"This session is being continued from a previous conversation",
+		"[SYSTEM NOTIFICATION",
+		"<command-name>",
+		"<command-message>",
+		"<local-command-stdout>",
+		"[Request interrupted by user",
+	}
+	for _, pre := range prefixes {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	// Notifications can arrive behind a short harness banner, so the
+	// structural tags also count when they appear near the top.
+	head := p
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	return strings.Contains(head, "<task-notification>") || strings.Contains(head, "<agent-message")
+}
+
+// minPromptContentWords is how many content words a prompt needs before
+// its text is worth searching on. Every prompt token becomes an OR'd
+// prefix term in the FTS query, so "yes", "show me" or "so we good?"
+// matched stored memories on filler alone. Replaying 70 such prompts from
+// real sessions injected memories into 67 of them.
+const minPromptContentWords = 2
+
+// hasSearchableContent reports whether prompt carries at least
+// minPromptContentWords words of three or more letters (any script) that
+// are not English conversational filler. Scripts commonly written without
+// spaces also qualify with four CJK letters; treating a whole Chinese task
+// as one word would suppress meaningful prompts while retaining English ones.
+func hasSearchableContent(prompt string) bool {
+	cjk := 0
+	for _, r := range prompt {
+		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
+			cjk++
+			if cjk >= 4 {
+				return true
+			}
+		}
+	}
+	filler := map[string]bool{
+		"yes": true, "yeah": true, "yep": true, "nope": true, "okay": true,
+		"please": true, "thanks": true, "thank": true, "sure": true, "cool": true,
+		"nice": true, "great": true, "good": true, "fine": true, "done": true,
+		"the": true, "and": true, "but": true, "for": true, "with": true,
+		"you": true, "your": true, "that": true, "this": true, "then": true,
+		"now": true, "can": true, "lets": true, "let's": true, "what": true,
+		"how": true, "why": true, "show": true, "just": true, "ahead": true,
+		"keep": true, "going": true, "continue": true, "carry": true, "all": true,
+		"are": true, "was": true, "did": true, "does": true, "got": true,
+		"get": true, "not": true, "it's": true, "its": true, "too": true,
+	}
+	n := 0
+	for _, w := range strings.FieldsFunc(strings.ToLower(prompt), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\''
+	}) {
+		if utf8.RuneCountInString(w) < 3 || filler[w] {
+			continue
+		}
+		n++
+		if n >= minPromptContentWords {
+			return true
+		}
+	}
+	return false
+}
 
 // captureSignal names what kind of write tool the user's phrasing is
 // asking for. Returned by detectCaptureShape; consumed by
@@ -270,7 +380,12 @@ const promptMemoryMaxHits = 3
 // in the injection log (channel prompt_hook) so surfaced-vs-used ratios
 // cover this path too.
 func collectPromptMemory(ctx context.Context, d *deps, prompt, agentID, project, sessionID string) promptMemory {
-	if prompt == "" || d == nil {
+	return collectPromptMemoryAt(ctx, d, prompt, agentID, project, sessionID, time.Now(), true)
+}
+
+// collectPromptMemoryAt shares the actual gate with read-only evaluation.
+func collectPromptMemoryAt(ctx context.Context, d *deps, prompt, agentID, project, sessionID string, now time.Time, record bool) promptMemory {
+	if d == nil || !hasSearchableContent(prompt) {
 		return promptMemory{}
 	}
 	// PreferProject, not Project: a hard filter would drop project-less
@@ -289,7 +404,7 @@ func collectPromptMemory(ctx context.Context, d *deps, prompt, agentID, project,
 	// single prompt for as long as the topic holds — 6879 prompt_hook
 	// injections drew on 61 distinct memories before this existed.
 	injStore := d.db.Injections()
-	suppressed := injection.Suppressed(ctx, injStore, injection.KindObservation, project, time.Now())
+	suppressed := injection.Suppressed(ctx, injStore, injection.KindObservation, project, now)
 
 	kept := hits[:0]
 	for _, h := range hits {
@@ -308,9 +423,11 @@ func collectPromptMemory(ctx context.Context, d *deps, prompt, agentID, project,
 	for _, h := range kept {
 		refs = append(refs, injection.Ref{Kind: injection.KindObservation, ID: h.Observation.ID})
 	}
-	_ = injection.NewLogger(injStore, nil).
-		Log(ctx, injection.ChannelPromptHook, agentID, project, sessionID, refs)
-	_ = d.mem.RecordSurfaced(ctx, refIDs(refs))
+	if record {
+		_ = injection.NewLogger(injStore, nil).
+			Log(ctx, injection.ChannelPromptHook, agentID, project, sessionID, refs)
+		_ = d.mem.RecordSurfaced(ctx, refIDs(refs))
+	}
 	return promptMemory{Hits: kept}
 }
 
@@ -372,7 +489,7 @@ func runHookPostTool(ctx context.Context, args []string) error {
 	// Best-effort session stamp. If nothing is open we still record the
 	// touch so the heat map does not lose data; SessionID just stays empty.
 	var sessID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+	if sess, err := resolveHookSession(ctx, d, in, flags.neutral()); err == nil && sess != nil {
 		sessID = sess.ID
 	} else if err != nil && !errors.Is(err, session.ErrNotFound) {
 		fmt.Fprintln(os.Stderr, "mnemos hook post-tool:", err)
@@ -441,11 +558,12 @@ func filePathFromToolInput(m map[string]any) string {
 	return ""
 }
 
-// runHookSessionEnd handles Claude Code's SessionEnd event. Closes every
-// open mnemos session for the project (SessionStart hooks installed at
-// both user and project scope each open one, so there can be twins) with
-// a summary stitched from recent activity and a status derived from the
-// reason Claude Code supplied. No-ops when the agent already called
+// runHookSessionEnd handles Claude Code's SessionEnd event. Closes the
+// session(s) this conversation opened, found by the payload's session_id
+// (duplicate SessionStart installs can leave twins carrying the same one),
+// with a summary of that session's own activity and a status derived from
+// the reason Claude Code supplied. Another terminal's session in the same
+// project stays open. No-ops when the agent already called
 // mnemos_session_end properly — session.Close guards on ended_at IS NULL.
 // Finishes with a stale sweep so sessions orphaned by killed terminals
 // (no SessionEnd ever fires) don't stay open forever.
@@ -465,34 +583,28 @@ func runHookSessionEnd(ctx context.Context, args []string) error {
 	defer d.close()
 
 	proj := projectFromHook(in)
-	status := sessionStatusFromReason(in.Reason)
-	tags := []string{"auto-closed:" + sanitizeReason(in.Reason)}
-
-	if proj == "" {
-		// No project derivable: closing all open sessions would hit other
-		// projects' live sessions, so fall back to the newest one only.
-		if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
-			closeSessionQuietly(ctx, d, session.CloseInput{
-				ID: sess.ID, Summary: deriveSessionSummary(ctx, d, sess.ID),
-				Status: status, OutcomeTags: tags,
-			})
-		} else if err != nil && !errors.Is(err, session.ErrNotFound) {
-			fmt.Fprintln(os.Stderr, "mnemos hook session-end:", err)
+	closeIn := session.CloseInput{
+		Status:      sessionStatusFromReason(in.Reason),
+		OutcomeTags: []string{"auto-closed:" + sanitizeReason(in.Reason)},
+	}
+	// The summary is per session, so it has to be derived before the
+	// close; the resolved session is the one CloseForHost will pick.
+	if sess, err := resolveHookSession(ctx, d, in, flags.neutral()); err == nil && sess != nil {
+		closeIn.Summary = deriveSessionSummary(ctx, d, sess.ID)
+	}
+	var closeErr error
+	if flags.neutral() && in.SessionID != "" {
+		if sess, err := resolveHookSession(ctx, d, in, true); err == nil {
+			closeIn.ID = sess.ID
+			closeErr = d.sess.Close(ctx, closeIn)
+		} else if !errors.Is(err, session.ErrNotFound) {
+			closeErr = err
 		}
-		sweepStaleSessions(ctx, d)
-		return nil
+	} else {
+		_, closeErr = d.sess.CloseForHost(ctx, in.SessionID, proj, closeIn)
 	}
-
-	open, err := d.sess.ListOpen(ctx, proj)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mnemos hook session-end:", err)
-		return nil
-	}
-	for _, sess := range open {
-		closeSessionQuietly(ctx, d, session.CloseInput{
-			ID: sess.ID, Summary: deriveSessionSummary(ctx, d, sess.ID),
-			Status: status, OutcomeTags: tags,
-		})
+	if closeErr != nil {
+		fmt.Fprintln(os.Stderr, "mnemos hook session-end:", closeErr)
 	}
 
 	sweepStaleSessions(ctx, d)
@@ -536,10 +648,10 @@ func sweepStaleSessions(ctx context.Context, d *deps) {
 	}
 }
 
-// deriveSessionSummary builds a one-line recap from recent activity on the
-// session: counts observations and touches, names the top files. Best
-// effort — returns "" if either query fails. A small, deterministic
-// summary beats an empty close.
+// deriveSessionSummary builds a one-line recap from the session's own
+// activity: counts its observations and names the files it touched most.
+// Best effort — returns "" if the observation query fails. A small,
+// deterministic summary beats an empty close.
 func deriveSessionSummary(ctx context.Context, d *deps, sessID string) string {
 	obs, err := d.db.Observations().ListBySession(ctx, sessID)
 	if err != nil {
@@ -549,7 +661,7 @@ func deriveSessionSummary(ctx context.Context, d *deps, sessID string) string {
 	if n := len(obs); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d observation(s)", n))
 	}
-	if hot, err := d.db.Touches().Hot(ctx, "", "", 5); err == nil && len(hot) > 0 {
+	if hot, err := d.db.Touches().SessionHot(ctx, sessID, 5); err == nil && len(hot) > 0 {
 		files := make([]string, 0, len(hot))
 		for _, h := range hot {
 			files = append(files, filepath.Base(h.Path))
@@ -617,7 +729,7 @@ func runHookPreTool(ctx context.Context, args []string) error {
 		flags.write(hookResult{}, func() {})
 		return nil
 	}
-	context := formatPreToolMemory(collectPreToolMemory(ctx, in))
+	context := formatPreToolMemory(collectPreToolMemory(ctx, in, flags.neutral()))
 	// No session_id in this envelope: a pre-tool invocation neither
 	// establishes nor reuses a session, it only observes one. The session
 	// identifier a harness scopes its writes to comes from prewarm.
@@ -643,12 +755,16 @@ const preToolMemoryMaxHits = 3
 // job, decided separately in decidePreTool. The caller only reaches here
 // when the guardrail let the call through, which is why a blocked edit
 // carries no memory: the call was refused, so there is nothing to inform.
-func collectPreToolMemory(ctx context.Context, in hookInput) preToolMemory {
+func collectPreToolMemory(ctx context.Context, in hookInput, neutral ...bool) preToolMemory {
 	path := filePathFromToolInput(in.ToolInput)
 	if path == "" {
 		return preToolMemory{}
 	}
-	query := pathQueryTokens(path)
+	root := in.CWD
+	if root == "" {
+		root, _ = os.Getwd()
+	}
+	query := pathQueryTokens(path, root)
 	if query == "" {
 		return preToolMemory{}
 	}
@@ -660,9 +776,10 @@ func collectPreToolMemory(ctx context.Context, in hookInput) preToolMemory {
 	}
 	defer d.close()
 
+	proj := projectFromHook(in)
 	hits, err := d.mem.Search(ctx, memory.SearchInput{
 		Query:   query,
-		Project: projectFromHook(in),
+		Project: proj,
 		Limit:   preToolMemoryMaxHits * 2,
 	})
 	if err != nil || len(hits) == 0 {
@@ -670,12 +787,11 @@ func collectPreToolMemory(ctx context.Context, in hookInput) preToolMemory {
 	}
 
 	var sessID, agentID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+	if sess, err := resolveHookSession(ctx, d, in, len(neutral) > 0 && neutral[0]); err == nil && sess != nil {
 		sessID, agentID = sess.ID, sess.AgentID
 	}
 
 	injStore := d.db.Injections()
-	proj := projectFromHook(in)
 	suppressed := injection.Suppressed(ctx, injStore, injection.KindObservation, proj, time.Now())
 
 	var kept []memory.SearchResult
@@ -708,23 +824,48 @@ func collectPreToolMemory(ctx context.Context, in hookInput) preToolMemory {
 	return preToolMemory{Path: path, Hits: kept}
 }
 
-// pathQueryTokens turns a file path into a search query: the last few
-// path segments split on separators, lowercased. "/Users/x/repo/internal/
-// storage/sessions.go" → "internal storage sessions go". The FTS layer
-// ORs the tokens, so any segment matching a correction's trigger context
-// or content surfaces it.
-func pathQueryTokens(p string) string {
+// pathQueryTokens turns the file an edit is about to write into a search
+// query: its path relative to the project root, last few segments split
+// on separators and punctuation, lowercased, with the extension and
+// generic layout directories dropped. "/Users/x/Code/repo/internal/
+// storage/sessions.go" under root "/Users/x/Code/repo" → "storage
+// sessions". The FTS layer ORs the tokens, so any segment matching a
+// correction's trigger context or content surfaces it.
+//
+// It used to keep the project directory and the extension, so the query
+// for any wayframer PHP file contained "wayframer" and "php" and matched
+// every memory mentioning either: "use DB_DATABASE=wayframer" fired on
+// controllers, models and markdown notes alike.
+func pathQueryTokens(p, root string) string {
+	if root != "" && filepath.IsAbs(p) {
+		if rel, err := filepath.Rel(root, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			p = rel
+		}
+	}
 	segs := strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })
+	if len(segs) == 0 {
+		return ""
+	}
 	if len(segs) > 4 {
 		segs = segs[len(segs)-4:]
+	}
+	last := len(segs) - 1
+	segs[last] = strings.TrimSuffix(segs[last], filepath.Ext(segs[last]))
+	// Layout directories say where a file lives in any project of its
+	// kind, not what it is about.
+	generic := map[string]bool{
+		"src": true, "internal": true, "cmd": true, "pkg": true, "lib": true, "app": true,
+		"resources": true, "js": true, "views": true, "components": true,
+		"composables": true, "public": true, "assets": true,
 	}
 	var toks []string
 	for _, s := range segs {
 		for _, t := range strings.FieldsFunc(s, func(r rune) bool {
 			return r == '.' || r == '_' || r == '-'
 		}) {
-			if len(t) > 1 {
-				toks = append(toks, strings.ToLower(t))
+			t = strings.ToLower(t)
+			if len(t) > 1 && !generic[t] {
+				toks = append(toks, t)
 			}
 		}
 	}
@@ -878,19 +1019,19 @@ func walkStrings(v any, dst *[]string) {
 	}
 }
 
-// runHookPreCompact handles Claude Code's PreCompact event. Emits a
-// prewarm recovery block to stderr, which Claude Code feeds back into
-// the model's context — so mnemos state survives through the compaction
-// instead of being silently dropped. Without this, the agent keeps
-// working for at least one more turn on context that has lost all
-// mnemos observations, touches, and session goal.
+// runHookPreCompact keeps legacy Claude hooks silent: recovery now reaches
+// Claude through SessionStart(compact). Explicit neutral consumers may still
+// request a recovery block as data, without pretending stderr was surfaced.
 func runHookPreCompact(ctx context.Context, args []string) error {
 	fs, flags := hookFlagSet("pre-compact")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if !flags.neutral() {
+		return nil
+	}
 	in := flags.resolve()
-	block := compactionRecoveryBlock(ctx, in, "PreCompact")
+	block := compactionRecoveryBlock(ctx, in, "PreCompact", true)
 	flags.write(hookResult{Context: block}, func() {
 		if block != "" {
 			fmt.Fprintln(os.Stderr, block)
@@ -899,19 +1040,17 @@ func runHookPreCompact(ctx context.Context, args []string) error {
 	return nil
 }
 
-// runHookPostCompact handles Claude Code's PostCompact event. Emits the
-// same block to stderr for terminal visibility; unlike PreCompact,
-// PostCompact stderr is shown to the user only (not fed back to Claude).
-// The side effect a future Claude Code release might surface it; today
-// the primary value is a transcript-level record that compaction
-// happened and what mnemos looked like at that moment.
+// runHookPostCompact mirrors the neutral-only recovery path above.
 func runHookPostCompact(ctx context.Context, args []string) error {
 	fs, flags := hookFlagSet("post-compact")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if !flags.neutral() {
+		return nil
+	}
 	in := flags.resolve()
-	block := compactionRecoveryBlock(ctx, in, "PostCompact")
+	block := compactionRecoveryBlock(ctx, in, "PostCompact", true)
 	flags.write(hookResult{Context: block}, func() {
 		if block != "" {
 			fmt.Fprintln(os.Stderr, block)
@@ -928,7 +1067,7 @@ func runHookPostCompact(ctx context.Context, args []string) error {
 // It takes the already-resolved payload so the payload flag and stdin
 // share one path, and it holds no writer so the neutral format can carry
 // the same text as data.
-func compactionRecoveryBlock(ctx context.Context, in hookInput, event string) string {
+func compactionRecoveryBlock(ctx context.Context, in hookInput, event string, neutral ...bool) string {
 	d, err := loadDeps(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mnemos hook "+strings.ToLower(event)+":", err)
@@ -939,7 +1078,7 @@ func compactionRecoveryBlock(ctx context.Context, in hookInput, event string) st
 	proj := projectFromHook(in)
 
 	var sessID string
-	if sess, err := d.sess.Current(ctx, ""); err == nil && sess != nil {
+	if sess, err := resolveHookSession(ctx, d, in, len(neutral) > 0 && neutral[0]); err == nil && sess != nil {
 		sessID = sess.ID
 	} else if err != nil && !errors.Is(err, session.ErrNotFound) {
 		fmt.Fprintln(os.Stderr, "mnemos hook "+strings.ToLower(event)+":", err)

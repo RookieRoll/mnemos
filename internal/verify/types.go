@@ -12,6 +12,7 @@ package verify
 // RetrievalFixture is the YAML schema for retrieval probes.
 type RetrievalFixture struct {
 	Probes []RetrievalProbe `yaml:"probes"`
+	Cases  []RetrievalCase  `yaml:"cases,omitempty"`
 }
 
 // RetrievalProbe asserts that a specific memory ID surfaces in the top
@@ -22,6 +23,21 @@ type RetrievalProbe struct {
 	Queries     []string `yaml:"queries"`
 	ExpectInTop int      `yaml:"expect_in_top"`
 	Project     string   `yaml:"project,omitempty"`
+}
+
+// RetrievalCase labels a query family without treating unlabelled hits as negatives.
+type RetrievalCase struct {
+	Name              string   `yaml:"name"`
+	Queries           []string `yaml:"queries"`
+	RelevantIDs       []string `yaml:"relevant_ids,omitempty"`
+	ForbiddenIDs      []string `yaml:"forbidden_ids,omitempty"`
+	ExpectInTop       int      `yaml:"expect_in_top,omitempty"`
+	QueryMode         string   `yaml:"query_mode,omitempty"`
+	Project           string   `yaml:"project,omitempty"`
+	AgentID           string   `yaml:"agent_id,omitempty"`
+	IncludeRaw        bool     `yaml:"include_raw,omitempty"`
+	IncludeStale      bool     `yaml:"include_stale,omitempty"`
+	ExpectNoInjection *bool    `yaml:"expect_no_injection,omitempty"`
 }
 
 // BehaviorFixture is the YAML schema for behavior replay scenarios. Arms
