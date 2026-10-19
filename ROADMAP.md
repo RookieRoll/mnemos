@@ -91,6 +91,18 @@ New candidates from the pass, ranked by leverage × novelty × feasibility:
 - [ ] **Governance scorecard** — self-assess against the nine mnemonic-sovereignty primitives (arXiv 2604.16548: no published architecture covers all nine), publish the scorecard, close the cheap gaps. Positioning artifact and roadmap in one; the window is narrowing.
 - [ ] **Agent-synthesized tools as skills** — *parked pending verification*: the claim that Live-SWE-agent doesn't persist evolved tools cross-task was refuted in adversarial review, so verify their persistence story before treating this as differentiation.
 
+## Deferred for evaluation — October 2026
+
+- [ ] **Optional bundled local embeddings alongside external providers** — recorded 2026-10-19 for later consideration; no implementation or release is scheduled. The goal is easier offline/intranet installation while retaining the existing Ollama and OpenAI-compatible provider options.
+
+  **Direction to evaluate:** distribute model weights and a separate, managed local inference runtime as an optional bundle behind the `Embedder` boundary. Keep the main Mnemos binary pure Go and CGO-free. Compare this with the operational cost of using an existing external endpoint before choosing a model or runtime. Model selection, packaging, supported platforms, and resource limits remain open.
+
+  **Prerequisites:** define an embedding profile covering model revision, dimensions, and query/document encoding rules; validate vectors and prevent incompatible profiles from contributing to recall or ranking. Add a bounded, cancellable backfill/rebuild path for missing or incompatible vectors so failed batches cannot loop indefinitely. Preserve BM25 fallback and report the retrieval mode that actually ran.
+
+  **Evaluation gate:** benchmark Chinese/English coding-memory retrieval against BM25 and the existing external-provider path. Measure retrieval quality, cold-start and query latency, RAM/CPU use, bundle size, and multi-agent runtime sharing. Verify offline installation/update, model and runtime licenses, checksums, and platform compatibility. Proceed to an OpenSpec proposal only if measured benefit justifies distribution and maintenance costs; no efficiency gain is assumed.
+
+  **Storage and lifecycle questions:** keep weights/runtime files outside SQLite; persist observation vectors and their profile metadata in SQLite, with query vectors remaining transient. Shared-session checkpoints do not need automatic embedding, and session continuity does not depend on this work. Evaluate lazy loading and one shared local runtime rather than loading a model per hook or agent process; bundle installation must be explicit, with no automatic downloads or fallback to a remote provider.
+
 ## Interesting but bigger
 
 - [ ] **Memory-aware prompt compression** — use importance/recency/access scores to produce a lossless-where-it-matters compressed snapshot of memory in N tokens. Expose as `mnemos_pack_context`.
