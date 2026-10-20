@@ -105,12 +105,24 @@ func combineRelevance(nBM25, nCos *float64, alpha float64) float64 {
 // and would silently penalise its row versus rows with no embedding at all;
 // treating it as "no signal" keeps the two cases identical.
 func vecHasSignal(v []float32) bool {
-	for _, x := range v {
-		if x != 0 {
-			return true
-		}
+	return ValidEmbeddingVector(v, len(v))
+}
+
+// ValidEmbeddingVector reports whether a provider vector has the expected
+// positive dimension and a finite, nonzero signal. Invalid vectors must act
+// as missing information rather than contributing a fabricated similarity.
+func ValidEmbeddingVector(v []float32, dimension int) bool {
+	if dimension <= 0 || len(v) != dimension {
+		return false
 	}
-	return false
+	nonzero := false
+	for _, x := range v {
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return false
+		}
+		nonzero = nonzero || x != 0
+	}
+	return nonzero
 }
 
 // cosine computes the cosine similarity between two float32 vectors. Zero

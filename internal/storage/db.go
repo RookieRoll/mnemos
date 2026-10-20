@@ -6,9 +6,11 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
 )
@@ -45,7 +47,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	// modernc.org/sqlite serialises writes internally.
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := sqlDB.PingContext(ctx); err != nil {
+	if err := pingSQLite(ctx, sqlDB, 5*time.Second); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("storage: ping: %w", err)
 	}
@@ -56,6 +58,67 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	}
 
 	return &DB{sql: sqlDB}, nil
+}
+
+type sqlitePinger interface {
+	PingContext(context.Context) error
+}
+
+// SQLite's first WAL transition can return BUSY without exhausting its busy
+// timeout. Retry only connection initialization, before migration/business SQL.
+// The retry window bounds starting new attempts, not strict wall-clock time:
+// modernc executes DSN pragmas using Background, so an in-flight open remains
+// subject to the driver's existing busy_timeout rather than this context alone.
+func pingSQLite(ctx context.Context, pinger sqlitePinger, window time.Duration) error {
+	retryCtx, cancel := context.WithTimeout(ctx, window)
+	defer cancel()
+	var lastBusy error
+	delay := 10 * time.Millisecond
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := retryCtx.Err(); err != nil {
+			if lastBusy != nil {
+				return lastBusy
+			}
+			return err
+		}
+		err := pinger.PingContext(retryCtx)
+		if parentErr := ctx.Err(); parentErr != nil {
+			return parentErr
+		}
+		if err == nil {
+			return nil
+		}
+		if retryCtx.Err() != nil && lastBusy != nil && errors.Is(err, retryCtx.Err()) {
+			return lastBusy
+		}
+		var coded interface{ Code() int }
+		if !errors.As(err, &coded) || coded.Code()&0xff != 5 {
+			return err
+		}
+		lastBusy = err
+		if retryCtx.Err() != nil {
+			return lastBusy
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-retryCtx.Done():
+			timer.Stop()
+			if parentErr := ctx.Err(); parentErr != nil {
+				return parentErr
+			}
+			return lastBusy
+		case <-timer.C:
+		}
+		if delay < 100*time.Millisecond {
+			delay *= 2
+			if delay > 100*time.Millisecond {
+				delay = 100 * time.Millisecond
+			}
+		}
+	}
 }
 
 // Close releases the database handle.

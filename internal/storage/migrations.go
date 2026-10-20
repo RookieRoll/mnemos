@@ -68,11 +68,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
-		version    INTEGER PRIMARY KEY,
-		applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-	)`); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
+	if err := ensureMigrationLedger(ctx, db); err != nil {
+		return err
 	}
 
 	applied, err := appliedVersions(ctx, db)
@@ -87,6 +84,27 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if err := applyMigration(ctx, db, m); err != nil {
 			return fmt.Errorf("apply migration %04d_%s: %w", m.version, m.name, err)
 		}
+	}
+	return nil
+}
+
+// Bootstrap is itself a schema write: reserve the writer before SQLite reads
+// the schema to evaluate IF NOT EXISTS. Otherwise two first starts can race an
+// implicit read-to-write upgrade before any numbered migration is reached.
+func ensureMigrationLedger(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration ledger: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration ledger: %w", err)
 	}
 	return nil
 }
@@ -115,6 +133,16 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The startup plan may predate another process's completed upgrade. BEGIN
+	// IMMEDIATE reserves the writer first; only this in-transaction ledger read
+	// can authorize DDL without racing an independently launched client.
+	var alreadyApplied bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=?)`, m.version).Scan(&alreadyApplied); err != nil {
+		return fmt.Errorf("recheck version: %w", err)
+	}
+	if alreadyApplied {
+		return nil
+	}
 
 	if m.version == 8 {
 		if err := reconcileVersionSixFork(ctx, tx); err != nil {

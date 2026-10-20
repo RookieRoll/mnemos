@@ -101,7 +101,8 @@ Commands:
   vault watch            Daemon: keep the vault in sync on a timer
   vault status           Show vault sync status
   embed status           Show embedding provider status
-  embed backfill         Generate embeddings for observations that lack them
+  embed backfill [--rebuild-incompatible]
+                         Fill missing vectors; optionally rebuild other models/dimensions
   skill list             Show installed skills
   skill export [names]   Build a shareable pack (stdout or --out file)
   skill import <src>     Import a pack from a file path or https URL

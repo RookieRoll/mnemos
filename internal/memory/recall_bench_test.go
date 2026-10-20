@@ -29,9 +29,11 @@ func BenchmarkVectorRecallScan(b *testing.B) {
 	defer func() { _ = db.Close() }()
 
 	store := db.Observations()
+	queryVector := make([]float32, dim)
+	queryVector[0] = 1
 	svc := memory.NewService(memory.Config{
 		Store:    store,
-		Embedder: fixedEmbedder{dim: dim, vec: make([]float32, dim)},
+		Embedder: fixedEmbedder{dim: dim, vec: queryVector},
 	})
 	ctx := context.Background()
 
@@ -43,16 +45,17 @@ func BenchmarkVectorRecallScan(b *testing.B) {
 			vec[j] = rng.Float32()
 		}
 		o := &memory.Observation{
-			ID:         ulid.Make().String(),
-			AgentID:    "bench",
-			Project:    "bench",
-			Title:      fmt.Sprintf("row %d", i),
-			Content:    fmt.Sprintf("benchmarked content %d", i),
-			Type:       memory.TypeEpisodic,
-			Importance: 5,
-			CreatedAt:  now,
-			ValidFrom:  now,
-			Embedding:  vec,
+			ID:             ulid.Make().String(),
+			AgentID:        "bench",
+			Project:        "bench",
+			Title:          fmt.Sprintf("row %d", i),
+			Content:        fmt.Sprintf("benchmarked content %d", i),
+			Type:           memory.TypeEpisodic,
+			Importance:     5,
+			CreatedAt:      now,
+			ValidFrom:      now,
+			Embedding:      vec,
+			EmbeddingModel: "fixed",
 		}
 		if err := store.Insert(ctx, o); err != nil {
 			b.Fatal(err)

@@ -19,9 +19,11 @@ Mnemos is a layered Go service with strict boundaries. This document walks the l
 │  cmd/mnemos                (CLI: serve, init, doctor, …) │
 ├──────────────────────────────────────────────────────────┤
 │  internal/mcp              (JSON-RPC stdio server)       │
-│  internal/api              (HTTP — planned)              │
+│  internal/api              (HTTP API)                    │
 ├──────────────────────────────────────────────────────────┤
 │  internal/prewarm          (push-based context assembly) │
+│  internal/continuityflow   (start + progress composition)│
+│  internal/continuity       (workspace progress protocol) │
 │  internal/safety           (promptware scanner)          │
 │  internal/dream            (consolidation + promotion)   │
 ├──────────────────────────────────────────────────────────┤
@@ -37,12 +39,28 @@ Mnemos is a layered Go service with strict boundaries. This document walks the l
 
 `modernc.org/sqlite` (pure Go, no CGO). One file at `~/.mnemos/mnemos.db`. WAL mode, foreign keys on, 5s busy timeout. Schema versioned via `schema_migrations` + numbered SQL files embedded via `//go:embed`.
 
+Every migration rechecks its version after acquiring the immediate writer
+transaction, before reconciliation or DDL. Independent processes therefore skip
+an upgrade another writer has just committed; DDL and the version marker still
+roll back together on failure. The initial version cache is only a fast path.
+Creating the migration ledger also uses a writer transaction. Fresh connection
+initialization can independently encounter SQLite's WAL-mode lock; only that
+Ping phase retries typed `SQLITE_BUSY` errors within a bounded startup window.
+Other errors, migrations and business writes are not retried by that mechanism.
+Cancellation stops further attempts; an in-flight driver open still obeys the
+driver's own busy timeout rather than a strict application wall-clock deadline.
+
+Migration 0010 restricts observation/skill FTS update triggers to indexed columns
+whose values actually changed. Access counters, effectiveness, lifecycle, trust
+and export metadata do not rebuild text indexes. Insert/delete and actual indexed
+text changes retain transactional index maintenance; older migrations are intact.
+
 Key design calls:
 
 - **Bi-temporal**. Observations carry `valid_from`/`valid_until` (fact time) and `created_at`/`invalidated_at` (system time). Supersession invalidates rather than deletes. Historical queries work via `SearchInput.AsOf`.
 - **FTS5 external-content virtual table** mirrors observations for BM25 search. Triggers keep it in sync on insert/update/delete.
 - **Content hash on insert** powers dedup-on-save: identical content in the same `(agent, project)` bumps access count instead of duplicating.
-- **Embeddings as BLOB**. `sqlite-vec` is a C extension that modernc.org/sqlite can't load; cosine similarity runs in pure Go over every embedded row in scope (recall benchmark: ~9 ms for 10k rows × dim 64 — no index needed). Zero-CGO, zero dependency cost.
+- **Embeddings as BLOB**. Cosine similarity runs in pure Go over scoped embedded rows. Cost scales with corpus size and dimensions; see `docs/EMBEDDINGS.md`. No additional vector index or CGO dependency is introduced.
 
 ## Memory service
 
@@ -89,7 +107,7 @@ the same thing in every mode, and a weak result set scores low even for its
 top hit. Recall runs keyword (FTS5 BM25) **unioned with** vector cosine over
 every embedded row in scope before ranking, so a memory sharing no keywords
 with the query is retrievable at all. A missing embedding is renormalised
-away, never penalised; zero-relevance hits are dropped. `retrieval_mode`
+away when keyword weight is nonzero; zero-relevance hits are dropped. `retrieval_mode`
 reports which sources contributed and never changes what `Score` means.
 
 **Calibration basis.** The gate floor (`promptMemoryMinScore = 0.10`, used by
@@ -103,6 +121,19 @@ corpus to retune. Each result carries its breakdown (`Relevance`,
 per hit.
 
 `Save` returns a `SaveResult` indicating fresh insert vs dedup. Search pulls `limit × 3` raw hits per source, re-ranks, truncates to `limit`. Default filters to live-now; `IncludeStale` and `AsOf` opt into historical queries.
+
+CLI and server paths share a small memory configuration factory: complete default
+rank/hybrid parameters are initialized, then configured decay and alpha override
+them, including an explicit alpha zero. Provider discovery remains at the existing
+embedding-aware call sites; continuity-only operations do not trigger it.
+
+Vector-only recall and fusion use the same model/dimension/signal compatibility
+check. An incompatible stored vector is an absent source, preserving keyword
+scoring when its configured weight is nonzero rather than fabricating similarity
+zero. A usable query honors alpha zero's pure semantic weighting; an unusable
+query vector falls back globally to keywords. Existing model and BLOB metadata
+are sufficient; rebuilding is an explicit maintenance operation. See
+[EMBEDDINGS.md](EMBEDDINGS.md) for cursor, failure and concurrency semantics.
 
 ## Traceable memory evolution
 
@@ -145,6 +176,15 @@ Updates replace the entire latest body using an expected revision and request ID
 Recovery is a read, with no claim or ownership transfer. Candidate visibility, counts, revision and body come from one SQLite read snapshot. The service samples the current branch/HEAD at the bound root for each request. Explicit source IDs must be visible in that workspace or return unavailable without substitution. Otherwise candidates exclude the receiver and optionally match the exact task label. Automatic selection requires resume intent and exactly one candidate across the complete visible, task-filtered set, before pagination or byte limits; that source must also be a fresh active/blocked checkpoint with matching known branch and HEAD. A second stale, done, different-branch or summary source still prevents implicit selection. Candidates sort by recorded time descending, then session ID. Two concurrent tasks therefore yield an ambiguous offer; an explicit source ID selects the intended one without consuming it. A single matching checkpoint with resume intent may be selected, but execution still requires checking current files, diffs and relevant tests. An ended session and a reported done task are separate facts.
 
 Only same-owner, bound, ended sessions lacking any checkpoint marker can contribute a bounded final-summary candidate. Cross-owner recovery sees only explicitly workspace-shared checkpoints. Legacy Get/replay are not used to expand references or compose shared progress. The selected result is passed to prewarm as request-local data; all candidates, size calculations, rendering and `continuity_refs` are transient. See [the context protocol](CONTEXT_PROTOCOL.md) for the exact composition and provenance boundary.
+
+Candidate reads stream metadata for the full visible, task-filtered set and retain
+a fixed top-K window ordered by actual timestamps and session ID. After draining
+that cursor, the same read transaction loads only the window's complete bodies;
+legacy summaries use bounded prefixes. Full matched counts preserve ambiguity
+even when another stale/done source lies outside the display window. Body memory
+scales with the requested window, while metadata scan CPU still scales with
+history. This does not delete old progress, add a candidate cache, or change v1
+wire fields and response byte budgets.
 
 ## Pre-warm
 
@@ -189,13 +229,22 @@ Pipeline, in order:
 
 ## MCP
 
-We use the [official Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.5.x, maintained in collaboration with Google). Each tool is registered via `mcp.AddTool[In, Out]` with a typed argument struct — JSON schemas are inferred from `json` and `jsonschema` struct tags, and the SDK validates inputs before invoking the handler. Our `internal/mcp` package is a thin wrapping layer (~750 LOC) that owns (a) the Config + NewServer wiring, (b) 23 core tool handlers plus 4 optional rumination handlers, and (c) the 3 resource handlers. Protocol framing, JSON-RPC, version negotiation, cancellation, and transport plumbing are all the SDK's job.
+We use the [official Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.8.0). Each tool is registered via `mcp.AddTool[In, Out]` with a typed argument struct — JSON schemas are inferred from `json` and `jsonschema` struct tags, and the SDK validates inputs before invoking the handler. `internal/mcp` owns the constructor wiring, 23 core tools plus 4 optional rumination tools, and four resources. Protocol framing, JSON-RPC, version negotiation, cancellation, and transport plumbing are the SDK's job.
 
-Resources (`mnemos://session/current`, `mnemos://skills/index`, `mnemos://stats`) are read-only JSON snapshots.
+Resources (`mnemos://session/current`, `mnemos://skills/index`, `mnemos://stats`,
+`mnemos://capabilities`) are read-only JSON snapshots.
 
 ## Installer / doctor
 
 `internal/installer` auto-detects `~/.claude.json`, `~/.cursor/mcp.json`, `~/.codeium/windsurf/mcp_config.json`. Writes idempotently — unrelated keys preserved, atomic temp-file rename. `doctor` is the inverse: probes each target, reports green/red for binary path, config load, storage open, and each agent registration.
+
+Init parses every argument before route discovery and installation effects.
+Readonly plans choose a single validated local pi package route when available,
+updating only its owned MCP entry fields. Conflicting routes are diagnosed without
+guessing or adding a duplicate. Independent successful steps are retained, but
+any target or hook error causes a joined nonzero result. Known old hooks for the
+current executable are migrated per command, preserving sibling hooks and group
+fields instead of removing a user's entire shared group.
 
 ## What we deliberately don't do
 

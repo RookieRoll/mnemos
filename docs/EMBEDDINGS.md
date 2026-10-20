@@ -1,126 +1,105 @@
 # Embeddings
 
-Mnemos ships with optional hybrid retrieval: BM25 (lexical) + cosine
-similarity (semantic), fused via Reciprocal Rank Fusion. Embeddings are
-never required — turn them off and pure FTS5 still works — but turning
-them on is a ~10pp recall bump on paraphrased queries (per LongMemEval
-2026 research).
+Mnemos optionally unions keyword recall with semantic recall, then fuses absolute
+relevance signals on the documented [score contract](ARCHITECTURE.md#memory-service).
+FTS5 remains available when a query cannot obtain a usable embedding.
 
-## Why embeddings live as BLOBs, not a vector DB
+## Storage and compatibility
 
-`modernc.org/sqlite` is a pure-Go port of SQLite and cannot load runtime
-C extensions like `sqlite-vec`. We preserve the zero-CGO single-binary
-promise by storing embeddings as little-endian float32 BLOBs in the
-`observations.embedding` column and computing cosine similarity in Go
-over BM25-filtered candidates (top-N × 3 by default).
+Vectors are little-endian float32 BLOBs in the existing observations table.
+`embedding_model` records the provider-qualified model identifier. Cosine runs in
+pure Go over the scoped embedded set; keyword and semantic recall are independent.
+There is no additional vector database or CGO dependency.
 
-The performance impact is negligible at realistic agent-memory sizes
-(<100k observations). At 10k observations × 768 dims × 4 bytes, that's
-30 MB of vectors — trivial to load and score.
+A stored vector contributes only when its model identifier and actual dimension
+match the active embedder and usable query vector. A missing model identifier,
+different model or incompatible dimension is an absent signal, rather than a
+similarity of zero that penalizes a result with nonzero keyword weight. Such vectors remain stored
+until explicit maintenance. Model identifiers are operator-configured names, not
+attestation that two remote deployments serve identical model weights.
 
 ## Providers
 
-Three providers ship out of the box.
-
-### Ollama (default when available)
-
-Zero-config. On startup Mnemos probes `http://localhost:11434/`; if it
-responds, the Ollama provider is enabled with the configured model
-(default `nomic-embed-text`, 768 dims).
-
-```bash
-# install ollama, pull the model:
-ollama pull nomic-embed-text
-# start mnemos — embeddings on automatically
-mnemos serve
-```
-
-### OpenAI-compatible
-
-Works with OpenAI proper, Together.ai, vLLM, LM Studio, or any endpoint
-implementing `/v1/embeddings`.
+Configure all provider-specific fields together:
 
 ```toml
 [embedding]
-provider  = "openai"
-base_url  = "https://api.openai.com/v1"
-model     = "text-embedding-3-small"
+provider = "ollama"
+model = "nomic-embed-text"
+dimension = 768
+```
+
+For an OpenAI-compatible `/v1/embeddings` endpoint:
+
+```toml
+[embedding]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "text-embedding-3-small"
 dimension = 1536
-api_key   = "sk-..."
+api_key = "<your-key>"
 ```
 
-### Noop (fallback)
+`provider = "none"` selects Noop. With the default `auto`, an explicitly configured
+base URL is first probed as an OpenAI-compatible endpoint, then Ollama is probed
+(localhost:11434 when no URL is supplied). Unavailable providers fall back to
+Noop. Capability-only and continuity-only commands do not perform these probes.
 
-Disables vector search entirely. Mnemos runs pure FTS5. No error, no
-warning — a valid mode.
+## Backfill and switching models
 
-```toml
-[embedding]
-provider = "none"
-```
+Fill missing vectors:
 
-## Auto-detect
-
-Default provider is `"auto"`:
-
-1. Probe Ollama on `base_url` (default localhost:11434) with a 500 ms
-   timeout.
-2. If reachable: use Ollama with the configured model.
-3. Otherwise: fall back to Noop.
-
-This is what "piss easy" looks like — if you have Ollama installed,
-you get hybrid retrieval. If you don't, Mnemos still works.
-
-## Backfill
-
-If you enable embeddings after you've already saved observations, run:
-
-```bash
+```sh
 mnemos embed backfill
 ```
 
-This walks observations with `embedding IS NULL` in batches of 100, calls
-the provider, and stores the resulting vectors. Restartable — failures
-don't lose progress.
+After changing model or dimension, explicitly include incompatible vectors:
 
-## Switching models
-
-Each observation's embedding stores the model ID in `embedding_model`.
-When you change models, a future backfill run can detect mismatches and
-re-embed (planned — current backfill only fills NULL). For now: clear the
-column manually before changing models, then re-backfill.
-
-```sql
-UPDATE observations SET embedding = NULL, embedding_model = NULL;
+```sh
+mnemos embed backfill --rebuild-incompatible
 ```
 
-(Run `mnemos prune` first if you want to drop expired ones too.)
+Default maintenance leaves existing complete vectors unchanged. The explicit
+option additionally selects missing model identifiers, model mismatches and
+dimension mismatches; compatible rows are left alone. Observation identity,
+content, provenance and lifecycle are preserved.
 
-## Hybrid ranking maths
+Each invocation captures an ID high-water mark and visits eligible rows with a
+keyset cursor in pages of 100. Successes and failures both advance the cursor, so
+one permanently failing batch cannot prevent later rows from being attempted.
+Each selected ID is attempted at most once per invocation. Cursors and failure
+summaries are transient; concurrent mutations may require another invocation.
 
-```
-final_rank = alpha * rrf(bm25_rank) + (1 - alpha) * rrf(cos_rank)
-rrf(rank)  = 1 / (k + rank)    # k=60 per the original RRF paper
-```
+The final summary reports attempted, successful and failed counts. Any failed row
+produces a nonzero exit with the first failing ID, stage and cause, while
+successful updates remain saved. Only one failure cause is retained in memory.
+Cancellation stops
+the run. Retrying the command retries remaining work; no manual SQL clearing is
+required to switch models.
 
-Then the recency / importance / access multipliers from `internal/memory/
-decay.go` are applied on top.
+## Ranking and operational cost
 
-`alpha` defaults to `0.5` — BM25 catches exact identifiers and function
-names; cosine catches paraphrases. Research says 0.5 is the sweet spot.
-Tune via `[search].hybrid_alpha` in config: `1.0` = pure BM25, `0.0` =
-pure vector.
+Keyword magnitude and cosine are normalized independently. Relevance is the
+weighted mean of available signals, followed by policy, graph and contradiction
+factors. `[search].hybrid_alpha` defaults to `0.5`; explicit `0` and `1` select
+semantic and keyword weighting respectively. CLI, hooks, MCP and HTTP share the
+same configured service parameters. See the architecture document for formulas.
 
-## Performance
+If the query embedding is unavailable, fails, or has an invalid signal or
+dimension, the entire query falls back to keyword weighting, including when
+alpha is `0`. With a usable query vector, the configured endpoint weights apply;
+alpha `1` skips query embedding and semantic recall. An individual incompatible
+stored vector remains an absent signal and is never compared across models.
+At alpha `0`, candidates without a compatible vector are excluded while a usable
+query vector exists. An empty result uses the existing FTS mode value; it does
+not imply that keyword results were returned.
 
-- `mnemos_save` embedding call is synchronous by default. A failure is
-  non-fatal (observation persists; hybrid misses it until backfill).
-- Ollama on an M-series Mac embeds a typical observation in <50 ms.
-- OpenAI text-embedding-3-small adds ~200–400 ms network latency.
-- Cosine over 100 candidates at 768 dims is <1 ms in pure Go.
+Save-time embedding is synchronous and outside the write transaction; a provider
+failure does not prevent saving the observation. Explicit maintenance can fill
+the missing vector later. Scoped semantic recall scans vectors, so cost depends
+on corpus size and dimensions; measure your workload before choosing a larger
+indexing architecture. Provider latency is separate from local retrieval cost.
 
-## Privacy
-
-OpenAI-compatible providers **send your observation content over the
-network**. If that's not acceptable (most agent memory is personal or
-proprietary code), use Ollama or set `provider = "none"`.
+Embedding providers receive the submitted observation text and query text.
+Choose a local endpoint or `provider = "none"` when those texts should remain
+on the machine. Mnemos does not fetch referenced source bodies to embed them.

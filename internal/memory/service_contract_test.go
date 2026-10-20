@@ -89,7 +89,7 @@ func TestVectorRecallSurfacesParaphraseOnlyMemory(t *testing.T) {
 		dim: 4, vecs: map[string][]float32{q: {1, 0, 0, 0}},
 	}})
 	id := insertObs(t, store, &memory.Observation{
-		Title: "t", Content: "zanzibar quux wibble", Embedding: []float32{1, 0, 0, 0},
+		Title: "t", Content: "zanzibar quux wibble", EmbeddingModel: "map", Embedding: []float32{1, 0, 0, 0},
 	})
 	seedContrast(t, store, 6)
 
@@ -125,10 +125,10 @@ func TestMissingEmbeddingIsNotPenalized(t *testing.T) {
 	}})
 	noVec := insertObs(t, store, &memory.Observation{Title: "same", Content: "sqlite tuning notes"})
 	zeroVec := insertObs(t, store, &memory.Observation{
-		Title: "same", Content: "sqlite tuning notes", Embedding: []float32{0, 0, 0, 0},
+		Title: "same", Content: "sqlite tuning notes", EmbeddingModel: "map", Embedding: []float32{0, 0, 0, 0},
 	})
 	orthVec := insertObs(t, store, &memory.Observation{
-		Title: "same", Content: "sqlite tuning notes", Embedding: []float32{0, 1, 0, 0},
+		Title: "same", Content: "sqlite tuning notes", EmbeddingModel: "map", Embedding: []float32{0, 1, 0, 0},
 	})
 	seedContrast(t, store, 6)
 
@@ -163,11 +163,13 @@ func TestIrrelevantButPopularStaysOut(t *testing.T) {
 	}})
 	insertObs(t, store, &memory.Observation{
 		Title: "hot noise", Content: "lorem ipsum dolor", Importance: 10,
-		Embedding: []float32{0, 1, 0, 0},
+		EmbeddingModel: "map",
+		Embedding:      []float32{0, 1, 0, 0},
 	})
 	hot := insertObs(t, store, &memory.Observation{
 		Title: "hot relevant", Content: "database migration plan steps", Importance: 10,
-		Embedding: []float32{1, 0, 0, 0},
+		EmbeddingModel: "map",
+		Embedding:      []float32{1, 0, 0, 0},
 	})
 	seedContrast(t, store, 6)
 
@@ -206,7 +208,8 @@ func TestScoreCeilingClamps(t *testing.T) {
 	})
 	hot := insertObs(t, store, &memory.Observation{
 		Title: "hot", Content: "database migration plan steps", Importance: 10,
-		Embedding: []float32{1, 0, 0, 0},
+		EmbeddingModel: "map",
+		Embedding:      []float32{1, 0, 0, 0},
 	})
 	seedContrast(t, store, 6)
 	// access_factor = 1 + 0.1*ln(1+n) > 1.2 once n > 2.

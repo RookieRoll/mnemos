@@ -129,7 +129,10 @@ Memory stores are a write-time attack surface. Anything that can write an observ
 
 ### Hybrid retrieval
 
-BM25 plus cosine similarity via Reciprocal Rank Fusion. Auto enables when Ollama is reachable. Falls back to pure FTS5 when it isn't, which is fine for most projects, embeddings only really pay off on paraphrased queries.
+Keyword and compatible vector recall are independent, then fused on the absolute
+relevance score contract. Search uses the same configured weights through CLI,
+hooks, MCP and HTTP. Incompatible model/dimension vectors do not contribute;
+see [embedding configuration and maintenance](docs/EMBEDDINGS.md).
 
 ### Composed prewarm
 
@@ -145,7 +148,13 @@ Export a skill as a JSON pack, share by file or URL, install with `mnemos skill 
 
 ## Setup per agent
 
-`mnemos init` is idempotent and handles all of the below. Manual configurations if you'd rather:
+`mnemos init` is idempotent and handles the registrations below. `mnemos init --help`
+prints usage without installing anything; invalid arguments fail before writes.
+Installation plans are built before execution. If a target or owned-hook migration
+fails, other successful steps remain installed and init exits nonzero with the
+failed target identified. Fix the reported issue and rerun init.
+
+Manual configurations:
 
 ### Claude Code
 
@@ -203,7 +212,10 @@ args    = ["serve"]
 
 Two parts, and they are separable. `mnemos init` wires the MCP server, which gets you the tools. The pi package adds the hooks — session prewarm, per-prompt recall, the capture directive, the write guardrail, and passive file touches. For parity with Claude Code you want both.
 
-**1. The MCP server.** `mnemos init` writes pi's agent-dir config, and `mnemos doctor` reports it:
+**1. The MCP server.** `mnemos init` reuses a single validated local pi package
+route when one exists; otherwise it writes pi's agent-dir configuration.
+It preserves adapter-specific fields and reports conflicting routes rather than
+creating another entry. `mnemos doctor` reports the registration:
 
 ```bash
 mnemos init && mnemos doctor
@@ -325,6 +337,7 @@ Use `pkg/client` from Go or call `POST /v1/observations` directly. Reference: [d
 | `mnemos dream [--watch]` | Consolidation pass |
 | `mnemos vault export\|watch\|status` | Obsidian sync |
 | `mnemos embed status\|backfill` | Embedding tools |
+| `mnemos embed backfill --rebuild-incompatible` | Rebuild missing or incompatible model/dimension vectors |
 | `mnemos skill list\|export\|import` | Manage skill packs |
 | `mnemos verify retrieval\|behavior\|capture\|all` | Run verification harness |
 | `mnemos update [--yes]` | Self-update with sha256 verify |
@@ -341,6 +354,8 @@ Parameters: [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).
 ## Configuration
 
 `~/.mnemos/config.toml`, auto-created on first run. Every field is optional.
+Explicit `hybrid_alpha = 0` is preserved; omitting it uses `0.5`. The resolved
+search parameters apply equally to CLI/hook retrieval and MCP/HTTP services.
 
 ```toml
 [storage]

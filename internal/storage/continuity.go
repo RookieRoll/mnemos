@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"unicode/utf8"
 
 	"github.com/polyxmedia/mnemos/internal/continuity"
@@ -116,6 +117,9 @@ func (s *continuityStore) Checkpoint(ctx context.Context, in continuity.Mutation
 }
 
 func (s *continuityStore) Read(ctx context.Context, in continuity.ReadScope) (*continuity.Snapshot, error) {
+	if in.Limit < 1 || in.Limit > 20 {
+		return nil, fmt.Errorf("storage: continuity window requires 1..20 entries: %w", continuity.ErrValidation)
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("storage: begin continuity read: %w", err)
@@ -129,7 +133,11 @@ func (s *continuityStore) Read(ctx context.Context, in continuity.ReadScope) (*c
 	if err != nil {
 		return nil, fmt.Errorf("storage: read continuity binding: %w", err)
 	}
-	query := `SELECT s.id,s.agent_id,b.harness_kind,s.ended_at,CASE WHEN c.session_id IS NULL THEN s.summary ELSE NULL END,c.revision,c.payload,c.visibility,c.updated_at FROM sessions s JOIN session_continuity_bindings b ON b.session_id=s.id LEFT JOIN session_checkpoints c ON c.session_id=s.id WHERE b.workspace_key=? AND ((c.payload IS NOT NULL AND (s.agent_id=? OR c.visibility='workspace')) OR (c.session_id IS NULL AND s.agent_id=? AND s.ended_at IS NOT NULL AND s.summary IS NOT NULL AND s.summary!='')`
+	// Read no checkpoint or summary bodies in this cursor. Streaming the whole
+	// visible set preserves conservative ambiguity without retaining history in
+	// Go. Time values are compared in Go, rather than rounded SQL date functions
+	// or textual ORDER BY that can reorder equivalent/nearby timestamps.
+	query := `SELECT s.id,s.ended_at,c.revision,c.updated_at FROM sessions s JOIN session_continuity_bindings b ON b.session_id=s.id LEFT JOIN session_checkpoints c ON c.session_id=s.id WHERE b.workspace_key=? AND ((c.payload IS NOT NULL AND (s.agent_id=? OR c.visibility='workspace')) OR (c.session_id IS NULL AND s.agent_id=? AND s.ended_at IS NOT NULL AND s.summary IS NOT NULL AND s.summary!='')`
 	args := []any{in.WorkspaceKey, in.AgentID, in.AgentID}
 	if in.SourceSessionID != "" {
 		query += ` OR (c.session_id IS NOT NULL AND c.payload IS NULL AND s.agent_id=?)`
@@ -142,19 +150,69 @@ func (s *continuityStore) Read(ctx context.Context, in continuity.ReadScope) (*c
 	} else {
 		query += ` AND s.id!=?`
 		args = append(args, in.SessionID)
+		if in.Task != "" {
+			query += ` AND c.payload IS NOT NULL AND json_extract(c.payload,'$.task')=?`
+			args = append(args, in.Task)
+		}
 	}
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("storage: read continuity sources: %w", err)
 	}
+	type entry struct {
+		id string
+		at sql.NullTime
+	}
+	window := make([]entry, 0, in.Limit)
+	newer := func(a, b entry) bool {
+		if a.at.Time.Equal(b.at.Time) {
+			return a.id < b.id
+		}
+		return a.at.Time.After(b.at.Time)
+	}
 	for rows.Next() {
+		var candidate entry
+		var ended, updated sql.NullTime
+		var revision sql.NullInt64
+		if err := rows.Scan(&candidate.id, &ended, &revision, &updated); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("storage: scan continuity metadata: %w", err)
+		}
+		candidate.at = ended
+		if revision.Valid {
+			candidate.at = updated
+		}
+		out.Matched++
+		index := sort.Search(len(window), func(i int) bool { return newer(candidate, window[i]) })
+		if index >= in.Limit {
+			continue
+		}
+		if len(window) < in.Limit {
+			window = append(window, entry{})
+		}
+		copy(window[index+1:], window[index:])
+		window[index] = candidate
+	}
+	err = rows.Err()
+	closeErr := rows.Close()
+	if err != nil {
+		return nil, fmt.Errorf("storage: read continuity metadata: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("storage: close continuity metadata: %w", closeErr)
+	}
+	// Drain before issuing further queries on the single connection. All body
+	// lookups share this read snapshot with visibility, count and ordering.
+	// Legacy summaries are limited in SQL to 4096 bytes plus enough trailing
+	// bytes for boundedSummary to trim a partial UTF-8 rune safely.
+	for _, candidate := range window {
 		var source continuity.Source
 		var ended, updated sql.NullTime
 		var summary, payload, visibility sql.NullString
 		var revision sql.NullInt64
-		if err := rows.Scan(&source.SessionID, &source.AgentID, &source.HarnessKind, &ended, &summary, &revision, &payload, &visibility, &updated); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("storage: scan continuity source: %w", err)
+		row := tx.QueryRowContext(ctx, `SELECT s.id,s.agent_id,b.harness_kind,s.ended_at,CASE WHEN c.session_id IS NULL THEN substr(CAST(s.summary AS BLOB),1,4099) ELSE NULL END,c.revision,c.payload,c.visibility,c.updated_at FROM sessions s JOIN session_continuity_bindings b ON b.session_id=s.id LEFT JOIN session_checkpoints c ON c.session_id=s.id WHERE s.id=?`, candidate.id)
+		if err := row.Scan(&source.SessionID, &source.AgentID, &source.HarnessKind, &ended, &summary, &revision, &payload, &visibility, &updated); err != nil {
+			return nil, fmt.Errorf("storage: read continuity window body: %w", err)
 		}
 		source.SessionClosed = ended.Valid
 		source.Visibility = "owner"
@@ -165,7 +223,6 @@ func (s *continuityStore) Read(ctx context.Context, in continuity.ReadScope) (*c
 			if payload.Valid {
 				var body continuity.Payload
 				if err := json.Unmarshal([]byte(payload.String), &body); err != nil {
-					rows.Close()
 					return nil, fmt.Errorf("storage: invalid stored checkpoint: %w", err)
 				}
 				source.SourceKind = "checkpoint"
@@ -180,11 +237,6 @@ func (s *continuityStore) Read(ctx context.Context, in continuity.ReadScope) (*c
 			source.Summary = boundedSummary(summary.String, 4096)
 		}
 		out.Sources = append(out.Sources, source)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return nil, fmt.Errorf("storage: read continuity rows: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("storage: finish continuity snapshot: %w", err)

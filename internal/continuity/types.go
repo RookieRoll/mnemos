@@ -231,12 +231,19 @@ type ReadScope struct {
 	WorkspaceKey    string
 	SessionID       string
 	SourceSessionID string
+	// Task filters the full candidate set exactly; explicit source reads ignore it.
+	Task string
+	// Limit is the normalized display window (1..20), not the match-count cap.
+	Limit int
 }
 
-// Snapshot carries visible sources and the bound root from the same read transaction.
+// Snapshot carries a bounded visible window and the bound root from one read transaction.
 type Snapshot struct {
 	Root    string
 	Sources []Source
+	// Matched counts the complete visible, task-matching set, including bodies
+	// outside Sources. A display window must never manufacture uniqueness.
+	Matched int64
 }
 
 // Store is the narrow persistence boundary consumed by the continuity service.

@@ -54,17 +54,7 @@ func runServe(ctx context.Context, args []string) error {
 	logger.Info("embedding", "provider", embedder.Model(), "dim", embedder.Dimension())
 
 	injLog := injection.NewLogger(db.Injections(), nil)
-	mem := memory.NewService(memory.Config{
-		Store:      db.Observations(),
-		Embedder:   embedder,
-		Injections: injLog,
-		RankParams: memory.RankParams{
-			DecayRate:        cfg.Search.DecayRate,
-			ImportanceWeight: 0.5,
-			AccessBoost:      0.1,
-		},
-		Hybrid: memory.HybridParams{Alpha: cfg.Search.HybridAlpha},
-	})
+	mem := memory.NewService(memoryServiceConfig(cfg.Search, db.Observations(), embedder, injLog))
 	sess := session.NewService(session.Config{Store: db.Sessions()})
 	skl := skills.NewService(skills.Config{Store: db.Skills()})
 	rum := newRumination(cfg, db, skl)

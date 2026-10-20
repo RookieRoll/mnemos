@@ -47,13 +47,15 @@ in one SQLite file, and injects a token-budgeted block of them at session start.
 ```
 cmd/mnemos/            CLI: serve, init, doctor, prewarm, hook, dream, vault,
                        verify, skill, replay, update, digest, efficacy, ...
-internal/mcp/          official Model Context Protocol Go SDK wrapper: 21 core tools,
+internal/mcp/          official Model Context Protocol Go SDK wrapper: 23 core tools,
                        4 optional rumination tools,
-                       3 resources — thin adapter only
+                       4 resources — thin adapter only
 internal/api/          stdlib net/http REST transport + API-key middleware
 internal/memory/       observation domain: types, service, hybrid ranker, decay,
                        store interfaces (Reader/Writer/Maintenance/Exportable/Vectorable)
 internal/session/      session service + types
+internal/continuity/   workspace-bound session progress, checkpoints and resume selection
+internal/continuityflow/ harness-neutral continuity composition
 internal/skills/       procedural memory service, packs (export/import), scoring
 internal/prewarm/      session_start + compaction-recovery context composers
 internal/rumination/   threshold monitors, hostile-review packaging, resolution
@@ -124,15 +126,30 @@ Observed in-tree style, in addition to `CONTRIBUTING.md`:
   than deletes; historical queries use `SearchInput.AsOf`. Migrations must stay
   non-breaking (`schema_migrations` + embedded numbered SQL files).
 - **Ranking:**
-  `score = bm25 × importance_weight × recency_factor × access_factor`
+  `score = clamp(relevance × policy × graph × contradiction, (0, 1.2])`
+  where relevance fuses normalized keyword/vector signals over available weights;
+  policy includes importance, type-aware recency, access and project affinity,
   with `importance_weight = 0.5 + 0.5×(importance/10)`,
   `recency_factor = (1+age_days)^(-decay_rate)`, `access_factor = 1 + 0.1×ln(1+access_count)`.
-  Search pulls `limit × 3` raw hits, re-ranks, truncates.
+  Search unions `limit × 3` candidates per recall source, re-ranks, truncates.
+  See `docs/ARCHITECTURE.md` for the complete score contract.
 - **FTS5 external-content virtual table** mirrors observations; triggers keep it in
   sync. Content hash on insert powers dedup-on-save per `(agent, project)`.
 - **Embeddings are BLOBs in the same SQLite file.** Cosine similarity runs in pure
-  Go over top-N BM25 candidates via Reciprocal Rank Fusion. `hybrid_alpha` is
-  `1.0 = pure BM25`, `0.0 = pure vector`; auto-enables when Ollama is reachable.
+  Go over independently recalled scoped vectors, then fuses absolute relevance
+  with keyword hits. Model identifier, actual dimension and finite nonzero signal
+  must match. Explicit `hybrid_alpha = 0` is pure semantic with a usable query;
+  unavailable query vectors fall back globally to keywords. Default is `0.5`.
+  Backfill is missing-only unless `--rebuild-incompatible` is explicit; its
+  transient high-water/keyset cursor advances on failures as well as successes.
+- **Concurrent upgrades and FTS maintenance.** Recheck migration versions inside
+  the immediate writer transaction before DDL. Migration 0010 restricts update
+  triggers to actual indexed-text changes; metadata/no-op updates do not rebuild
+  FTS. Historical migration files remain immutable.
+- **Continuity reads.** Stream the full visible/task-matching metadata set in one
+  read snapshot, count all matches, then load at most the requested window of
+  bodies. Never infer uniqueness from the display limit. Metadata scan cost is
+  still linear; summaries have a bounded UTF-8 prefix and response budgets remain.
 - **Prewarm** composes conventions → recent sessions → matching skills →
   corrections → hot files, runs each section through `safety.Scanner`, and budgets
   the block to ~500 tokens. Fires on session start only; no mid-session push.
@@ -152,7 +169,7 @@ usage text lives in `printUsage` in the same file. Add a subcommand by writing a
 registering it in both places.
 
 MCP tools are registered with `mcpsdk.AddTool` in `internal/mcp/tools.go`
-(schemas inferred from struct tags). There are 25 registrations: 21 core, 4
+(schemas inferred from struct tags). There are 27 registrations: 23 core, 4
 optional `mnemos_ruminate_*` tools enabled by `[rumination].enabled`. Resources
 are read-only JSON snapshots in `internal/mcp/resources.go`. Tool descriptions are
 **load-bearing** — they are tuned from capture-rate measurements in `README.md`;
@@ -189,7 +206,7 @@ compares both plugin copies byte-for-byte, and checks their version agreement:
 | `.agents/skills/mnemos/SKILL.md` | frontmatter `version:` |
 | `pi/skills/mnemos/SKILL.md` | frontmatter `version:` |
 
-All eight distribution files are currently unified at `0.14.0`. Release flow is
+All eight distribution files are currently unified at `0.15.1`. Release flow is
 `make release V=vX.Y.Z` (tags + pushes; GitHub Actions + goreleaser does the rest) —
 never hand-build release artifacts. A local development installation is not a
 release; keep the release workflow for published artifacts.
@@ -226,12 +243,14 @@ artifacts live in `openspec/changes/<change-id>/` (`proposal.md`, `design.md`,
 `openspec-archive-change`) when the user asks to work on a change; do not invent
 parallel planning documents.
 
-**No active changes.** Three changes are archived under `openspec/changes/archive/`:
+Run `openspec list --json` for the current queue. Key archived references include
+the following changes under `openspec/changes/archive/`:
 `2026-09-18-add-pi-hook-parity` (18 requirements → `harness-neutral-hooks`,
 `pi-integration`), `2026-10-12-retrieval-score-contract` (6 requirements →
 `memory-retrieval`), and `2026-10-12-lifecycle-and-graph-retrieval` (9 requirements
-→ `memory-lifecycle-retrieval`). Those four specs are live in `openspec/specs/`
-and are what a new change would modify.
+→ `memory-lifecycle-retrieval`). Later archived changes cover context delivery,
+scoped reading, traceable evolution and shared session continuity. The live
+contracts are in `openspec/specs/`; read the applicable ones before changing behavior.
 
 The archive is still the best reference for the hook architecture, because it is
 where the reasoning lives. Three things in it matter before touching hook

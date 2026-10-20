@@ -207,7 +207,7 @@ func (s *Service) Context(ctx context.Context, in ContextInput) (*ContextResult,
 	if err != nil {
 		return nil, err
 	}
-	snap, err := s.store.Read(ctx, ReadScope{AgentID: agent, WorkspaceKey: w.Key, SessionID: in.SessionID, SourceSessionID: in.SourceSessionID})
+	snap, err := s.store.Read(ctx, ReadScope{AgentID: agent, WorkspaceKey: w.Key, SessionID: in.SessionID, SourceSessionID: in.SourceSessionID, Task: in.Task, Limit: in.Limit})
 	if err != nil {
 		return nil, err
 	}
@@ -217,9 +217,6 @@ func (s *Service) Context(ctx context.Context, in ContextInput) (*ContextResult,
 	out := &ContextResult{ProtocolVersion: 1, Status: "none", MaxBytes: in.MaxBytes}
 	var sources []Source
 	for _, source := range snap.Sources {
-		if in.SourceSessionID == "" && in.Task != "" && (source.Payload == nil || source.Payload.Task != in.Task) {
-			continue
-		}
 		source.Stale = s.now().UTC().Sub(source.RecordedAt) > 24*time.Hour
 		source.WorkspaceUnknown = source.Payload == nil || !source.Payload.Workspace.Known || !current.Known
 		if !source.WorkspaceUnknown {
@@ -244,14 +241,13 @@ func (s *Service) Context(ctx context.Context, in ContextInput) (*ContextResult,
 		}
 	} else if len(sources) > 0 {
 		out.Status = "candidates"
-		out.Ambiguous = len(sources) > 1
-		if len(sources) == 1 && in.ResumeIntent && !sources[0].RecordedAt.After(s.now().UTC()) && !sources[0].Stale && !sources[0].WorkspaceChanged && !sources[0].WorkspaceUnknown && (sources[0].State == "active" || sources[0].State == "blocked") {
+		out.Ambiguous = snap.Matched > 1
+		if snap.Matched == 1 && in.ResumeIntent && !sources[0].RecordedAt.After(s.now().UTC()) && !sources[0].Stale && !sources[0].WorkspaceChanged && !sources[0].WorkspaceUnknown && (sources[0].State == "active" || sources[0].State == "blocked") {
 			out.Status = "selected"
 			out.Source = &sources[0]
 		} else {
-			if len(sources) > in.Limit {
+			if snap.Matched > int64(len(sources)) {
 				out.HasMore = true
-				sources = sources[:in.Limit]
 			}
 			out.Candidates = sources
 		}

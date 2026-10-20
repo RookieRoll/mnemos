@@ -78,9 +78,9 @@ func InstallHook(path string, entry HookEntry) (bool, error) {
 	return true, writeAtomic(path, data)
 }
 
-// UninstallHook removes any hook group under entry's event slot whose
-// matcher and command match entry. Returns changed=true if the file was
-// rewritten.
+// UninstallHook removes only matching command hooks under entry's event/matcher.
+// Sibling hooks and unrelated group fields survive owned integration upgrades.
+// Returns changed=true if the file was rewritten.
 func UninstallHook(path string, entry HookEntry) (bool, error) {
 	cfg, err := readSettings(path)
 	if err != nil {
@@ -93,11 +93,44 @@ func UninstallHook(path string, entry HookEntry) (bool, error) {
 	hooks := asStringMap(cfg["hooks"])
 	groups := asAnyList(hooks[event])
 
-	idx := groupIndex(groups, entry)
-	if idx < 0 {
+	changed := false
+	keptGroups := make([]any, 0, len(groups))
+	for _, raw := range groups {
+		group, ok := raw.(map[string]any)
+		if !ok || str(group["matcher"]) != entry.Matcher {
+			keptGroups = append(keptGroups, raw)
+			continue
+		}
+		inner := asAnyList(group["hooks"])
+		kept := make([]any, 0, len(inner))
+		removed := false
+		for _, hook := range inner {
+			h, ok := hook.(map[string]any)
+			if ok && str(h["command"]) == entry.Command && (str(h["type"]) == "command" || str(h["type"]) == "") {
+				changed, removed = true, true
+			} else {
+				kept = append(kept, hook)
+			}
+		}
+		if !removed {
+			keptGroups = append(keptGroups, raw)
+			continue
+		}
+		group["hooks"] = kept
+		// A plain owned group disappears. Custom group metadata is retained
+		// even if its last owned hook was removed, rather than silently lost.
+		hasExtra := false
+		for key := range group {
+			hasExtra = hasExtra || (key != "hooks" && key != "matcher")
+		}
+		if len(kept) > 0 || hasExtra {
+			keptGroups = append(keptGroups, group)
+		}
+	}
+	if !changed {
 		return false, nil
 	}
-	groups = append(groups[:idx], groups[idx+1:]...)
+	groups = keptGroups
 	if len(groups) == 0 {
 		delete(hooks, event)
 	} else {

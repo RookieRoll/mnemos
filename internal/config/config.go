@@ -230,9 +230,8 @@ func applyDefaults(cfg *Config) {
 	if cfg.Search.MaxContextTokens == 0 {
 		cfg.Search.MaxContextTokens = d.Search.MaxContextTokens
 	}
-	if cfg.Search.HybridAlpha == 0 {
-		cfg.Search.HybridAlpha = d.Search.HybridAlpha
-	}
+	// Load starts from Default, so zero is the explicit pure-vector weight,
+	// not an absent value to replace here.
 	if cfg.Server.Transport == "" {
 		cfg.Server.Transport = d.Server.Transport
 	}

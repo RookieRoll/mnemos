@@ -52,15 +52,11 @@ func loadDeps(ctx context.Context) (*deps, error) {
 	return &deps{
 		db:       db,
 		embedder: embedder,
-		mem: memory.NewService(memory.Config{
-			Store:      db.Observations(),
-			Embedder:   embedder,
-			Injections: injection.NewLogger(db.Injections(), nil),
-		}),
-		sess: session.NewService(session.Config{Store: db.Sessions()}),
-		skl:  skl,
-		rum:  newRumination(cfg, db, skl),
-		cfg:  cfg,
+		mem:      memory.NewService(memoryServiceConfig(cfg.Search, db.Observations(), embedder, injection.NewLogger(db.Injections(), nil))),
+		sess:     session.NewService(session.Config{Store: db.Sessions()}),
+		skl:      skl,
+		rum:      newRumination(cfg, db, skl),
+		cfg:      cfg,
 	}, nil
 }
 
@@ -475,27 +471,64 @@ func obsoleteClaudeHooks(selfPath string) []labeledHook {
 				Event: "PostCompact", Command: fmt.Sprintf("%s hook post-compact", selfPath),
 			},
 		},
+		{
+			label: "three-tool PreToolUse guardrail",
+			entry: installer.HookEntry{
+				Event: "PreToolUse", Matcher: "mcp__mnemos__mnemos_save|mcp__mnemos__mnemos_correct|mcp__mnemos__mnemos_convention",
+				Command: fmt.Sprintf("%s hook pre-tool", selfPath),
+			},
+		},
 	}
 }
 
-func runInit(_ context.Context, _ []string) error {
+func runInit(_ context.Context, args []string) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs.SetOutput(os.Stdout)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: mnemos init\nPlan and install detected agent integrations; independent successes remain if another target fails.")
+	}
+	// flag stops at help/the first positional. Validate the entire argument
+	// list first so trailing garbage never hides behind a help request.
+	for _, arg := range args {
+		if arg != "-h" && arg != "--help" {
+			return fmt.Errorf("init: unexpected argument %q", arg)
+		}
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return fmt.Errorf("init: %w", err)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("init: unexpected positional arguments")
+	}
+	// Resolve every route before the first install writes user configuration.
+	plans := installer.PlanTargets()
 	selfPath, err := os.Executable()
 	if err != nil {
 		selfPath = "mnemos"
 	}
 	entry := installer.ServerEntry{Command: selfPath, Args: []string{"serve"}}
 
-	targets := installer.DetectTargets()
-	if len(targets) == 0 {
+	if len(plans) == 0 {
 		fmt.Println("no agent clients detected (Claude Code, Claude Desktop, Cursor, Windsurf, Codex CLI, pi).")
 		fmt.Println("install one of them first, then run `mnemos init` again.")
 		return nil
 	}
+	var failures []error
 	hasClaudeCode := false
-	for _, t := range targets {
+	for _, plan := range plans {
+		t := plan.Target
+		if plan.Err != nil {
+			fmt.Printf("  ✗ %s (%s): %v\n", t.Name, t.Path, plan.Err)
+			failures = append(failures, fmt.Errorf("init: plan %s (%s): %w", t.Name, t.Path, plan.Err))
+			continue
+		}
 		changed, err := installer.Install(t, entry)
 		if err != nil {
 			fmt.Printf("  ✗ %s (%s): %v\n", t.Name, t.Path, err)
+			failures = append(failures, fmt.Errorf("init: install %s (%s): %w", t.Name, t.Path, err))
 			continue
 		}
 		if changed {
@@ -518,6 +551,7 @@ func runInit(_ context.Context, _ []string) error {
 			switch {
 			case err != nil:
 				fmt.Printf("  ✗ removing %s (%s): %v\n", old.label, settings, err)
+				failures = append(failures, fmt.Errorf("init: remove %s (%s): %w", old.label, settings, err))
 			case changed:
 				fmt.Printf("  ✓ removed %s from %s\n", old.label, settings)
 			}
@@ -527,6 +561,7 @@ func runInit(_ context.Context, _ []string) error {
 			switch {
 			case err != nil:
 				fmt.Printf("  ✗ %s (%s): %v\n", h.label, settings, err)
+				failures = append(failures, fmt.Errorf("init: install %s (%s): %w", h.label, settings, err))
 			case changed:
 				fmt.Printf("  ✓ %s wired at %s\n", h.label, settings)
 			default:
@@ -536,6 +571,10 @@ func runInit(_ context.Context, _ []string) error {
 	}
 
 	fmt.Println()
+	if err := errors.Join(failures...); err != nil {
+		fmt.Println("installation incomplete; successful steps were retained. Resolve the reported errors and rerun mnemos init.")
+		return err
+	}
 	fmt.Println("restart your agent. the mnemos_* tools will appear next session.")
 	return nil
 }

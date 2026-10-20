@@ -428,11 +428,24 @@ func (s *Service) SearchWithMode(ctx context.Context, in SearchInput) ([]SearchR
 	// false) this source is skipped entirely and relevance comes from the
 	// keyword signal alone. Query embed failures fail open the same way.
 	var qvec []float32
-	if s.HybridEnabled() && in.Query != "" {
-		qvec, _ = s.embedder.Embed(ctx, in.Query)
+	if s.HybridEnabled() && s.hybrid.Alpha < 1 && in.Query != "" {
+		candidate, embedErr := s.embedder.Embed(ctx, in.Query)
+		if embedErr == nil && ValidEmbeddingVector(candidate, s.embedder.Dimension()) {
+			qvec = candidate
+		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, RetrievalFTS, err
+	}
+	alpha := s.hybrid.Alpha
+	if len(qvec) == 0 {
+		alpha = 1
+	} // unavailable global vector source fails open to FTS, including alpha zero
 	if len(qvec) > 0 {
 		raw = s.unionVectorRecall(ctx, in, qvec, raw, limit*3)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, RetrievalFTS, err
 	}
 
 	now := s.clock().UTC()
@@ -445,14 +458,16 @@ func (s *Service) SearchWithMode(ctx context.Context, in SearchInput) ([]SearchR
 			nBM25 = &v
 		}
 		var nCos *float64
-		if len(qvec) > 0 && vecHasSignal(raw[i].Observation.Embedding) {
+		if s.compatibleEmbedding(raw[i].Observation, qvec) {
 			v := normCos(cosine(raw[i].Observation.Embedding, qvec), s.hybrid.CosLow, s.hybrid.CosHigh)
 			nCos = &v
-			vectorSignal = true
 		}
-		rel := combineRelevance(nBM25, nCos, s.hybrid.Alpha)
+		rel := combineRelevance(nBM25, nCos, alpha)
 		if rel <= 0 {
 			continue
+		}
+		if nCos != nil && alpha < 1 {
+			vectorSignal = true
 		}
 		policy := s.ranker.PolicyFactor(raw[i].Observation, now)
 		if in.PreferProject != "" && raw[i].Observation.Project != "" &&
@@ -586,7 +601,7 @@ func (s *Service) unionVectorRecall(ctx context.Context, in SearchInput, qvec []
 	}
 	recall := make([]scored, 0, len(rows))
 	for _, o := range rows {
-		if seen[o.ID] {
+		if seen[o.ID] || !s.compatibleEmbedding(o, qvec) {
 			continue
 		}
 		recall = append(recall, scored{o: o, cos: cosine(o.Embedding, qvec)})
@@ -602,6 +617,13 @@ func (s *Service) unionVectorRecall(ctx context.Context, in SearchInput, qvec []
 		})
 	}
 	return cands
+}
+
+// compatibleEmbedding is shared by independent recall and primary-hit fusion.
+// Missing model metadata cannot establish a compatible embedding space.
+func (s *Service) compatibleEmbedding(o Observation, query []float32) bool {
+	return s.embedder != nil && s.embedder.Model() != "" && o.EmbeddingModel == s.embedder.Model() &&
+		ValidEmbeddingVector(query, s.embedder.Dimension()) && ValidEmbeddingVector(o.Embedding, len(query))
 }
 
 // expansionVisible mirrors the search's own visibility contract for a

@@ -183,7 +183,15 @@ func runEmbed(ctx context.Context, args []string) error {
 	case "status":
 		return runEmbedStatus(ctx)
 	case "backfill":
-		return runEmbedBackfill(ctx)
+		fs := flag.NewFlagSet("embed backfill", flag.ContinueOnError)
+		rebuild := fs.Bool("rebuild-incompatible", false, "also rebuild vectors with a different stored model or dimension")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("embed backfill: unexpected positional arguments")
+		}
+		return runEmbedBackfillOptions(ctx, embeddingBackfillOptions{RebuildIncompatible: *rebuild})
 	default:
 		return fmt.Errorf("unknown embed subcommand: %s", sub)
 	}
@@ -202,46 +210,25 @@ func runEmbedStatus(ctx context.Context) error {
 }
 
 func runEmbedBackfill(ctx context.Context) error {
+	return runEmbedBackfillOptions(ctx, embeddingBackfillOptions{})
+}
+
+func runEmbedBackfillOptions(ctx context.Context, options embeddingBackfillOptions) error {
 	d, err := loadDeps(ctx)
 	if err != nil {
 		return err
 	}
 	defer d.close()
 
-	embedder := selectEmbedder(ctx, d.cfg.Embedding)
-	if embedder.Dimension() == 0 {
-		return fmt.Errorf("no embedding provider available — check `embed status`")
+	store, ok := d.db.Observations().(embeddingBackfillStore)
+	if !ok {
+		return fmt.Errorf("embedding backfill: store does not support bounded maintenance")
 	}
-
-	store := d.db.Observations()
-	var total int
-	for {
-		batch, err := store.ListMissingEmbeddings(ctx, 100)
-		if err != nil {
-			return fmt.Errorf("list missing: %w", err)
-		}
-		if len(batch) == 0 {
-			break
-		}
-		for _, o := range batch {
-			text := o.Title + "\n" + o.Content
-			if o.Rationale != "" {
-				text += "\n" + o.Rationale
-			}
-			vec, err := embedder.Embed(ctx, text)
-			if err != nil {
-				slog.Warn("embed failed", "id", o.ID, "err", err)
-				continue
-			}
-			if err := store.UpdateEmbedding(ctx, o.ID, embedder.Model(), vec); err != nil {
-				return fmt.Errorf("update embedding %s: %w", o.ID, err)
-			}
-			total++
-		}
-		if len(batch) < 100 {
-			break
-		}
+	report, err := runEmbeddingBackfill(ctx, store, d.embedder, options)
+	if ctx.Err() != nil {
+		fmt.Printf("embedding backfill interrupted: attempted=%d succeeded=%d failed=%d\n", report.Attempted, report.Succeeded, report.Failed)
+		return fmt.Errorf("embedding backfill: %w", ctx.Err())
 	}
-	fmt.Printf("backfilled %d embeddings\n", total)
-	return nil
+	fmt.Printf("backfilled %d embeddings (attempted=%d succeeded=%d failed=%d)\n", report.Succeeded, report.Attempted, report.Succeeded, report.Failed)
+	return err
 }

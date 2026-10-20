@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -12,6 +13,21 @@ import (
 // server. Remote package names alone are insufficient evidence of installation.
 // It is read-only; doctor must not create a duplicate adapter-global entry.
 func PiPackageMCPInstalled() (bool, string) {
+	routes := piPackageRoutes()
+	if len(routes) > 0 {
+		return true, routes[0].settings
+	}
+	return false, ""
+}
+
+type piPackageRoute struct {
+	target   Target
+	settings string
+}
+
+func piPackageRoutes() []piPackageRoute {
+	var routes []piPackageRoute
+	seen := make(map[string]bool)
 	var settings []string
 	if d := os.Getenv(piAgentDirEnv); d != "" {
 		settings = append(settings, filepath.Join(d, "settings.json"))
@@ -48,12 +64,16 @@ func PiPackageMCPInstalled() (bool, string) {
 			if !filepath.IsAbs(root) {
 				root = filepath.Join(filepath.Dir(path), root)
 			}
-			if verifiedPiPackage(root) {
-				return true, path
+			for _, target := range verifiedPiPackageTargets(root) {
+				identity := target.Path + "\x00" + target.Key
+				if !seen[identity] {
+					seen[identity] = true
+					routes = append(routes, piPackageRoute{target: target, settings: path})
+				}
 			}
 		}
 	}
-	return false, ""
+	return routes
 }
 
 func readPiJSON(path string, value any) bool {
@@ -61,7 +81,8 @@ func readPiJSON(path string, value any) bool {
 	return err == nil && json.Unmarshal(data, value) == nil
 }
 
-func verifiedPiPackage(root string) bool {
+func verifiedPiPackageTargets(root string) []Target {
+	var targets []Target
 	var manifest struct {
 		Name string `json:"name"`
 		Pi   struct {
@@ -69,14 +90,14 @@ func verifiedPiPackage(root string) bool {
 		} `json:"pi"`
 	}
 	if !readPiJSON(filepath.Join(root, "package.json"), &manifest) || manifest.Name == "" {
-		return false
+		return nil
 	}
 	var paths []string
 	var single string
 	if json.Unmarshal(manifest.Pi.MCP, &single) == nil {
 		paths = []string{single}
 	} else if json.Unmarshal(manifest.Pi.MCP, &paths) != nil {
-		return false
+		return nil
 	}
 	for _, path := range paths {
 		if path == "" || filepath.IsAbs(path) {
@@ -84,6 +105,10 @@ func verifiedPiPackage(root string) bool {
 		}
 		joined := filepath.Join(root, path)
 		// The adapter rejects both lexical and symlink escapes from a package.
+		lexical, err := filepath.Rel(root, joined)
+		if err != nil || lexical == ".." || strings.HasPrefix(lexical, ".."+string(filepath.Separator)) || filepath.IsAbs(lexical) {
+			continue
+		}
 		realRoot, err := filepath.EvalSymlinks(root)
 		if err != nil {
 			continue
@@ -106,13 +131,39 @@ func verifiedPiPackage(root string) bool {
 		if !readPiJSON(realPath, &cfg) {
 			continue
 		}
-		for _, server := range cfg.Servers {
-			command := strings.TrimSuffix(filepath.Base(server.Command), ".exe")
-			_, commandErr := exec.LookPath(server.Command)
-			if !server.Disabled && commandErr == nil && command == "mnemos" && len(server.Args) == 1 && server.Args[0] == "serve" {
-				return true
+		keys := make([]string, 0, len(cfg.Servers))
+		for key := range cfg.Servers {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			server := cfg.Servers[key]
+			if !server.Disabled && verifiedMnemosCommand(server.Command) && len(server.Args) == 1 && server.Args[0] == "serve" {
+				targets = append(targets, Target{Name: "pi (local package)", Path: realPath, Key: key})
 			}
 		}
 	}
-	return false
+	return targets
+}
+
+func verifiedMnemosCommand(command string) bool {
+	resolved, err := exec.LookPath(command)
+	if err != nil {
+		return false
+	}
+	if strings.TrimSuffix(filepath.Base(command), ".exe") == "mnemos" {
+		return true
+	}
+	// init writes its own executable path. A locally renamed development
+	// binary is still this process, and must remain recognizable on rerun.
+	self, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		return false
+	}
+	commandInfo, err := os.Stat(resolved)
+	return err == nil && os.SameFile(selfInfo, commandInfo)
 }

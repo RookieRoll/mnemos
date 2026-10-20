@@ -1,5 +1,22 @@
 # Release notes
 
+## 0.15.1
+
+- Concurrent database upgrades recheck migration versions under the writer lock.
+- CLI/hook and server searches use the same configured parameters, including
+  explicit `hybrid_alpha = 0`.
+- Vector recall/fusion reject incompatible model or dimension signals and retain
+  keyword fallback. `embed backfill --rebuild-incompatible` explicitly rebuilds
+  them; maintenance uses finite keyset progress and reports failures nonzero.
+- Init validates arguments before writes and reports partial failure. A valid pi
+  package route is reused; owned hook upgrades preserve user configuration.
+- Migration 0010 avoids FTS rewrites for metadata and unchanged indexed values.
+- Continuity candidate body loading is bounded without changing source selection,
+  ambiguity, retention or the v1 wire contract.
+
+The local installation workflow does not publish a release tag or hand-built
+release assets. See the [archived hardening verification](../openspec/changes/archive/2026-10-20-harden-local-memory-runtime/verification.md) for exercised checks.
+
 ## 0.13.0
 
 ### BREAKING: retrieval scores moved to the composite score contract
