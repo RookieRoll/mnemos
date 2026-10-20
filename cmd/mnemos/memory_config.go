@@ -13,5 +13,6 @@ func memoryServiceConfig(search config.SearchConfig, store memory.Store, embedde
 	rank.DecayRate = search.DecayRate
 	hybrid := memory.DefaultHybridParams()
 	hybrid.Alpha = search.HybridAlpha
-	return memory.Config{Store: store, Embedder: embedder, Injections: recorder, RankParams: rank, Hybrid: hybrid}
+	return memory.Config{Store: store, Embedder: embedder, Injections: recorder, RankParams: rank, Hybrid: hybrid,
+		DefaultLimit: search.DefaultLimit, MaxContextTokens: search.MaxContextTokens}
 }

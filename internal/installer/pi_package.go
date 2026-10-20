@@ -12,8 +12,8 @@ import (
 // PiPackageMCPInstalled verifies a local pi package's manifest-backed mnemos
 // server. Remote package names alone are insufficient evidence of installation.
 // It is read-only; doctor must not create a duplicate adapter-global entry.
-func PiPackageMCPInstalled() (bool, string) {
-	routes := piPackageRoutes()
+func PiPackageMCPInstalled(options ...Options) (bool, string) {
+	routes := piPackageRoutes(options...)
 	if len(routes) > 0 {
 		return true, routes[0].settings
 	}
@@ -25,14 +25,12 @@ type piPackageRoute struct {
 	settings string
 }
 
-func piPackageRoutes() []piPackageRoute {
+func piPackageRoutes(options ...Options) []piPackageRoute {
 	var routes []piPackageRoute
 	seen := make(map[string]bool)
 	var settings []string
-	if d := os.Getenv(piAgentDirEnv); d != "" {
+	if d := piAgentDir(clientOptions(options)); d != "" {
 		settings = append(settings, filepath.Join(d, "settings.json"))
-	} else if home, err := os.UserHomeDir(); err == nil {
-		settings = append(settings, filepath.Join(home, ".pi", "agent", "settings.json"))
 	}
 	if wd, err := os.Getwd(); err == nil {
 		settings = append(settings, filepath.Join(wd, ".pi", "settings.json"))
@@ -138,7 +136,11 @@ func verifiedPiPackageTargets(root string) []Target {
 		sort.Strings(keys)
 		for _, key := range keys {
 			server := cfg.Servers[key]
-			if !server.Disabled && verifiedMnemosCommand(server.Command) && len(server.Args) == 1 && server.Args[0] == "serve" {
+			command := server.Command
+			if command != "" && !filepath.IsAbs(command) && strings.ContainsAny(command, "/\\") {
+				command = filepath.Join(filepath.Dir(realPath), command)
+			}
+			if !server.Disabled && verifiedMnemosCommand(command) && isServeArgs(server.Args) {
 				targets = append(targets, Target{Name: "pi (local package)", Path: realPath, Key: key})
 			}
 		}

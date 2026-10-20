@@ -21,8 +21,11 @@ func main() {
 		os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 
-	cmd := os.Args[1]
-	args := os.Args[2:]
+	ctx, cmd, args, err := parseInvocation(ctx, os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mnemos:", err)
+		os.Exit(2)
+	}
 
 	handler, ok := commands[cmd]
 	if !ok {
@@ -84,7 +87,10 @@ func printUsage(w *os.File) {
 	fmt.Fprintf(w, `mnemos — persistent memory and skills for AI coding agents
 
 Usage:
-  mnemos <command> [flags]
+  mnemos [--config FILE] <command> [flags]
+
+Global:
+  --config FILE          Select a TOML file (default: ~/.mnemos/config.toml)
 
 Commands:
   serve [--http ADDR]    Start the MCP stdio server (or HTTP if --http given)
@@ -112,13 +118,13 @@ Commands:
   continuity <open|checkpoint|context> --payload JSON  Explicit scoped progress
   init                   Register mnemos with Claude Code / Cursor / Windsurf
   update [--yes]         Download the latest release and replace this binary
-  doctor                 Check installation health
+  doctor [--workspaces]  Check installation health or report recorded workspace bindings
   verify retrieval       Probe the store with fixture queries (precision@K)
   verify behavior        A/B replay scenarios with mnemos on vs off (lift)
   verify capture         Single-arm: do agents record corrections handed to them?
   verify calibrate       Sweep gate parameters on the score contract scale
   verify all             Run all three
-  config                 Print the current configuration
+  config [--client pi]   Print configuration, or a nonsecret adapter projection
   version                Print the binary version
 
 First run:

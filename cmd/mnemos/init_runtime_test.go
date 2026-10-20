@@ -17,7 +17,7 @@ import (
 func initRuntimeHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	for key, value := range map[string]string{"HOME": home, "USERPROFILE": home, "APPDATA": filepath.Join(home, "appdata"), "CLAUDE_CONFIG_DIR": home, "PI_CODING_AGENT_DIR": filepath.Join(home, ".pi", "agent"), "MNEMOS_CONFIG": filepath.Join(home, "memory.toml")} {
+	for key, value := range map[string]string{"HOME": home, "USERPROFILE": home, "APPDATA": filepath.Join(home, "appdata")} {
 		t.Setenv(key, value)
 	}
 	t.Chdir(home)
@@ -92,7 +92,7 @@ func TestInitArgumentsHaveNoInstallationSideEffects(t *testing.T) {
 func TestInitRetainsIndependentSuccessAndJoinsAllFailures(t *testing.T) {
 	home := initRuntimeHome(t)
 	initWrite(t, filepath.Join(home, ".claude.json"), `{}`)
-	initWrite(t, filepath.Join(home, "settings.json"), `{invalid hooks`)
+	initWrite(t, filepath.Join(home, ".claude", "settings.json"), `{invalid hooks`)
 	initWrite(t, filepath.Join(home, ".cursor", "mcp.json"), `{invalid cursor`)
 	initWrite(t, filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), `{invalid windsurf`)
 	initWrite(t, filepath.Join(home, ".pi", "agent", "settings.json"), `{}`)
@@ -117,7 +117,7 @@ func TestInitRetainsIndependentSuccessAndJoinsAllFailures(t *testing.T) {
 	if readErr != nil || !strings.Contains(string(data), "mnemos") {
 		t.Fatalf("independent Claude MCP success discarded: %v %s", readErr, data)
 	}
-	if data, _ = os.ReadFile(filepath.Join(home, "settings.json")); string(data) != `{invalid hooks` {
+	if data, _ = os.ReadFile(filepath.Join(home, ".claude", "settings.json")); string(data) != `{invalid hooks` {
 		t.Fatal("failed hook file changed")
 	}
 }
@@ -139,13 +139,13 @@ func TestInitOwnedGuardMigrationPreservesSiblingHooksAndFields(t *testing.T) {
 		map[string]any{"matcher": old, "onlyOwnedExtra": "keep-empty-group", "hooks": []any{map[string]any{"type": "command", "command": command}}},
 	}}}
 	encoded, _ := json.Marshal(cfg)
-	initWrite(t, filepath.Join(home, "settings.json"), string(encoded))
+	initWrite(t, filepath.Join(home, ".claude", "settings.json"), string(encoded))
 	captureStdout(t, func() {
 		if err := runInit(context.Background(), nil); err != nil {
 			t.Fatal(err)
 		}
 	})
-	first, err := os.ReadFile(filepath.Join(home, "settings.json"))
+	first, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,9 +171,6 @@ func TestInitOwnedGuardMigrationPreservesSiblingHooksAndFields(t *testing.T) {
 				if matcher == old {
 					ownedOld++
 				}
-				if matcher == old+"|mcp__mnemos__mnemos_checkpoint" {
-					newOwned++
-				}
 			case "user-hook --keep":
 				userCount++
 				if group["customGroup"] != "preserve" || !reflect.DeepEqual(hook, user) {
@@ -183,6 +180,10 @@ func TestInitOwnedGuardMigrationPreservesSiblingHooksAndFields(t *testing.T) {
 				otherCount++
 				if matcher != old {
 					t.Fatal("other executable migrated")
+				}
+			default:
+				if matcher == old+"|mcp__mnemos__mnemos_checkpoint" && strings.HasSuffix(hook["command"].(string), "hook pre-tool") {
+					newOwned++
 				}
 			}
 		}
@@ -195,7 +196,7 @@ func TestInitOwnedGuardMigrationPreservesSiblingHooksAndFields(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	second, _ := os.ReadFile(filepath.Join(home, "settings.json"))
+	second, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if string(first) != string(second) {
 		t.Fatal("repeat init rewrote hooks")
 	}

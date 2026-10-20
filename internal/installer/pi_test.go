@@ -11,9 +11,7 @@ import (
 )
 
 // setupPiHome builds an isolated HOME with a pi agent dir and returns
-// (home, agentDir). PI_CODING_AGENT_DIR relocates the target the same way
-// CLAUDE_CONFIG_DIR relocates Claude Code's, so nothing touches the
-// developer's real pi configuration.
+// (home, agentDir), keeping installer tests away from the developer's files.
 func setupPiHome(t *testing.T) (string, string) {
 	t.Helper()
 	home := t.TempDir()
@@ -23,9 +21,6 @@ func setupPiHome(t *testing.T) (string, string) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
-	// Keep the Claude Code target out of the picture.
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	return home, agentDir
 }
 
@@ -118,9 +113,9 @@ func TestPiPackageMCPInstalledDoesNotTrustRemoteName(t *testing.T) {
 	}
 }
 
-func findTarget(t *testing.T, name string) (installer.Target, bool) {
+func findTarget(t *testing.T, name string, options ...installer.Options) (installer.Target, bool) {
 	t.Helper()
-	for _, tg := range installer.DetectTargets() {
+	for _, tg := range installer.DetectTargets(options...) {
 		if tg.Name == name {
 			return tg, true
 		}
@@ -148,7 +143,6 @@ func TestDetectTargetsSkipsPiWhenAgentDirMissing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(home, "nope"))
 
 	if _, ok := findTarget(t, "pi"); ok {
 		t.Error("an absent pi agent dir must not produce a target")
@@ -163,9 +157,7 @@ func TestDetectTargetsHonoursPiAgentDirOverride(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("PI_CODING_AGENT_DIR", custom)
-
-	tg, ok := findTarget(t, "pi")
+	tg, ok := findTarget(t, "pi", installer.Options{PiAgentDir: custom})
 	if !ok {
 		t.Fatal("the override dir must still yield a target")
 	}

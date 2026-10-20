@@ -10,7 +10,7 @@ type Handler = (...args: any[]) => any;
  * A PiApi stub that records handlers and controls what each exec returns.
  * `responses` maps the subcommand words (joined) to a stdout payload.
  */
-function harness(responses: Record<string, string> = {}, env: Record<string, string> = {}) {
+function harness(responses: Record<string, string> = {}, disabled = false) {
   const handlers = new Map<string, Handler[]>();
   const calls: string[][] = [];
   const pi: PiApi = {
@@ -20,6 +20,7 @@ function harness(responses: Record<string, string> = {}, env: Record<string, str
       handlers.set(event, list);
     },
     async exec(command, args) {
+      if (args[0] === "config") return { stdout: JSON.stringify({ protocol_version: 1, disabled, continuity: { enabled: false } }), stderr: "", code: 0, killed: false };
       calls.push([command, ...args]);
       const key = args.join(" ");
       for (const [pattern, stdout] of Object.entries(responses)) {
@@ -28,12 +29,17 @@ function harness(responses: Record<string, string> = {}, env: Record<string, str
       return { stdout: "", stderr: "", code: 0, killed: false };
     },
   };
-  // Pin the environment the extension reads.
-  for (const [k, v] of Object.entries(env)) process.env[k] = v;
   mnemosPi(pi);
+  let started = false;
   return {
     calls,
     async fire(event: string, payload: any, ctx: any = { cwd: "/repo/mnemos" }) {
+      if (!started && event !== "session_start") {
+        started = true;
+        for (const h of handlers.get("session_start") ?? []) await h({ reason: "startup" }, ctx);
+        calls.length = 0;
+      }
+      started = true;
       const results = [];
       for (const h of handlers.get(event) ?? []) results.push(await h(payload, ctx));
       return results.filter((r) => r !== undefined);
@@ -41,13 +47,7 @@ function harness(responses: Record<string, string> = {}, env: Record<string, str
   };
 }
 
-function clearEnv() {
-  delete process.env.MNEMOS_DISABLED;
-  delete process.env.MNEMOS_BIN;
-}
-
 test("session_start runs prewarm and captures the session id", async () => {
-  clearEnv();
   const h = harness({ prewarm: '{"session_id":"S1","text":"PREWARM BLOCK"}' });
   await h.fire("session_start", { reason: "startup" });
 
@@ -56,7 +56,6 @@ test("session_start runs prewarm and captures the session id", async () => {
 });
 
 test("prewarm is pushed on the first turn, not stored in history", async () => {
-  clearEnv();
   const h = harness({
     prewarm: '{"session_id":"S1","text":"PREWARM BLOCK"}',
   });
@@ -76,7 +75,6 @@ test("prewarm is pushed on the first turn, not stored in history", async () => {
 });
 
 test("a correction-shaped prompt pushes the capture directive for that turn", async () => {
-  clearEnv();
   const h = harness({
     "hook user-prompt": '{"context":"[mnemos: capture required] call mnemos_correct"}',
   });
@@ -86,14 +84,12 @@ test("a correction-shaped prompt pushes the capture directive for that turn", as
 });
 
 test("a routine prompt with no memory adds nothing to the system prompt", async () => {
-  clearEnv();
   const h = harness({ "hook user-prompt": '{"block":false}' });
   const results = await h.fire("before_agent_start", { prompt: "what time is it", systemPrompt: "BASE" });
   assert.equal(results.length, 0, "no context means no systemPrompt rewrite");
 });
 
 test("a blocked pre-tool call returns a block reason and no context", async () => {
-  clearEnv();
   const h = harness({
     "hook pre-tool": '{"block":true,"block_reason":"mnemos: blocked mnemos_save — rules: instruction-override"}',
   });
@@ -113,7 +109,6 @@ test("a clean edit does not block and does not push", async () => {
   // to amend and the turn's messages are already fixed. What the event is
   // for here is the guardrail. This asserts the absence of a push, which is
   // the documented pi constraint, not an oversight.
-  clearEnv();
   const h = harness({ "hook pre-tool": '{"context":"[mnemos: memory relevant to a.go]"}' });
   const results = await h.fire("tool_call", {
     toolName: "edit",
@@ -124,7 +119,6 @@ test("a clean edit does not block and does not push", async () => {
 });
 
 test("unrelated tools are never sent to the pre-tool hook", async () => {
-  clearEnv();
   const h = harness({ "hook pre-tool": '{"block":true,"block_reason":"should not happen"}' });
   const results = await h.fire("tool_call", { toolName: "bash", input: { command: "ls" } });
   assert.equal(results.length, 0);
@@ -132,7 +126,6 @@ test("unrelated tools are never sent to the pre-tool hook", async () => {
 });
 
 test("a successful edit records a touch and a failed one does not", async () => {
-  clearEnv();
   const h = harness({});
 
   await h.fire("tool_result", { toolName: "edit", input: { path: "a.go" }, isError: false });
@@ -145,7 +138,6 @@ test("a successful edit records a touch and a failed one does not", async () => 
 });
 
 test("session_shutdown closes the session and clears state", async () => {
-  clearEnv();
   const h = harness({ prewarm: '{"session_id":"S1","text":"P"}' });
   await h.fire("session_start", { reason: "startup" });
   await h.fire("session_shutdown", { reason: "quit" });
@@ -155,7 +147,6 @@ test("session_shutdown closes the session and clears state", async () => {
 });
 
 test("a fresh session_start does not inherit the previous session's id", async () => {
-  clearEnv();
   let n = 0;
   const handlers: Handler[] = [];
   const calls: string[][] = [];
@@ -164,6 +155,7 @@ test("a fresh session_start does not inherit the previous session's id", async (
       if (event === "session_start") handlers.push(handler);
     },
     async exec(_command, args) {
+      if (args[0] === "config") return { stdout: '{"protocol_version":1,"disabled":false,"continuity":{"enabled":false}}', stderr: "", code: 0, killed: false };
       calls.push(args);
       n += 1;
       return { stdout: `{"session_id":"S${n}","text":"P"}`, stderr: "", code: 0, killed: false };
@@ -176,20 +168,14 @@ test("a fresh session_start does not inherit the previous session's id", async (
   assert.equal(calls.filter((a) => a[0] === "prewarm").length, 2);
 });
 
-test("the disable switch suppresses every invocation", async () => {
-  clearEnv();
-  process.env.MNEMOS_DISABLED = "1";
-  try {
-    const h = harness({ prewarm: '{"session_id":"S1","text":"P"}' });
-    await h.fire("session_start", { reason: "startup" });
-    await h.fire("before_agent_start", { prompt: "we tried X", systemPrompt: "B" });
-    await h.fire("tool_call", { toolName: "mcp__mnemos_mnemos_save", input: {} });
-    await h.fire("tool_result", { toolName: "edit", input: { path: "a.go" }, isError: false });
-    await h.fire("session_shutdown", {});
-    assert.equal(h.calls.length, 0, `no subcommand may run while disabled: ${JSON.stringify(h.calls)}`);
-  } finally {
-    clearEnv();
-  }
+test("file-disabled integration suppresses every automatic hook", async () => {
+  const h = harness({ prewarm: '{"session_id":"S1","text":"P"}' }, true);
+  await h.fire("session_start", { reason: "startup" });
+  await h.fire("before_agent_start", { prompt: "we tried X", systemPrompt: "B" });
+  await h.fire("tool_call", { toolName: "mcp__mnemos_mnemos_save", input: {} });
+  await h.fire("tool_result", { toolName: "edit", input: { path: "a.go" }, isError: false });
+  await h.fire("session_shutdown", {});
+  assert.equal(h.calls.length, 0, `no subcommand may run while disabled: ${JSON.stringify(h.calls)}`);
 });
 
 test("helpers behave", () => {

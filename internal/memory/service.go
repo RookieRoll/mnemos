@@ -38,12 +38,14 @@ type InjectionRecorder interface {
 // packing. Transports (MCP, HTTP, CLI) call Service methods, never the Store
 // directly.
 type Service struct {
-	store      Store
-	ranker     *Ranker
-	hybrid     HybridParams
-	embedder   Embedder
-	injections InjectionRecorder
-	clock      func() time.Time
+	store            Store
+	ranker           *Ranker
+	hybrid           HybridParams
+	embedder         Embedder
+	injections       InjectionRecorder
+	clock            func() time.Time
+	defaultLimit     int
+	maxContextTokens int
 }
 
 // Config bundles injected dependencies for the memory service.
@@ -57,10 +59,19 @@ type Config struct {
 	Injections InjectionRecorder
 	Clock      func() time.Time
 	AgentID    string
+	// DefaultLimit and MaxContextTokens apply only when callers omit limits.
+	DefaultLimit     int
+	MaxContextTokens int
 }
 
 // NewService builds a Service from a Store and ranking params.
 func NewService(cfg Config) *Service {
+	if cfg.DefaultLimit <= 0 {
+		cfg.DefaultLimit = 20
+	}
+	if cfg.MaxContextTokens <= 0 {
+		cfg.MaxContextTokens = 2000
+	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
@@ -74,12 +85,14 @@ func NewService(cfg Config) *Service {
 	}
 	hybrid = hybrid.fillDefaults()
 	return &Service{
-		store:      cfg.Store,
-		ranker:     NewRanker(params),
-		hybrid:     hybrid,
-		embedder:   cfg.Embedder,
-		injections: cfg.Injections,
-		clock:      cfg.Clock,
+		store:            cfg.Store,
+		ranker:           NewRanker(params),
+		hybrid:           hybrid,
+		embedder:         cfg.Embedder,
+		injections:       cfg.Injections,
+		clock:            cfg.Clock,
+		defaultLimit:     cfg.DefaultLimit,
+		maxContextTokens: cfg.MaxContextTokens,
 	}
 }
 
@@ -409,7 +422,7 @@ func (s *Service) SearchWithMode(ctx context.Context, in SearchInput) ([]SearchR
 
 	limit := in.Limit
 	if limit <= 0 {
-		limit = 20
+		limit = s.defaultLimit
 	}
 	// Pull a wider net than the caller asked for so ranking has room to
 	// re-order. This is the cheap part; network/context cost is downstream.
@@ -682,14 +695,14 @@ func snippetFrom(content string) string {
 func (s *Service) Context(ctx context.Context, in ContextInput) (*ContextBlock, error) {
 	maxTokens := in.MaxTokens
 	if maxTokens <= 0 {
-		maxTokens = 2000
+		maxTokens = s.maxContextTokens
 	}
 
 	results, err := s.Search(ctx, SearchInput{
 		Query:   in.Query,
 		AgentID: in.AgentID,
 		Project: in.Project,
-		Limit:   50,
+		Limit:   s.defaultLimit,
 	})
 	if err != nil {
 		return nil, err

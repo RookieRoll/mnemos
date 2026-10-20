@@ -6,10 +6,18 @@
 # Mix scenarios across explicitness levels. An explicit "save this" should
 # pass nearly always (control). A quiet "btw we always X" embedded in other
 # work is the realistic stress test, where the agent is most tempted to skip.
+# The runner uses the isolated runtime config and bare host settings described
+# in verify/README.md; no globally installed hooks or MCP servers are loaded.
 
 arm:
   cmd:
-    - {{verify_dir}}/verify/runners/on.sh
+    - python3
+    - "{{verify_dir}}/runners/snapshot.py"
+    - --config
+    - "{{verify_dir}}/runners/runtime.local.json"
+    - --arm
+    - on
+    - --trigger
     - "{{trigger}}"
 
 scenarios:

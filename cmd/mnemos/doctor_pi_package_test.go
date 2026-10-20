@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,7 +10,7 @@ import (
 )
 
 func TestRunDoctorAcceptsVerifiedLocalPiPackageWithoutGlobalEntry(t *testing.T) {
-	agentDir := setupPiHomeForInit(t)
+	agentDir, ctx := setupPiHomeForInit(t)
 	root := filepath.Join(agentDir, "local-package")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
@@ -35,7 +34,7 @@ func TestRunDoctorAcceptsVerifiedLocalPiPackageWithoutGlobalEntry(t *testing.T) 
 		}
 	}
 	var doctorErr error
-	out := captureStdout(t, func() { doctorErr = runDoctor(context.Background(), nil) })
+	out := captureStdout(t, func() { doctorErr = runDoctor(ctx, nil) })
 	if doctorErr != nil {
 		t.Fatalf("package-only doctor: %v\n%s", doctorErr, out)
 	}

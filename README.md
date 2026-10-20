@@ -168,7 +168,7 @@ Manual configurations:
 }
 ```
 
-`mnemos init` also writes hooks to `~/.claude/settings.json` (honours `CLAUDE_CONFIG_DIR`) and removes ones earlier releases installed that are no longer used. The two `SessionStart` hooks open a session with a prewarm block, and restore that session's state after a compaction:
+`mnemos init` also writes hooks to the configured Claude Code settings directory (`[clients].claude_config_dir`, default `~/.claude`) and removes obsolete Mnemos-owned hooks. The two `SessionStart` hooks open a session with a prewarm block, and restore that session's state after a compaction:
 
 ```json
 {
@@ -198,7 +198,7 @@ Same `mcpServers.mnemos` shape. Paths:
 | Cursor | `~/.cursor/mcp.json` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Claude Desktop (Windows) | `~\AppData\Roaming\Claude\claude_desktop_config.json` (set `[clients].claude_desktop_config_path` when redirected) |
 
 Codex CLI uses TOML at `~/.codex/config.toml`:
 
@@ -234,22 +234,14 @@ The name is not cosmetic: the adapter derives tool names from it, so a package i
 
 For a self-contained install that does not depend on the checkout, copy the package into pi's user directory and install the copy — see the Windows section below.
 
-The extension shells out to the `mnemos` executable, so it needs to be findable. Either put it on `PATH`, or point `MNEMOS_BIN` at it — which is what the Windows install below does, since the binary lives outside any standard bin directory there:
-
-```powershell
-[Environment]::SetEnvironmentVariable('MNEMOS_BIN', 'D:\software\mnemos\mnemos.exe', 'User')
-```
-
-`pi install` writes the package source into `~/.pi/agent/settings.json` (add `-l` for a project-local `.pi/settings.json` instead). Relative paths resolve against the settings file that names them, so a project-local `./pi` stays valid only while the checkout stays put.
-
-MCP config for `pi-mcp-adapter` is separate, at `~/.pi/agent/mcp-adapter.json` (override the directory with `PI_CODING_AGENT_DIR`). The adapter no longer reads pi's own `mcp.json` — that file belongs to pi's built-in MCP support — so an older `~/.pi/agent/mcp.json` needs a rename (`mv mcp.json mcp-adapter.json`, merging if a target already exists):
+The package's `mcp.json` is the single executable/config route used by both the MCP adapter and hooks. Use an absolute binary path or a bare program name and, if selecting a nondefault TOML, one absolute `--config` path:
 
 ```json
 {
   "mcpServers": {
     "mnemos": {
-      "command": "/full/path/to/mnemos",
-      "args": ["serve"],
+      "command": "D:/software/mnemos/mnemos.exe",
+      "args": ["--config", "D:/Users/alex/.mnemos/config.toml", "serve"],
       "directTools": true,
       "toolPrefix": "mcp"
     }
@@ -257,9 +249,9 @@ MCP config for `pi-mcp-adapter` is separate, at `~/.pi/agent/mcp-adapter.json` (
 }
 ```
 
-`directTools` registers the tools directly instead of behind the adapter's single proxy tool, so the model can call them without a discovery step. Neither `directTools` nor `toolPrefix` is load-bearing for the guardrail, and the name the adapter actually derives is not always the one these settings imply — routing through a package manifest prefixes the package name as well. The guardrail therefore matches on the tool-name **suffix**, so it keeps covering mnemos writes under every naming scheme.
+`directTools` registers the tools directly instead of behind the adapter's single proxy tool. The guardrail matches on the tool-name suffix so it covers mnemos writes under either naming scheme.
 
-After upgrading the binary, reload pi or start a new session so its adapter reconnects and discovers the current tool schemas. A local package registration reads the package directory directly; a copied package also needs its files updated. With `directTools: true`, new tools such as `mnemos_get_many`, `mnemos_neighborhood`, and `mnemos_evidence_check` are discovered automatically. If a running session still shows older tools, use the adapter's `mcp` tool with `connect` set to the configured server name to refresh its metadata, then reload pi to register the refreshed direct tools (especially when `freezeDirectTools` is enabled). Cache behavior depends on the adapter version and configured TTL; do not delete unrelated server caches or add a duplicate global server just to refresh a package route. `mnemos doctor` recognizes a local package route after checking its manifest-backed `mnemos serve` entry.
+After replacing the binary or copying updated package files, reload pi or start a new session so its adapter reconnects and discovers current tool schemas. `mnemos doctor` recognizes a local package route after checking its manifest-backed `mnemos serve` entry.
 
 What pi gets, and what it does not yet have measured:
 
@@ -272,36 +264,33 @@ What pi gets, and what it does not yet have measured:
 Keep the binary in its installation directory and the copied package under pi's user directory (`~/.pi/agent/local-packages/mnemos`). Neither installed component depends on the repository, so the checkout can be moved or deleted.
 
 ```powershell
-# 1. Build (from the repo root)
+# 1. Build a CGO-free Windows executable from the repository root.
 $env:CGO_ENABLED = '0'
-go build -ldflags "-s -w -X github.com/polyxmedia/mnemos/internal/version.Version=$(git describe --tags --always --dirty)" `
-  -o bin/mnemos.exe ./cmd/mnemos
+go build -o bin/mnemos.exe ./cmd/mnemos
 
-# 2. Install the binary
-New-Item -ItemType Directory -Force D:\software\mnemos | Out-Null
-Copy-Item bin/mnemos.exe D:\software\mnemos\mnemos.exe -Force
-
-# 3. Copy the package into pi's user directory
+# 2. Keep the binary in a stable local directory.
+$install = Join-Path $env:USERPROFILE 'software\mnemos'
 $piPackage = Join-Path $env:USERPROFILE '.pi\agent\local-packages\mnemos'
-New-Item -ItemType Directory -Force (Join-Path $piPackage 'extensions'), (Join-Path $piPackage 'skills\mnemos') | Out-Null
+New-Item -ItemType Directory -Force $install, $piPackage, (Join-Path $piPackage 'extensions'), (Join-Path $piPackage 'skills\mnemos') | Out-Null
+Copy-Item bin/mnemos.exe (Join-Path $install 'mnemos.exe') -Force
+
+# 3. Copy the manifest, MCP route, five runtime TypeScript files, and skill.
 Copy-Item pi\package.json, pi\mcp.json $piPackage -Force
-Copy-Item pi\extensions\index.ts, pi\extensions\hook-transport.ts, pi\extensions\continuity-transport.ts, pi\extensions\tool-match.ts (Join-Path $piPackage 'extensions') -Force
+Copy-Item pi\extensions\index.ts, pi\extensions\bootstrap.ts, pi\extensions\hook-transport.ts, pi\extensions\continuity-transport.ts, pi\extensions\tool-match.ts (Join-Path $piPackage 'extensions') -Force
 Copy-Item pi\skills\mnemos\SKILL.md (Join-Path $piPackage 'skills\mnemos') -Force
 
-# Keep MCP command resolution independent of pi's working directory/PATH.
+# 4. Use the same absolute executable and TOML route for MCP and hooks.
 $mcpPath = Join-Path $piPackage 'mcp.json'
 $mcp = Get-Content -LiteralPath $mcpPath -Raw | ConvertFrom-Json
-$mcp.mcpServers.mnemos.command = 'D:\software\mnemos\mnemos.exe'
+$mcp.mcpServers.mnemos.command = Join-Path $install 'mnemos.exe'
+$mcp.mcpServers.mnemos.args = @('--config', (Join-Path $env:USERPROFILE '.mnemos\config.toml'), 'serve')
 [System.IO.File]::WriteAllText($mcpPath, ($mcp | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new($false))
 
-# 4. Point pi at the copy, not the checkout
+# 5. Install the local copy and reload pi.
 pi install $piPackage
-
-# 5. Tell the extension where the binary is
-[Environment]::SetEnvironmentVariable('MNEMOS_BIN', 'D:\software\mnemos\mnemos.exe', 'User')
 ```
 
-Only the four product `.ts` files are copied — the package's `*.test.ts` files are development-only. The installed copy's `mcp.json` uses the absolute binary path; `MNEMOS_BIN` separately selects the binary used by the extension's hooks. Open a new shell after step 5 so the variable is visible. For upgrades, repeat the binary/package copy and absolute-command configuration, then reload pi. Local-path packages are skipped by pi's package updater: `pi update <local-path>` does not fetch or overwrite this copy, even if it prints `Updated`. If pi currently references a checkout, remove that exact package registration before installing the copy so only one mnemos package route remains.
+The copied package and binary no longer depend on the checkout or network registry. The route in `mcp.json` is shared by the adapter and hooks; do not add a separate binary environment variable. For upgrades, copy the new executable, `package.json`, `mcp.json`, the five runtime `.ts` files, and skill again, preserve the absolute route, then reload pi. `pi update` does not fetch or overwrite a local directory copy even if it reports `Updated`; copy the files from the repository to update it. If pi currently references a checkout, remove that exact package registration before installing the copy so only one mnemos package route remains.
 
 To unregister the copy, run `pi remove "$env:USERPROFILE\.pi\agent\local-packages\mnemos"`. Its files can then be removed from that directory.
 
@@ -314,12 +303,16 @@ Stdio: point the client at `mnemos serve`. The server advertises 23 tools and 4 
 For multi-agent or remote setups:
 
 ```bash
-MNEMOS_API_KEY=$(openssl rand -hex 32) mnemos serve --http :8080
+mnemos --config ~/.mnemos/config.toml serve --http :8080
 ```
+
+Set `server.http_addr` and `server.api_key` in that TOML file before starting the server; example hooks read these fields from the same file.
 
 Use `pkg/client` from Go or call `POST /v1/observations` directly. Reference: [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).
 
 ## CLI
+
+All runtime settings live in TOML. Use `mnemos --config <file> <command>` to select a nondefault file; see [the configuration reference](docs/CONFIGURATION.md) for defaults and migration from older environment-variable instructions.
 
 | Command | |
 | --- | --- |
@@ -353,7 +346,10 @@ Parameters: [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).
 
 ## Configuration
 
-`~/.mnemos/config.toml`, auto-created on first run. Every field is optional.
+`~/.mnemos/config.toml`, auto-created on first normal run. Every field is optional.
+Select a different file with `mnemos --config <file> <command>`; runtime product
+settings no longer come from environment overrides. See the [full configuration
+reference](docs/CONFIGURATION.md) for field defaults, effects and migration steps.
 Explicit `hybrid_alpha = 0` is preserved; omitting it uses `0.5`. The resolved
 search parameters apply equally to CLI/hook retrieval and MCP/HTTP services.
 
@@ -365,6 +361,7 @@ path = "~/.mnemos/mnemos.db"
 decay_rate         = 0.05    # uniform override at non-default values; else the per-type decay table applies
 default_limit      = 20
 max_context_tokens = 2000
+prewarm_max_tokens = 500
 hybrid_alpha       = 0.5    # 1.0 = pure BM25, 0.0 = pure vector
 
 [embedding]
@@ -378,7 +375,7 @@ path           = "~/.mnemos/vault"
 watch_interval = "5m"
 
 [dream]
-interval     = ""           # e.g. "6h"
+interval     = ""           # read by `mnemos dream --watch`; empty uses its 6h default
 stale_days   = 30
 decay_amount = 1
 
@@ -395,7 +392,26 @@ contradiction_threshold   = 1
 transport = "stdio"
 http_addr = ":8080"
 api_key   = ""
+
+[integration]
+disabled = false
+
+[continuity]
+enabled = false
+
+[clients]
+claude_config_dir = ""
+pi_agent_dir = ""
+claude_desktop_config_path = ""
+
+[diagnostics.workspaces]
+max_roots = 1000
+max_candidates = 200
+timeout = "10s"
 ```
+
+`mnemos dream` runs one pass unless `--watch` is given; `mnemos serve` does not
+start the dream daemon. Keep any configured API/provider keys private.
 
 Nothing leaves your machine by default. Network calls only happen if you set `[embedding].provider = "openai"` or run with `[server].transport = "http"`.
 

@@ -61,7 +61,7 @@ func TestHelpCommand(t *testing.T) {
 	out := captureStdout(t, func() {
 		_ = runHelp(context.Background(), nil)
 	})
-	for _, want := range []string{"serve", "init", "doctor", "dream", "vault"} {
+	for _, want := range []string{"serve", "init", "doctor [--workspaces]", "dream", "vault", "--config FILE", "~/.mnemos/config.toml"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help missing %q: %s", want, out)
 		}

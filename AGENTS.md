@@ -177,18 +177,23 @@ treat edits to them as behavioural changes, not copy edits.
 
 ## Configuration and environment
 
-`~/.mnemos/config.toml`, all fields optional, auto-created on first run. Sections:
-`storage`, `search`, `server`, `embedding`, `vault`, `dream`, `rumination`. Defaults
-live in `config.Default()` in `internal/config/config.go`; `Load` applies defaults,
-expands `~`, then validates. `mnemos config` prints the resolved config.
+`~/.mnemos/config.toml`, all fields optional, auto-created on first normal run.
+Sections are `storage`, `search`, `server`, `embedding`, `vault`, `dream`,
+`rumination`, `integration`, `continuity`, `clients` and `diagnostics.workspaces`.
+Defaults live in `config.Default()` in `internal/config/config.go`; `Load` applies
+defaults, resolves relative paths against the selected TOML directory, expands `~`,
+then validates. `mnemos --config <file> <command>` selects a nondefault file.
+Product settings are file-authoritative: former `MNEMOS_*`, `CLAUDE_CONFIG_DIR`,
+`PI_CODING_AGENT_DIR` and `APPDATA` overrides are ignored. The OS still supplies
+the user home and executable search path. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+for field defaults, consumers, limits and migration guidance.
 
-Environment variables:
-
-- `MNEMOS_DISABLED` — non-empty makes every `mnemos hook` and `mnemos prewarm`
-  no-op. The verify off-arm depends on this; do not remove the check.
-- `MNEMOS_API_KEY` — API key for `mnemos serve --http :PORT`.
-- `CLAUDE_CONFIG_DIR` — relocates Claude Code config; honoured by the installer and
-  hook wiring. Keep installer and hook paths in agreement.
+`[integration].disabled` suppresses automatic hooks/prewarm while explicit MCP
+tools remain available. `[continuity].enabled` opts supported automatic adapters
+into continuity; `workspace_root` remains per-invocation identity context, never a
+global config field. Client paths live in `[clients]`. Read-only projections and
+`doctor --workspaces` do not create an implicit missing config; an explicitly
+selected missing file is an error.
 
 ## Version bumps — eight files, one commit
 
@@ -206,7 +211,7 @@ compares both plugin copies byte-for-byte, and checks their version agreement:
 | `.agents/skills/mnemos/SKILL.md` | frontmatter `version:` |
 | `pi/skills/mnemos/SKILL.md` | frontmatter `version:` |
 
-All eight distribution files are currently unified at `0.15.1`. Release flow is
+All eight distribution files are currently unified at `0.16.0`. Release flow is
 `make release V=vX.Y.Z` (tags + pushes; GitHub Actions + goreleaser does the rest) —
 never hand-build release artifacts. A local development installation is not a
 release; keep the release workflow for published artifacts.

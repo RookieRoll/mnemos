@@ -11,25 +11,30 @@ import { setTimeout as delay } from 'node:timers/promises';
 const flags = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
   assert.ok(process.argv[index].startsWith('--') && process.argv[index + 1], 'arguments must be --name value pairs');
-  flags.set(process.argv[index].slice(2), process.argv[index + 1]);
+  const name = process.argv[index].slice(2);
+  assert.ok(['binary', 'package', 'sdk', 'adapter', 'temp-parent'].includes(name), `unknown option --${name}`);
+  assert.ok(!flags.has(name), `duplicate option --${name}`);
+  flags.set(name, process.argv[index + 1]);
 }
-const option = (name, env) => {
-  const value = flags.get(name) ?? process.env[env];
-  assert.ok(value, `supply --${name} or ${env}`);
+const option = name => {
+  const value = flags.get(name);
+  assert.ok(value, `supply --${name}`);
   assert.ok(!/^[a-z][a-z0-9+.-]*:\/\//i.test(value) && !/^(?:npx|npm:|jsr:)/i.test(value), `${name} must be an existing local filesystem path`);
   assert.ok(!/^(?:\\\\|\/\/)/.test(value), `${name} must not use a network share`);
   return resolve(value);
 };
-const sdkPath = option('sdk', 'PI_VERIFY_SDK');
-const packagePath = option('package', 'PI_VERIFY_PACKAGE');
-const adapterPath = option('adapter', 'PI_VERIFY_ADAPTER');
-const binary = option('binary', 'PI_VERIFY_BINARY');
+const sdkPath = option('sdk');
+const packagePath = option('package');
+const adapterPath = option('adapter');
+const binary = option('binary');
 for (const path of [sdkPath, packagePath, adapterPath]) assert.ok(statSync(path).isDirectory(), 'SDK/package/adapter must be local directories');
 assert.ok(statSync(binary).isFile(), 'candidate binary must be a local file');
 const tempParent = resolve(flags.get('temp-parent') ?? tmpdir());
+assert.ok(statSync(tempParent).isDirectory(), '--temp-parent must be an existing local directory');
 const fixture = mkdtempSync(join(tempParent, 'mnemos-pi-schema-'));
 const home = join(fixture, 'home'), agentDir = join(fixture, 'agent');
 const cwd = join(fixture, 'workspace'), isolatedPackage = join(fixture, 'mnemos-package');
+const config = join(fixture, 'mnemos.toml');
 for (const path of [home, agentDir, cwd]) mkdirSync(path, { recursive: true });
 // Copy only package runtime files, never user settings, models, credentials, or DBs.
 mkdirSync(isolatedPackage);
@@ -50,7 +55,7 @@ function compareTypeScript(subdirectory) {
 compareTypeScript('extensions');
 assert.ok(copiedTypeScript.length > 0, 'package must contain actual extension TypeScript');
 writeFileSync(join(isolatedPackage, 'mcp.json'), JSON.stringify({ mcpServers: {
-  mnemos: { command: binary, args: ['serve'], directTools: true, toolPrefix: 'mcp' },
+  mnemos: { command: binary, args: ['--config', config, 'serve'], directTools: true, toolPrefix: 'mcp' },
 } }, null, 2));
 const manifest = JSON.parse(readFileSync(join(isolatedPackage, 'package.json'), 'utf8'));
 assert.equal(manifest.pi.mcp, './mcp.json', 'package must use its isolated MCP manifest');
@@ -62,15 +67,17 @@ const preservedEnv = Object.fromEntries(Object.entries(process.env).filter(([key
 for (const key of Object.keys(process.env)) delete process.env[key];
 Object.assign(process.env, preservedEnv, {
   HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, 'LocalAppData'), TMP: fixture, TEMP: fixture,
-  PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', MNEMOS_CONTINUITY: '1', MNEMOS_BIN: binary,
-  MNEMOS_CONFIG: join(fixture, 'mnemos.toml'), MCP_DIRECT_TOOLS: serverName,
+  PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', MCP_DIRECT_TOOLS: serverName,
+  MNEMOS_BIN: 'ignored-binary', MNEMOS_CONFIG: join(fixture, 'ignored.toml'),
+  MNEMOS_DISABLED: '1', MNEMOS_CONTINUITY: '1',
   PI_MCP_ADAPTER_TEST_AUTH_STORE: 'memory', PI_MCP_ADAPTER_DISABLE_AUTH_CACHE: '1',
 });
-writeFileSync(process.env.MNEMOS_CONFIG, `[storage]\npath = ${JSON.stringify(join(fixture, 'mnemos.db').replaceAll('\\', '/'))}\n[embedding]\nprovider = "none"\n`);
+writeFileSync(config, `[storage]\npath = ${JSON.stringify(join(fixture, 'mnemos.db').replaceAll('\\', '/'))}\n[embedding]\nprovider = "none"\n[integration]\ndisabled = true\n[continuity]\nenabled = false\n`);
 const candidateSHA256 = sha256(binary);
 const candidateVersion = execFileSync(binary, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }).trim();
 const parsedMCP = JSON.parse(readFileSync(join(isolatedPackage, 'mcp.json'), 'utf8')).mcpServers.mnemos;
 assert.equal(parsedMCP.command, binary);
+assert.deepEqual(parsedMCP.args, ['--config', config, 'serve']);
 const provenance = { candidateBinary: binary, candidateSHA256, candidateVersion, packageVersion: manifest.version,
   packageSource: packagePath, isolatedPackage, copiedTypeScript, mcpCommand: parsedMCP.command, mcpArgs: parsedMCP.args };
 writeFileSync(join(fixture, 'provenance.json'), JSON.stringify(provenance, null, 2));

@@ -1,7 +1,7 @@
 // Versioned continuity transport deliberately does not use the legacy hook
 // parser: an empty/silent hook response cannot prove a transaction committed.
 import type { PiApi } from "./hook-transport.ts";
-import { mnemosCommand } from "./hook-transport.ts";
+import type { MnemosRoute } from "./bootstrap.ts";
 import { isAbsolute } from "node:path";
 
 /** Explicit startup input. Its key and complete payload survive an exact retry. */
@@ -36,9 +36,9 @@ function object(stdout: string): Record<string, unknown> | undefined {
 }
 
 /** Checks support without opening a session or inferring it from silent output. */
-export async function continuitySupport(pi: PiApi, timeout: number): Promise<ContinuitySupport> {
+export async function continuitySupport(pi: PiApi, timeout: number, route: MnemosRoute): Promise<ContinuitySupport> {
   try {
-    const result = await pi.exec(mnemosCommand(), ["continuity", "capabilities"], { timeout });
+    const result = await pi.exec(route.command, [...route.configArgs, "continuity", "capabilities"], { timeout });
     if (result.killed) return "unknown";
     // Old mnemos dispatches an unknown top-level command before loading config
     // or a database. Match that exact diagnostic, not an arbitrary substring.
@@ -53,9 +53,9 @@ export async function continuitySupport(pi: PiApi, timeout: number): Promise<Con
 }
 
 /** Performs one bounded attempt. Undefined means the commit outcome is unknown. */
-export async function continuityOpen(pi: PiApi, payload: ContinuityStart, timeout: number): Promise<ContinuityOpened | undefined> {
+export async function continuityOpen(pi: PiApi, payload: ContinuityStart, timeout: number, route: MnemosRoute): Promise<ContinuityOpened | undefined> {
   try {
-    const result = await pi.exec(mnemosCommand(), ["continuity", "open", "--payload", JSON.stringify(payload)], { timeout });
+    const result = await pi.exec(route.command, [...route.configArgs, "continuity", "open", "--payload", JSON.stringify(payload)], { timeout });
     if (result.killed || result.code !== 0) return;
     const value = object(result.stdout);
     if (value?.protocol_version !== 1 || (value.status !== "applied" && value.status !== "replayed")) return;

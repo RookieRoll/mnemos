@@ -5,6 +5,7 @@
 // whether a result came from a spawned process or, later, from an HTTP
 // daemon. That seam is the reason this file exists separately from the
 // event wiring.
+import type { MnemosRoute } from "./bootstrap.ts";
 
 /** The neutral result envelope every hook emits under `--format json`. */
 export interface HookResult {
@@ -66,24 +67,6 @@ export interface HookInvoker {
 export const EMPTY: HookResult = Object.freeze({ block: false });
 
 /**
- * The global kill switch, matching the Go side's `MNEMOS_DISABLED`.
- * Semantics differ slightly and deliberately: mnemos honours any non-empty
- * value, while pi's disable is only meaningful for the truthy spellings a
- * user would actually type, so a stray `MNEMOS_DISABLED=0` does not
- * silently turn memory off.
- */
-export function isDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.MNEMOS_DISABLED ?? "").trim().toLowerCase();
-  return raw !== "" && raw !== "0" && raw !== "false" && raw !== "no";
-}
-
-/** Where the mnemos binary is expected to be. */
-export function mnemosCommand(env: NodeJS.ProcessEnv = process.env): string {
-  const override = (env.MNEMOS_BIN ?? "").trim();
-  return override !== "" ? override : "mnemos";
-}
-
-/**
  * Spawn-backed invoker: the same shape mnemos already uses with Claude
  * Code — a short-lived process per event.
  *
@@ -91,17 +74,18 @@ export function mnemosCommand(env: NodeJS.ProcessEnv = process.env): string {
  * flag is the only reason this transport is expressible at all, and it is
  * why the Go side grew it.
  */
-export function createSpawnInvoker(pi: PiApi, env: NodeJS.ProcessEnv = process.env): HookInvoker {
-  const command = mnemosCommand(env);
+export function createSpawnInvoker(pi: PiApi, route: MnemosRoute, disabled = false): HookInvoker {
   return {
-    disabled: () => isDisabled(env),
+    disabled: () => disabled,
     async prewarm(payload, timeoutMs) {
-      const raw = await runCapture(pi, command, ["prewarm"], payload, timeoutMs);
+      if (disabled) return EMPTY;
+      const raw = await runCapture(pi, route, ["prewarm"], payload, timeoutMs);
       const text = (raw as { text?: unknown }).text;
       return typeof text === "string" ? { ...raw, context: text } : raw;
     },
     async run(subcommand, payload, timeoutMs) {
-      return runCapture(pi, command, subcommand, payload, timeoutMs);
+      if (disabled) return EMPTY;
+      return runCapture(pi, route, subcommand, payload, timeoutMs);
     },
   };
 }
@@ -112,18 +96,18 @@ export function createSpawnInvoker(pi: PiApi, env: NodeJS.ProcessEnv = process.e
  */
 async function runCapture(
   pi: PiApi,
-  command: string,
+  route: MnemosRoute,
   subcommand: string[],
   payload: HookPayload,
   timeoutMs: number,
 ): Promise<HookResult> {
   try {
     const result = await pi.exec(
-      command,
-      [...subcommand, "--payload", JSON.stringify(payload), "--format", "json"],
+      route.command,
+      [...route.configArgs, ...subcommand, "--payload", JSON.stringify(payload), "--format", "json"],
       { timeout: timeoutMs },
     );
-    return parseHookResult(result.stdout);
+    return result.killed || result.code !== 0 ? EMPTY : parseHookResult(result.stdout);
   } catch {
     // Degraded-silent is the whole contract: an unreachable binary, a
     // timeout, or a non-zero exit must not obstruct the session.

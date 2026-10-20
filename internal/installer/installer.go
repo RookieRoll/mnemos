@@ -40,13 +40,31 @@ type ServerEntry struct {
 	Env     map[string]string `json:"env,omitempty"`
 }
 
-// piAgentDirEnv overrides the pi agent directory, mirroring how
-// CLAUDE_CONFIG_DIR relocates Claude Code's. pi itself resolves its agent
-// dir from a package manifest's `piConfig.configDir` plus an uppercased
-// app-name env var, and only the host knows its own app name, so mnemos
-// honours the documented generic override and the default path rather
-// than reimplementing that rebranding logic.
-const piAgentDirEnv = "PI_CODING_AGENT_DIR"
+// Options injects file-resolved client paths. Empty paths use conventional
+// OS-home-based locations; host environment overrides are not read.
+type Options struct {
+	ClaudeConfigDir         string
+	PiAgentDir              string
+	ClaudeDesktopConfigPath string
+}
+
+func clientOptions(options []Options) Options {
+	if len(options) > 0 {
+		return options[0]
+	}
+	return Options{}
+}
+
+func piAgentDir(options Options) string {
+	if options.PiAgentDir != "" {
+		return options.PiAgentDir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pi", "agent")
+}
 
 // piTarget describes pi's MCP config location. The adapter reads MCP
 // servers from several files with a defined precedence; the agent-dir
@@ -58,23 +76,19 @@ const piAgentDirEnv = "PI_CODING_AGENT_DIR"
 // config. The adapter stopped reading pi's own mcp.json — that file now
 // belongs to pi's built-in MCP support, so writing an entry there would
 // register mnemos twice and leave the adapter blind to it.
-func piMCPConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	if d := os.Getenv(piAgentDirEnv); d != "" {
+func piMCPConfigPath(options ...Options) string {
+	if d := piAgentDir(clientOptions(options)); d != "" {
 		return filepath.Join(d, "mcp-adapter.json")
 	}
-	return filepath.Join(home, ".pi", "agent", "mcp-adapter.json")
+	return ""
 }
 
 // piTarget returns pi's MCP config target. The server key stays "mnemos":
 // the tool names pi ends up exposing do not depend on choosing a key that
 // spells a particular prefix, because the pi-side guardrail matches on the
 // tool-name suffix. See the change's design.md, D6.
-func piTarget() (Target, bool) {
-	p := piMCPConfigPath()
+func piTarget(options ...Options) (Target, bool) {
+	p := piMCPConfigPath(options...)
 	if p == "" {
 		return Target{}, false
 	}
@@ -84,21 +98,22 @@ func piTarget() (Target, bool) {
 // DetectTargets returns the MCP client config files that exist for the
 // current user. Non-existent files are still returned if their parent
 // directory is present, so `init` can create them idempotently.
-func DetectTargets() []Target {
+func DetectTargets(options ...Options) []Target {
+	opts := clientOptions(options)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
 	candidates := []Target{
-		{Name: "Claude Code (user)", Path: filepath.Join(claudeConfigDir(home), ".claude.json"), Key: "mnemos"},
+		{Name: "Claude Code (user)", Path: filepath.Join(claudeConfigDir(home, opts), ".claude.json"), Key: "mnemos"},
 		{Name: "Cursor", Path: filepath.Join(home, ".cursor", "mcp.json"), Key: "mnemos"},
 		{Name: "Windsurf", Path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), Key: "mnemos"},
 		{Name: "OpenAI Codex CLI", Path: filepath.Join(home, ".codex", "config.toml"), Group: "mcp_servers", Key: "mnemos", Format: FormatTOML},
 	}
-	if t, ok := piTarget(); ok {
+	if t, ok := piTarget(opts); ok {
 		candidates = append(candidates, t)
 	}
-	if p := claudeDesktopPath(); p != "" {
+	if p := claudeDesktopPath(opts); p != "" {
 		candidates = append(candidates, Target{Name: "Claude Desktop", Path: p, Key: "mnemos"})
 	}
 	out := make([]Target, 0, len(candidates))
@@ -117,33 +132,29 @@ func DetectTargets() []Target {
 	return out
 }
 
-// claudeConfigDir returns the directory that hosts Claude Code's user-scope
-// config (the one containing .claude.json). Claude Code honours the
-// CLAUDE_CONFIG_DIR env var to relocate this dir; when unset, it falls back
-// to $HOME. The installer must mirror that, otherwise mnemos gets wired into
-// ~/.claude.json while the running agent reads from $CLAUDE_CONFIG_DIR
-// and never sees the entry.
-func claudeConfigDir(home string) string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return d
+// claudeConfigDir locates the user MCP config using explicit file settings.
+func claudeConfigDir(home string, options Options) string {
+	if options.ClaudeConfigDir != "" {
+		return options.ClaudeConfigDir
 	}
 	return home
 }
 
 // claudeDesktopPath returns the per-OS Claude Desktop config path, or "" if
 // the platform doesn't ship Claude Desktop.
-func claudeDesktopPath() string {
+func claudeDesktopPath(options ...Options) string {
+	if path := clientOptions(options).ClaudeDesktopConfigPath; path != "" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
 		return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")
 	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "Claude", "claude_desktop_config.json")
-		}
+		return filepath.Join(home, "AppData", "Roaming", "Claude", "claude_desktop_config.json")
 	}
 	// No official Claude Desktop on Linux. Skip.
 	return ""
@@ -163,6 +174,26 @@ func Install(t Target, entry ServerEntry) (bool, error) {
 	}
 
 	servers := asStringMap(cfg[t.Group])
+	if t.Name == "pi (local package)" {
+		// An implicit init refresh must not silently discard the package's
+		// explicit store selector. Explicit init selectors deliberately win.
+		if len(entry.Args) == 1 && entry.Args[0] == "serve" {
+			if previous, ok := servers[t.Key].(map[string]any); ok {
+				var args []string
+				for _, raw := range asAnyList(previous["args"]) {
+					arg, ok := raw.(string)
+					if !ok {
+						args = nil
+						break
+					}
+					args = append(args, arg)
+				}
+				if normalized, ok := normalizedServeArgs(args, filepath.Dir(t.Path)); ok {
+					entry.Args = normalized
+				}
+			}
+		}
+	}
 	desired := desiredEntry(entry)
 
 	// Merge over the existing entry instead of replacing it. A pi user
@@ -382,12 +413,10 @@ func equalMaps(a, b map[string]any) bool {
 // writes: the package is installed with pi's own package command. Both pi
 // settings scopes are checked, since a project-scope install is as valid
 // as a global one.
-func PiPackageInstalled() (bool, string) {
+func PiPackageInstalled(options ...Options) (bool, string) {
 	candidates := []string{}
-	if d := os.Getenv(piAgentDirEnv); d != "" {
+	if d := piAgentDir(clientOptions(options)); d != "" {
 		candidates = append(candidates, filepath.Join(d, "settings.json"))
-	} else if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".pi", "agent", "settings.json"))
 	}
 	if wd, err := os.Getwd(); err == nil {
 		candidates = append(candidates, filepath.Join(wd, ".pi", "settings.json"))

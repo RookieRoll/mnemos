@@ -1,21 +1,33 @@
-# Behavior replay (v2): hermetic A/B per scenario.
-# - On-arm runner pulls a memory block from `mnemos hook user-prompt` and
-#   passes it via --append-system-prompt (claude -p doesn't fire the
-#   UserPromptSubmit hook). Plus the global SessionStart prewarm hook
-#   surfaces project conventions/corrections.
-# - Off-arm sets MNEMOS_DISABLED=1 so every globally-installed mnemos hook
-#   no-ops, and uses --strict-mcp-config + empty mcp config.
+# Behavior replay: isolated A/B per scenario.
+# - Each arm starts with Claude Code bare mode and explicit scratch settings;
+#   global hooks, MCP servers, skills, and project instructions are not loaded.
+# - On-arm snapshots the selected store, manually runs prewarm and the prompt
+#   hook with the same explicit candidate/config route, then injects that text.
+# - Off-arm has no Mnemos process or MCP server. Both arms disable host hooks.
+# - Set up verify/runners/runtime.local.json from runtime.example.json first.
 # - Triggers are calibrated to elicit responses that EXPOSE whether memory
 #   was applied (not "draft a commit" with no diff — that's trivial pass).
 
 arms:
   on:
     cmd:
-      - {{verify_dir}}/verify/runners/on.sh
+      - python3
+      - "{{verify_dir}}/runners/snapshot.py"
+      - --config
+      - "{{verify_dir}}/runners/runtime.local.json"
+      - --arm
+      - on
+      - --trigger
       - "{{trigger}}"
   off:
     cmd:
-      - {{verify_dir}}/verify/runners/off.sh
+      - python3
+      - "{{verify_dir}}/runners/snapshot.py"
+      - --config
+      - "{{verify_dir}}/runners/runtime.local.json"
+      - --arm
+      - off
+      - --trigger
       - "{{trigger}}"
 
 scenarios:

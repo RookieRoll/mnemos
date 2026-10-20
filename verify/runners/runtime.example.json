@@ -1,0 +1,5 @@
+{
+  "mnemos_binary": "C:/path/to/candidate/mnemos.exe",
+  "mnemos_config": "C:/path/to/selected/config.toml",
+  "claude_binary": "C:/path/to/claude.exe"
+}

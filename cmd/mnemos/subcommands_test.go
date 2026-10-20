@@ -49,7 +49,7 @@ func TestRunDreamOneShot(t *testing.T) {
 }
 
 func TestRunVaultExport(t *testing.T) {
-	home := homeWithConfig(t, "")
+	home := homeWithConfig(t, "[vault]\nenabled = true\n")
 	vaultDir := filepath.Join(home, "myvault")
 	out := captureStdout(t, func() {
 		if err := runVaultExport(context.Background(), []string{"--out", vaultDir}); err != nil {

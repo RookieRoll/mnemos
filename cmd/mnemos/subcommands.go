@@ -92,6 +92,13 @@ func runVaultWatch(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	cfg, err := readOperationConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if !cfg.Vault.Enabled {
+		return fmt.Errorf("vault watch: disabled; set [vault].enabled = true")
+	}
 
 	d, err := loadDeps(ctx)
 	if err != nil {
@@ -129,6 +136,13 @@ func runVaultExport(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	cfg, err := readOperationConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if !cfg.Vault.Enabled {
+		return fmt.Errorf("vault export: disabled; set [vault].enabled = true")
+	}
 
 	d, err := loadDeps(ctx)
 	if err != nil {
@@ -158,14 +172,12 @@ func runVaultExport(ctx context.Context, args []string) error {
 }
 
 func runVaultStatus(ctx context.Context, _ []string) error {
-	d, err := loadDeps(ctx)
+	cfg, err := readOperationConfig(ctx)
 	if err != nil {
 		return err
 	}
-	defer d.close()
-
-	fmt.Printf("vault path: %s\n", d.cfg.Vault.Path)
-	if _, err := os.Stat(d.cfg.Vault.Path); err != nil {
+	fmt.Printf("vault path: %s\n", cfg.Vault.Path)
+	if _, err := os.Stat(cfg.Vault.Path); err != nil {
 		fmt.Println("status:     not yet exported")
 		return nil
 	}

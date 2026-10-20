@@ -39,7 +39,12 @@ type hookInput struct {
 // unreachable, scanner error) we exit 0 with empty stdout. The hook must not
 // block or spam the user; degraded-silent is the right failure mode.
 func runPrewarm(ctx context.Context, args []string) error {
-	if os.Getenv("MNEMOS_DISABLED") != "" {
+	cfg, err := readOperationConfig(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mnemos prewarm:", err)
+		return nil
+	}
+	if cfg.Integration.Disabled {
 		return nil
 	}
 	fs := flag.NewFlagSet("prewarm", flag.ContinueOnError)
@@ -92,6 +97,7 @@ func runPrewarm(ctx context.Context, args []string) error {
 		Touches:      d.db.Touches(),
 		Rumination:   d.rum,
 		Injections:   injection.NewLogger(d.db.Injections(), nil),
+		MaxTokens:    d.cfg.Search.PrewarmMaxTokens,
 	})
 
 	var sessID string

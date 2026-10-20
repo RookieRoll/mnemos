@@ -1,11 +1,11 @@
 ---
 name: mnemos
 description: Persistent memory and learning-loop skills for AI coding agents using mnemos MCP tools. Use whenever mnemos_* MCP tools are available and you are doing work worth remembering. Cross-session memory, conventions, corrections, and architectural decisions surface back into context automatically. Triggers on session start (record a goal), session end (record a summary), the user says "save", "remember", "record this", "we were wrong about", and on any genuine correction or architectural decision. Keeps mnemos's memory store alive across sessions so the next session starts smarter. Without this skill, agents silently edit and the store goes empty.
-allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_pin
-version: 0.15.1
+allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_pin mcp__mnemos_mnemos_checkpoint mcp__mnemos_mnemos_resume_context
+version: 0.16.0
 author: André Figueira <andre@polyxmedia.com>
 license: MIT
-compatibility: "Designed for Claude Code; the same MCP server also works in Claude Desktop, Cursor, Windsurf, OpenAI Codex CLI, and pi. Requires the mnemos binary on PATH — run mnemos init to wire the MCP server and mnemos doctor to verify."
+compatibility: "Designed for Claude Code; the same MCP server also works in Claude Desktop, Cursor, Windsurf, OpenAI Codex CLI, and pi. The client MCP route must resolve the mnemos executable through PATH or an absolute path; run mnemos doctor to verify."
 tags: [memory, mcp, persistent-memory, learning-loop, mnemos]
 ---
 
@@ -19,11 +19,36 @@ There is a known correction already stored about this exact failure mode: _"agen
 
 ## Prerequisites
 
-- The `mnemos` binary is on `PATH`. `mnemos doctor` reports green for binary, config, storage, and each agent registration.
+- The configured client MCP command resolves the `mnemos` executable (through `PATH` or an absolute path). `mnemos doctor` reports binary, config, storage, and client registration status.
 - `mnemos init` has wired the MCP server into your agent host (Claude Code, Claude Desktop, Cursor, Windsurf, or Codex CLI).
 - The `mnemos_*` tools are visible this session. If they are not, the MCP server is not connected — see Error Handling.
 
 ## Instructions
+
+### Configuration and workspace roots
+
+Mnemos product settings come from the selected TOML file, normally
+`~/.mnemos/config.toml`; choose another file with
+`mnemos --config <absolute-path> <command>`. Do not configure Mnemos features
+with legacy `MNEMOS_*`, `CLAUDE_CONFIG_DIR` or `PI_CODING_AGENT_DIR`
+environment variables. Installed MCP commands and hooks should carry the same
+explicit config path.
+
+This project uses two agent roles: **Task Agent** and **Maintenance Agent**.
+The Task Agent determines the project boundary from the user's task and host
+workspace. A build manifest alone does not prove a boundary when a repository
+contains several modules. For Git work, use the validated worktree root. For
+non-Git work, pass an explicit existing `workspace_root` for the current
+continuity invocation. If the boundary is unclear, present the candidate roots
+and leave continuity unbound until the user or current task context identifies
+one. Do not infer a root from a basename, create a marker, or depend on a
+workspace registry/global root setting.
+
+Keep the confirmed current session ID and root for later operations in that
+session. A new session must receive the root again from its current Task Agent
+or Maintenance Agent; an older binding is not an implicit declaration. On pi,
+an explicitly opened non-Git session stays separate from the extension's
+automatic lifecycle hooks.
 
 ### Shared progress checkpoints (continuity v1)
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/polyxmedia/mnemos/internal/contextfmt"
 	"github.com/polyxmedia/mnemos/internal/continuity"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
 )
@@ -26,16 +27,25 @@ type Composer interface {
 type Config struct {
 	Core     Core
 	Composer Composer
+	// PrewarmMaxTokens bounds startup context including the session identity.
+	// Zero preserves the historical 500-token default.
+	PrewarmMaxTokens int
 }
 
 // Service coordinates committed identity and best-effort context delivery.
 type Service struct {
-	core     Core
-	composer Composer
+	core             Core
+	composer         Composer
+	prewarmMaxTokens int
 }
 
 // New constructs an explicitly wired continuity facade.
-func New(cfg Config) *Service { return &Service{core: cfg.Core, composer: cfg.Composer} }
+func New(cfg Config) *Service {
+	if cfg.PrewarmMaxTokens <= 0 {
+		cfg.PrewarmMaxTokens = 500
+	}
+	return &Service{core: cfg.Core, composer: cfg.Composer, prewarmMaxTokens: cfg.PrewarmMaxTokens}
+}
 
 // OpenResult preserves the committed receipt even when context is unavailable.
 type OpenResult struct {
@@ -53,7 +63,7 @@ func (s *Service) Open(ctx context.Context, in continuity.OpenInput) (*OpenResul
 	}
 	// Startup hooks deliver only the context string, so make the current write
 	// target explicit and distinct from a recovery source. Account for this
-	// framing before asking the composer to spend the remaining 500-token budget.
+	// framing before asking the composer to spend the remaining configured budget.
 	identity := fmt.Sprintf("Current Mnemos session (checkpoint target, distinct from recovery source):\nmnemos_session_id: %s", receipt.SessionID)
 	out := &OpenResult{OpenResult: *receipt, ContextStatus: "unavailable", Prewarm: identity}
 	if s.composer == nil {
@@ -71,7 +81,7 @@ func (s *Service) Open(ctx context.Context, in continuity.OpenInput) (*OpenResul
 	block, err := s.composer.Build(ctx, prewarm.Request{
 		Mode: prewarm.ModeSessionStart, AgentID: receipt.AgentID, Project: receipt.Project,
 		Goal: in.Goal, SessionID: receipt.SessionID, Continuity: progress,
-		MaxTokens: 500 - (len(identity)+2+3)/4,
+		MaxTokens: max(0, s.prewarmMaxTokens-contextfmt.Estimate(identity+"\n\n")),
 	})
 	if err != nil || block == nil {
 		return out, nil

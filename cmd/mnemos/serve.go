@@ -31,12 +31,24 @@ import (
 func runServe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	httpAddr := fs.String("http", "", "start HTTP server on ADDR instead of stdio (e.g. :8080)")
-	cfgPath := fs.String("config", config.DefaultPath(), "path to config file")
+	cfgPath := fs.String("config", "", "path to config file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	cfg, err := config.Load(*cfgPath)
+	if fs.NArg() != 0 {
+		return fmt.Errorf("serve: unexpected positional arguments")
+	}
+	explicit := false
+	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "config" })
+	path, err := selectConfigPath(ctx, *cfgPath, explicit)
+	if err != nil {
+		return err
+	}
+	if explicit {
+		ctx = config.ContextWithPath(ctx, path)
+	}
+	cfg, err := loadOperationConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -65,10 +77,11 @@ func runServe(ctx context.Context, args []string) error {
 		Touches:      db.Touches(),
 		Rumination:   rum,
 		Injections:   injLog,
-		MaxTokens:    500,
+		MaxTokens:    cfg.Search.PrewarmMaxTokens,
 	})
 	continuitySvc := continuityflow.New(continuityflow.Config{
 		Core: continuity.New(continuity.Config{Store: db.Continuity()}), Composer: pw,
+		PrewarmMaxTokens: cfg.Search.PrewarmMaxTokens,
 	})
 
 	addr := *httpAddr

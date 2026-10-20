@@ -2,10 +2,10 @@
 name: mnemos
 description: Persistent memory and learning-loop skills for AI coding agents using mnemos MCP tools. Use whenever mnemos_* MCP tools are available and you are doing work worth remembering. Cross-session memory, conventions, corrections, and architectural decisions surface back into context automatically. Triggers on session start (record a goal), session end (record a summary), the user says "save", "remember", "record this", "we were wrong about", and on any genuine correction or architectural decision. Keeps mnemos's memory store alive across sessions so the next session starts smarter. Without this skill, agents silently edit and the store goes empty.
 allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_pin mcp__mnemos_mnemos_checkpoint mcp__mnemos_mnemos_resume_context
-version: 0.15.1
+version: 0.16.0
 author: André Figueira <andre@polyxmedia.com>
 license: MIT
-compatibility: "Designed for any MCP-capable agent host (Claude Code, Claude Desktop, Cursor, Windsurf, OpenAI Codex CLI, pi). Requires the mnemos binary on PATH — run mnemos init to wire the MCP server and mnemos doctor to verify. On pi, installing the package in this repo also adds the harness hooks."
+compatibility: "Designed for any MCP-capable agent host (Claude Code, Claude Desktop, Cursor, Windsurf, OpenAI Codex CLI, pi). The package mcp.json route must resolve the mnemos executable through PATH or an absolute path; on pi, copy the package locally and install that copy."
 tags: [memory, mcp, persistent-memory, learning-loop, mnemos]
 ---
 
@@ -19,7 +19,7 @@ There is a known correction already stored about this exact failure mode: _"agen
 
 ## Prerequisites
 
-- The `mnemos` binary is on `PATH`. `mnemos doctor` reports green for binary, config, storage, and each agent registration.
+- The configured client MCP command resolves the `mnemos` executable (through `PATH` or an absolute path). `mnemos doctor` reports binary, config, storage, and client registration status.
 - `mnemos init` has wired the MCP server into your agent host (Claude Code, Claude Desktop, Cursor, Windsurf, or Codex CLI).
 - The `mnemos_*` tools are visible this session. If they are not, the MCP server is not connected — see Error Handling.
 
@@ -50,9 +50,29 @@ mnemos_session_end(
 
 Status values: `ok` | `failed` | `blocked` | `abandoned`. An open session with no summary is dead weight in the next session's prewarm.
 
+### Configuration and workspace roots
+
+The package `mcp.json` provides the same executable and optional absolute
+`--config` route to MCP and automatic hooks. Mnemos feature settings come from
+that TOML file; legacy product environment variables are ignored.
+
+There are two agent roles: **Task Agent** and **Maintenance Agent**. The Task
+Agent uses the current task and host workspace to determine the intended
+boundary. A build manifest alone does not prove a boundary when a repository
+contains multiple modules. Git projects use the validated worktree root;
+non-Git projects need an explicit existing `workspace_root` for the current
+continuity session. If the boundary is unclear, show the candidates and leave
+continuity unbound until it is identified. Do not create a marker, infer a root
+from a basename, or rely on a global workspace registry/root.
+
+The pi extension automatically resolves Git roots. An explicit non-Git
+continuity session remains manual and is not adopted by automatic lifecycle
+hooks. Carry its confirmed session ID and root through that session; a new
+session must declare its root again.
+
 ### Shared progress checkpoints in pi
 
-When the installed binary supports continuity and `MNEMOS_CONTINUITY=1` is set,
+When the selected TOML file sets `[continuity].enabled = true` and the installed binary supports continuity,
 pi opens an independent, workspace-bound session on each startup/reload/new/resume/
 fork. Reuse its confirmed ID. If startup's result is unknown, do not open a
 replacement or borrow a recovery source's ID; confirm using the original start

@@ -61,12 +61,14 @@ func resolveHookSession(ctx context.Context, d *deps, in hookInput, neutral bool
 // best-effort side effect against the mnemos store. Failure is always silent
 // at exit 0 — hooks must never block the user or spam the transcript.
 //
-// Honors MNEMOS_DISABLED=1 as a global kill-switch: the verify harness sets
-// this in the off-arm so the user's globally-installed mnemos hooks (which
-// fire regardless of --strict-mcp-config) cannot contaminate the off
-// transcript with prewarm-injected memory or auto-search blocks.
+// Automatic integration switches are read before any store is opened.
 func runHook(ctx context.Context, args []string) error {
-	if os.Getenv("MNEMOS_DISABLED") != "" {
+	cfg, err := readOperationConfig(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mnemos hook:", err)
+		return nil
+	}
+	if cfg.Integration.Disabled {
 		return nil
 	}
 	if len(args) == 0 {
@@ -1096,6 +1098,7 @@ func compactionRecoveryBlock(ctx context.Context, in hookInput, event string, ne
 		Touches:      d.db.Touches(),
 		Rumination:   d.rum,
 		Injections:   injection.NewLogger(d.db.Injections(), nil),
+		MaxTokens:    d.cfg.Search.PrewarmMaxTokens,
 	})
 	block, err := pw.Build(ctx, prewarm.Request{
 		Mode:      prewarm.ModeCompactionRecovery,

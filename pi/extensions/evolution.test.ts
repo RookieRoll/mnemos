@@ -12,6 +12,7 @@ function harness() {
   const pi: PiApi = {
     on(event, handler) { handlers.set(event, handler); },
     async exec(command, args) {
+      if (args[0] === "config") return { stdout: '{"protocol_version":1,"disabled":false,"continuity":{"enabled":false}}', stderr: "", code: 0, killed: false };
       calls.push([command, ...args]);
       const stdout = args[0] === "prewarm"
         ? JSON.stringify({ session_id: `S${++session}`, text: `PREWARM-${session}` })
@@ -28,11 +29,10 @@ function harness() {
   };
 }
 
-test("versioned save metadata reaches the prefixed write guardrail unchanged", async (t) => {
-  const previous = process.env.MNEMOS_DISABLED;
-  delete process.env.MNEMOS_DISABLED;
-  t.after(() => { if (previous === undefined) delete process.env.MNEMOS_DISABLED; else process.env.MNEMOS_DISABLED = previous; });
+test("versioned save metadata reaches the prefixed write guardrail unchanged", async () => {
   const h = harness();
+  await h.fire("session_start", { reason: "startup" });
+  h.calls.length = 0;
   const input = {
     title: "修订数据库规则", content: "New rule with an explicit predecessor", type: "convention",
     project: "mnemos", topic_key: "architecture/database", replaces_id: "expected-live-ID",
@@ -63,10 +63,7 @@ test("new detail, timeline and evidence-marker tools do not create extra hook pu
   assert.equal(h.calls.length, 0);
 });
 
-test("every pi session-start reason gets one fresh non-accumulating prewarm", async (t) => {
-  const previous = process.env.MNEMOS_DISABLED;
-  delete process.env.MNEMOS_DISABLED;
-  t.after(() => { if (previous === undefined) delete process.env.MNEMOS_DISABLED; else process.env.MNEMOS_DISABLED = previous; });
+test("every pi session-start reason gets one fresh non-accumulating prewarm", async () => {
   const h = harness();
   let number = 0;
   for (const reason of ["startup", "reload", "new", "resume", "fork"]) {

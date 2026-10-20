@@ -4,23 +4,29 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
 
 // Config is the fully-resolved Mnemos configuration.
 type Config struct {
-	Storage    StorageConfig    `toml:"storage"`
-	Search     SearchConfig     `toml:"search"`
-	Server     ServerConfig     `toml:"server"`
-	Embedding  EmbeddingConfig  `toml:"embedding"`
-	Vault      VaultConfig      `toml:"vault"`
-	Dream      DreamConfig      `toml:"dream"`
-	Rumination RuminationConfig `toml:"rumination"`
+	Storage     StorageConfig     `toml:"storage"`
+	Search      SearchConfig      `toml:"search"`
+	Server      ServerConfig      `toml:"server"`
+	Embedding   EmbeddingConfig   `toml:"embedding"`
+	Vault       VaultConfig       `toml:"vault"`
+	Dream       DreamConfig       `toml:"dream"`
+	Rumination  RuminationConfig  `toml:"rumination"`
+	Integration IntegrationConfig `toml:"integration"`
+	Continuity  ContinuityConfig  `toml:"continuity"`
+	Clients     ClientsConfig     `toml:"clients"`
+	Diagnostics DiagnosticsConfig `toml:"diagnostics"`
 }
 
 // StorageConfig controls the SQLite database location.
@@ -33,7 +39,39 @@ type SearchConfig struct {
 	DecayRate        float64 `toml:"decay_rate"`
 	DefaultLimit     int     `toml:"default_limit"`
 	MaxContextTokens int     `toml:"max_context_tokens"`
+	PrewarmMaxTokens int     `toml:"prewarm_max_tokens"`
 	HybridAlpha      float64 `toml:"hybrid_alpha"`
+}
+
+// IntegrationConfig controls automatic hooks without disabling explicit tools.
+type IntegrationConfig struct {
+	Disabled bool `toml:"disabled"`
+}
+
+// ContinuityConfig controls automatic shared-session startup in agent adapters.
+// Workspace roots remain explicit invocation context, never a global setting.
+type ContinuityConfig struct {
+	Enabled bool `toml:"enabled"`
+}
+
+// ClientsConfig overrides conventional client paths for installation and doctor.
+// Empty paths use the current operating-system user's conventional locations.
+type ClientsConfig struct {
+	ClaudeConfigDir         string `toml:"claude_config_dir"`
+	PiAgentDir              string `toml:"pi_agent_dir"`
+	ClaudeDesktopConfigPath string `toml:"claude_desktop_config_path"`
+}
+
+// DiagnosticsConfig controls bounded, read-only diagnostic operations.
+type DiagnosticsConfig struct {
+	Workspaces WorkspaceDiagnosticsConfig `toml:"workspaces"`
+}
+
+// WorkspaceDiagnosticsConfig bounds workspace metadata and filesystem probes.
+type WorkspaceDiagnosticsConfig struct {
+	MaxRoots      int    `toml:"max_roots"`
+	MaxCandidates int    `toml:"max_candidates"`
+	Timeout       string `toml:"timeout"`
 }
 
 // ServerConfig controls transport selection.
@@ -89,6 +127,7 @@ func Default() Config {
 			DecayRate:        0.05,
 			DefaultLimit:     20,
 			MaxContextTokens: 2000,
+			PrewarmMaxTokens: 500,
 			HybridAlpha:      0.5,
 		},
 		Server: ServerConfig{
@@ -120,6 +159,9 @@ func Default() Config {
 			ContradictionThreshold:  1,
 			StaleRawDays:            14,
 		},
+		Diagnostics: DiagnosticsConfig{Workspaces: WorkspaceDiagnosticsConfig{
+			MaxRoots: 1000, MaxCandidates: 200, Timeout: "10s",
+		}},
 	}
 }
 
@@ -127,9 +169,22 @@ func Default() Config {
 // expands ~ in paths, and validates. If path does not exist, the default
 // config is written to it and returned.
 func Load(path string) (Config, error) {
+	return load(path, true)
+}
+
+// LoadReadOnly reads and validates existing configuration without creating files.
+// Missing files return an error wrapping os.ErrNotExist, including the default.
+func LoadReadOnly(path string) (Config, error) {
+	return load(path, false)
+}
+
+func load(path string, create bool) (Config, error) {
 	cfg := Default()
 
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		if !create {
+			return cfg, fmt.Errorf("config: stat %s: %w", path, err)
+		}
 		if err := ensureDir(filepath.Dir(path)); err != nil {
 			return cfg, err
 		}
@@ -145,8 +200,22 @@ func Load(path string) (Config, error) {
 	}
 
 	applyDefaults(&cfg)
-	cfg.Storage.Path = expandHome(cfg.Storage.Path)
-	cfg.Vault.Path = expandHome(cfg.Vault.Path)
+	base, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return cfg, fmt.Errorf("config: resolve directory: %w", err)
+	}
+	resolve := func(p string) string {
+		p = expandHome(p)
+		if p != "" && !filepath.IsAbs(p) {
+			p = filepath.Join(base, p)
+		}
+		return p
+	}
+	cfg.Storage.Path = resolve(cfg.Storage.Path)
+	cfg.Vault.Path = resolve(cfg.Vault.Path)
+	cfg.Clients.ClaudeConfigDir = resolve(cfg.Clients.ClaudeConfigDir)
+	cfg.Clients.PiAgentDir = resolve(cfg.Clients.PiAgentDir)
+	cfg.Clients.ClaudeDesktopConfigPath = resolve(cfg.Clients.ClaudeDesktopConfigPath)
 
 	if err := validate(cfg); err != nil {
 		return cfg, err
@@ -154,18 +223,30 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// ConfigEnv names the environment variable that overrides DefaultPath.
-// Every command, hook and the MCP server a host spawns inherit it, so one
-// export points a whole run at a scratch store: the verify harness sets
-// it so its fixture memories stay out of the user's own store.
-const ConfigEnv = "MNEMOS_CONFIG"
+type pathContextKey struct{}
 
-// DefaultPath returns $MNEMOS_CONFIG when set, else the conventional
-// config location (~/.mnemos/config.toml).
-func DefaultPath() string {
-	if p := os.Getenv(ConfigEnv); p != "" {
+// ContextWithPath carries an explicit config selector without process globals.
+func ContextWithPath(ctx context.Context, path string) context.Context {
+	return context.WithValue(ctx, pathContextKey{}, path)
+}
+
+// HasExplicitPath reports whether this operation selected its config explicitly.
+func HasExplicitPath(ctx context.Context) bool {
+	p, ok := ctx.Value(pathContextKey{}).(string)
+	return ok && p != ""
+}
+
+// PathFromContext returns the explicit selector or the conventional default.
+func PathFromContext(ctx context.Context) string {
+	if p, ok := ctx.Value(pathContextKey{}).(string); ok && p != "" {
 		return p
 	}
+	return DefaultPath()
+}
+
+// DefaultPath returns the conventional config location (~/.mnemos/config.toml).
+// Product environment variables never change application configuration.
+func DefaultPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "mnemos.toml"
@@ -230,6 +311,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Search.MaxContextTokens == 0 {
 		cfg.Search.MaxContextTokens = d.Search.MaxContextTokens
 	}
+	if cfg.Search.PrewarmMaxTokens == 0 {
+		cfg.Search.PrewarmMaxTokens = d.Search.PrewarmMaxTokens
+	}
 	// Load starts from Default, so zero is the explicit pure-vector weight,
 	// not an absent value to replace here.
 	if cfg.Server.Transport == "" {
@@ -280,6 +364,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.Rumination.StaleRawDays == 0 {
 		cfg.Rumination.StaleRawDays = d.Rumination.StaleRawDays
 	}
+	if cfg.Diagnostics.Workspaces.MaxRoots == 0 {
+		cfg.Diagnostics.Workspaces.MaxRoots = d.Diagnostics.Workspaces.MaxRoots
+	}
+	if cfg.Diagnostics.Workspaces.MaxCandidates == 0 {
+		cfg.Diagnostics.Workspaces.MaxCandidates = d.Diagnostics.Workspaces.MaxCandidates
+	}
+	if cfg.Diagnostics.Workspaces.Timeout == "" {
+		cfg.Diagnostics.Workspaces.Timeout = d.Diagnostics.Workspaces.Timeout
+	}
 }
 
 func validate(cfg Config) error {
@@ -296,6 +389,15 @@ func validate(cfg Config) error {
 	}
 	if cfg.Search.MaxContextTokens < 100 {
 		return errors.New("config: search.max_context_tokens must be >= 100")
+	}
+	if cfg.Search.PrewarmMaxTokens < 100 {
+		return errors.New("config: search.prewarm_max_tokens must be >= 100")
+	}
+	if cfg.Diagnostics.Workspaces.MaxRoots < 1 || cfg.Diagnostics.Workspaces.MaxCandidates < 1 {
+		return errors.New("config: diagnostics.workspaces limits must be >= 1")
+	}
+	if timeout, err := time.ParseDuration(cfg.Diagnostics.Workspaces.Timeout); err != nil || timeout <= 0 {
+		return errors.New("config: diagnostics.workspaces.timeout must be a positive duration")
 	}
 	if cfg.Search.HybridAlpha < 0 || cfg.Search.HybridAlpha > 1 {
 		return errors.New("config: search.hybrid_alpha must be in [0, 1]")

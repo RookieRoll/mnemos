@@ -8,23 +8,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/polyxmedia/mnemos/internal/config"
 	"github.com/polyxmedia/mnemos/internal/installer"
 )
 
-// setupClaudeCodeHome builds an isolated $HOME with an empty .claude.json and
-// returns it. The CLAUDE_CONFIG_DIR override lets the installer target the
-// isolated tree without touching the developer's real configuration.
+// setupClaudeCodeHome builds an isolated $HOME with conventional Claude files.
 func setupClaudeCodeHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("CLAUDE_CONFIG_DIR", home)
-	// A developer's own MNEMOS_CONFIG must not steer tests at their real store.
-	t.Setenv("MNEMOS_CONFIG", "")
 	// Seed .claude.json so DetectTargets picks up Claude Code (user).
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatalf("seed .claude.json: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	// Seed the .mnemos dir so loadDeps-dependent paths do not surprise
 	// the init command (init itself does not hit the DB, but defensive).
@@ -45,7 +44,7 @@ func TestRunInitWiresHookForClaudeCode(t *testing.T) {
 	}
 
 	// Verify settings.json now has the SessionStart entry.
-	settingsPath := filepath.Join(home, "settings.json")
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatalf("read settings.json: %v", err)
@@ -97,7 +96,7 @@ func TestRunInitWiresUserPromptSubmitHookForClaudeCode(t *testing.T) {
 		t.Errorf("expected UserPromptSubmit hook wired line, got: %s", out)
 	}
 
-	data, err := os.ReadFile(filepath.Join(home, "settings.json"))
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if err != nil {
 		t.Fatalf("read settings.json: %v", err)
 	}
@@ -129,7 +128,7 @@ func TestRunInitWiresPostToolUseHookForClaudeCode(t *testing.T) {
 		t.Errorf("expected PostToolUse hook wired line, got: %s", out)
 	}
 
-	data, err := os.ReadFile(filepath.Join(home, "settings.json"))
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if err != nil {
 		t.Fatalf("read settings.json: %v", err)
 	}
@@ -163,7 +162,7 @@ func TestRunInitWiresSessionEndHookForClaudeCode(t *testing.T) {
 		t.Errorf("expected SessionEnd hook wired line, got: %s", out)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
+	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	var cfg map[string]any
 	_ = json.Unmarshal(data, &cfg)
 	hooks := cfg["hooks"].(map[string]any)
@@ -190,7 +189,7 @@ func TestRunInitWiresPreToolGuardrailForClaudeCode(t *testing.T) {
 		t.Errorf("expected PreToolUse guardrail wired line, got: %s", out)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(home, "settings.json"))
+	data, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	var cfg map[string]any
 	_ = json.Unmarshal(data, &cfg)
 	hooks := cfg["hooks"].(map[string]any)
@@ -228,7 +227,7 @@ func TestRunInitWiresPreToolGuardrailForClaudeCode(t *testing.T) {
 func TestRunInitRemovesObsoleteHooks(t *testing.T) {
 	home := setupClaudeCodeHome(t)
 	selfPath, _ := os.Executable()
-	settings := filepath.Join(home, "settings.json")
+	settings := filepath.Join(home, ".claude", "settings.json")
 
 	// What an install from before this release left behind.
 	for _, old := range obsoleteClaudeHooks(selfPath) {
@@ -273,7 +272,7 @@ func TestRunDoctorFlagsObsoleteHooks(t *testing.T) {
 	home := setupClaudeCodeHome(t)
 	_ = captureStdout(t, func() { _ = runInit(context.Background(), nil) })
 	selfPath, _ := os.Executable()
-	settings := filepath.Join(home, "settings.json")
+	settings := filepath.Join(home, ".claude", "settings.json")
 	if _, err := installer.InstallHook(settings, obsoleteClaudeHooks(selfPath)[1].entry); err != nil {
 		t.Fatalf("seed obsolete hook: %v", err)
 	}
@@ -308,17 +307,17 @@ func TestRunInitSkipsHookWhenNoClaudeCode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	// Point CLAUDE_CONFIG_DIR at a non-existent path so DetectTargets will
-	// not match Claude Code (user). Its parent-dir heuristic otherwise
-	// matches any extant $HOME, which would defeat the test.
 	missing := filepath.Join(home, "no", "such", "dir")
-	t.Setenv("CLAUDE_CONFIG_DIR", missing)
+	configPath := filepath.Join(home, "selected.toml")
+	if err := os.WriteFile(configPath, []byte("[clients]\nclaude_config_dir = \"missing-claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// Seed a Cursor config dir so at least one target is detected (init
 	// would otherwise short-circuit on "no agent clients detected").
 	_ = os.MkdirAll(filepath.Join(home, ".cursor"), 0o755)
 
 	out := captureStdout(t, func() {
-		_ = runInit(context.Background(), nil)
+		_ = runInit(config.ContextWithPath(context.Background(), configPath), nil)
 	})
 	if strings.Contains(out, "SessionStart hook") {
 		t.Errorf("hook line must be absent when Claude Code not detected: %s", out)
@@ -366,9 +365,8 @@ func TestRunDoctorFailsWithoutHook(t *testing.T) {
 }
 
 // setupPiHomeForInit builds an isolated $HOME plus a pi agent dir and
-// points PI_CODING_AGENT_DIR at it, so `mnemos init` writes into the temp
-// tree rather than the developer's real pi configuration.
-func setupPiHomeForInit(t *testing.T) string {
+// selects a file that keeps the Claude target outside this test.
+func setupPiHomeForInit(t *testing.T) (string, context.Context) {
 	t.Helper()
 	home := t.TempDir()
 	agentDir := filepath.Join(home, ".pi", "agent")
@@ -377,19 +375,18 @@ func setupPiHomeForInit(t *testing.T) string {
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
-	// Point CLAUDE_CONFIG_DIR at a non-existent path so DetectTargets does
-	// not match Claude Code (user): its parent-dir heuristic otherwise
-	// matches any extant $HOME, and the hook gate would fire.
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "no", "such", "dir"))
-	return agentDir
+	configPath := filepath.Join(home, "selected.toml")
+	if err := os.WriteFile(configPath, []byte("[clients]\nclaude_config_dir = \"missing-claude\"\npi_agent_dir = \".pi/agent\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return agentDir, config.ContextWithPath(context.Background(), configPath)
 }
 
 func TestRunInitRegistersPiAndLeavesClaudeGateAlone(t *testing.T) {
-	agentDir := setupPiHomeForInit(t)
+	agentDir, ctx := setupPiHomeForInit(t)
 
 	out := captureStdout(t, func() {
-		if err := runInit(context.Background(), nil); err != nil {
+		if err := runInit(ctx, nil); err != nil {
 			t.Fatalf("init: %v", err)
 		}
 	})
@@ -416,9 +413,9 @@ func TestRunInitRegistersPiAndLeavesClaudeGateAlone(t *testing.T) {
 }
 
 func TestRunInitTwiceIsIdempotentForPi(t *testing.T) {
-	agentDir := setupPiHomeForInit(t)
+	agentDir, ctx := setupPiHomeForInit(t)
 	captureStdout(t, func() {
-		if err := runInit(context.Background(), nil); err != nil {
+		if err := runInit(ctx, nil); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -426,7 +423,7 @@ func TestRunInitTwiceIsIdempotentForPi(t *testing.T) {
 	first, _ := os.ReadFile(mcpPath)
 
 	out := captureStdout(t, func() {
-		if err := runInit(context.Background(), nil); err != nil {
+		if err := runInit(ctx, nil); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -445,17 +442,17 @@ func TestRunInitTwiceIsIdempotentForPi(t *testing.T) {
 // (it is the Codex parity level), so failing the whole check over an
 // optional capability would be misleading.
 func TestRunDoctorReportsPiHost(t *testing.T) {
-	setupPiHomeForInit(t)
+	_, ctx := setupPiHomeForInit(t)
 	// Register first, so the registration line is the success case and the
 	// only thing under test is how the missing package is reported.
 	captureStdout(t, func() {
-		if err := runInit(context.Background(), nil); err != nil {
+		if err := runInit(ctx, nil); err != nil {
 			t.Fatal(err)
 		}
 	})
 
 	out := captureStdout(t, func() {
-		_ = runDoctor(context.Background(), nil)
+		_ = runDoctor(ctx, nil)
 	})
 	if !strings.Contains(out, "✓ pi ") {
 		t.Errorf("expected a passing pi registration line, got: %s", out)
@@ -471,19 +468,19 @@ func TestRunDoctorReportsPiHost(t *testing.T) {
 // TestRunDoctorRecognizesInstalledPiPackage covers the other branch: when
 // pi settings list a mnemos package, the advisory becomes a presence line.
 func TestRunDoctorRecognizesInstalledPiPackage(t *testing.T) {
-	agentDir := setupPiHomeForInit(t)
+	agentDir, ctx := setupPiHomeForInit(t)
 	settings := `{"packages": ["npm:pi-mcp-adapter", "git:github.com/polyxmedia/mnemos@v1"]}`
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(settings), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	captureStdout(t, func() {
-		if err := runInit(context.Background(), nil); err != nil {
+		if err := runInit(ctx, nil); err != nil {
 			t.Fatal(err)
 		}
 	})
 
 	out := captureStdout(t, func() {
-		_ = runDoctor(context.Background(), nil)
+		_ = runDoctor(ctx, nil)
 	})
 	if !strings.Contains(out, "mnemos package present") {
 		t.Errorf("expected the package-present line, got: %s", out)

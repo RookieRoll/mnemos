@@ -29,6 +29,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, relative, resolve } from "node:path";
 import { realpathSync } from "node:fs";
 import { continuityOpen, continuitySupport, type ContinuityStart } from "./continuity-transport.ts";
+import { readClientSettings, readPackageRoute, type MnemosRoute } from "./bootstrap.ts";
 
 /**
  * Per-call timeouts, in milliseconds. Kept in the same range as the Claude
@@ -44,7 +45,8 @@ export const TIMEOUTS = {
 } as const;
 
 /** Session-scoped state. Rebuilt on every `session_start`, by design. */
-interface SessionState {  /** The mnemos session id prewarm established or adopted. */
+interface SessionState {
+  /** The mnemos session id prewarm established or adopted. */
   mnemosSessionId: string;
   /** The project the session is scoped to, derived once from cwd. */
   project: string;
@@ -56,11 +58,16 @@ interface SessionState {  /** The mnemos session id prewarm established or adopt
   prewarmDelivered: boolean;
   /** Unconfirmed continuity must never send an empty ID to legacy inference. */
   binding: "legacy" | "unbound" | "bound";
+  /** Pending/invalid configuration suppresses automatic calls. */
+  enabled: boolean;
+  /** Each generation retains the exact file route that established its ID. */
+  route?: MnemosRoute;
+  invoker?: HookInvoker;
 }
 
 function emptyState(): SessionState {
   return { mnemosSessionId: "", project: "", workspaceRoot: "", prewarm: "", prewarmDelivered: false,
-    binding: process.env.MNEMOS_CONTINUITY === "1" ? "unbound" : "legacy" };
+    binding: "unbound", enabled: false };
 }
 
 /**
@@ -109,8 +116,7 @@ function boundEditPath(root: string, cwd: string | undefined, path: string): str
   return relative(root, canonicalEditPath(resolve(cwd ?? process.cwd(), path))).replaceAll("\\", "/");
 }
 
-export default function mnemosPi(pi: PiApi): void {
-  const invoker: HookInvoker = createSpawnInvoker(pi);
+export default function mnemosPi(pi: PiApi, bootstrapPath?: string): void {
   let state = emptyState();
 
   // ---------------------------------------------------------------- session
@@ -123,19 +129,33 @@ export default function mnemosPi(pi: PiApi): void {
     const generation = state;
     const cwd = ctx?.cwd ?? process.cwd();
     generation.project = projectFromCwd(cwd);
-    if (invoker.disabled()) return;
+    try {
+      const route = readPackageRoute(bootstrapPath);
+      const settings = await readClientSettings(pi, route, TIMEOUTS.prewarm);
+      if (state !== generation) return;
+      if (settings.disabled) return;
+      generation.route = route;
+      generation.invoker = createSpawnInvoker(pi, route);
+      generation.enabled = true;
+      generation.binding = settings.continuity.enabled ? "unbound" : "legacy";
+    } catch (error) {
+      if (state === generation) console.warn(`mnemos: automatic integration unavailable: ${error instanceof Error ? error.message : "invalid file configuration"}`);
+      return;
+    }
+    const invoker = generation.invoker!;
+    const route = generation.route!;
 
     if (generation.binding === "unbound") {
-      const support = await continuitySupport(pi, TIMEOUTS.prewarm);
-      if (state !== generation || invoker.disabled()) return;
+      const support = await continuitySupport(pi, TIMEOUTS.prewarm, route);
+      if (state !== generation) return;
       if (support === "unknown") return;
       if (support === "supported") {
         const payload: ContinuityStart = { protocol_version: 1, start_key: randomUUID(), harness_kind: "pi", cwd };
         // One exact retry can recover a lost ACK. Never generate another key
         // or open a legacy session when the first attempt may have committed.
         for (let attempt = 0; attempt < 2; attempt++) {
-          const opened = await continuityOpen(pi, payload, TIMEOUTS.prewarm);
-          if (state !== generation || invoker.disabled()) return;
+          const opened = await continuityOpen(pi, payload, TIMEOUTS.prewarm, route);
+          if (state !== generation) return;
           if (opened) {
             generation.mnemosSessionId = opened.session_id;
             generation.project = opened.project;
@@ -153,15 +173,16 @@ export default function mnemosPi(pi: PiApi): void {
     }
     const payload: HookPayload = { hook_event_name: "SessionStart", cwd: ctx?.cwd };
     const result = await invoker.prewarm(payload, TIMEOUTS.prewarm);
-    if (state !== generation || invoker.disabled()) return;
+    if (state !== generation) return;
     generation.mnemosSessionId = result.session_id ?? "";
     generation.prewarm = result.context ?? "";
   });
   // ------------------------------------------------------------- per prompt
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
-    if (invoker.disabled()) return;
     const generation = state;
+    if (!generation.enabled) return;
+    const invoker = generation.invoker!;
     if (generation.binding === "unbound") return;
 
     const prompt: string = event?.prompt ?? "";
@@ -177,7 +198,7 @@ export default function mnemosPi(pi: PiApi): void {
       const result = await invoker.run(HOOK.userPrompt, payload, TIMEOUTS.prompt).catch(() => EMPTY);
       promptContext = (result.context ?? "").trim();
     }
-    if (state !== generation || invoker.disabled()) return;
+    if (state !== generation) return;
 
     // Prewarm rides along on whichever turn comes first rather than being
     // stashed in session history at startup, so it is present when the
@@ -213,20 +234,22 @@ export default function mnemosPi(pi: PiApi): void {
     // one invocation covers both. The guardrail is reached first on the Go
     // side: a refused call returns a block and no context.
     const relevant = isMnemosWriteTool(toolName) || isFileEditTool(toolName);
-    if (!relevant || invoker.disabled()) return;
+    const generation = state;
+    if (!relevant || !generation.enabled) return;
+    const invoker = generation.invoker!;
 
     const payload: HookPayload = {
       hook_event_name: "PreToolUse",
-      cwd: state.binding === "bound" ? state.workspaceRoot : ctx?.cwd,
+      cwd: generation.binding === "bound" ? generation.workspaceRoot : ctx?.cwd,
       tool_name: toolName,
       tool_input: toolInput as Record<string, unknown>,
-      session_id: state.mnemosSessionId,
+      session_id: generation.mnemosSessionId,
     };
-    const unbound = state.binding === "unbound";
-    if (state.binding === "bound" && isFileEditTool(toolName)) {
+    const unbound = generation.binding === "unbound";
+    if (generation.binding === "bound" && isFileEditTool(toolName)) {
       const path = filePathFromToolInput(toolInput);
       if (path !== "") {
-        payload.tool_input = { ...toolInput, file_path: boundEditPath(state.workspaceRoot, ctx?.cwd, path) };
+        payload.tool_input = { ...toolInput, file_path: boundEditPath(generation.workspaceRoot, ctx?.cwd, path) };
         // Preserve the overwritten spelling for the recursive safety scanner;
         // a symlink/alias must not hide instructions in the original path.
         if (typeof toolInput.file_path === "string") payload.tool_input._mnemos_original_file_path =
@@ -237,7 +260,7 @@ export default function mnemosPi(pi: PiApi): void {
     const subcommand = unbound ? [...HOOK.preTool, "--guardrail-only"] : [...HOOK.preTool];
     const result = await invoker.run(subcommand, payload, TIMEOUTS.preTool).catch(() => EMPTY);
 
-    if (result.block) {
+    if (state === generation && result.block) {
       return {
         block: true,
         reason: result.block_reason ?? "mnemos: blocked by the write-boundary guardrail.",
@@ -248,8 +271,9 @@ export default function mnemosPi(pi: PiApi): void {
   // -------------------------------------------------------- post-tool touch
 
   pi.on("tool_result", async (event: any, ctx: any) => {
-    if (invoker.disabled()) return;
-    if (state.binding === "unbound") return;
+    const generation = state;
+    if (!generation.enabled || generation.binding === "unbound") return;
+    const invoker = generation.invoker!;
     if (!isFileEditTool(event?.toolName ?? "")) return;
 
     // Only a call that succeeded touched anything. The harness reports
@@ -263,10 +287,10 @@ export default function mnemosPi(pi: PiApi): void {
 
     const payload: HookPayload = {
       hook_event_name: "PostToolUse",
-      cwd: state.binding === "bound" ? state.workspaceRoot : ctx?.cwd,
+      cwd: generation.binding === "bound" ? generation.workspaceRoot : ctx?.cwd,
       tool_name: event?.toolName,
-      tool_input: { file_path: state.binding === "bound" ? boundEditPath(state.workspaceRoot, ctx?.cwd, path) : path },
-      session_id: state.mnemosSessionId,
+      tool_input: { file_path: generation.binding === "bound" ? boundEditPath(generation.workspaceRoot, ctx?.cwd, path) : path },
+      session_id: generation.mnemosSessionId,
     };
     // Side-effect only: stdout is intentionally ignored, and the
     // subcommand's neutral envelope carries nothing.
@@ -276,12 +300,12 @@ export default function mnemosPi(pi: PiApi): void {
   // ----------------------------------------------------------- session end
 
   pi.on("session_shutdown", async (_event: any, ctx: any) => {
-    if (invoker.disabled()) return;
     const generation = state;
     // Invalidate pending calls before awaiting shutdown; an old close response
     // must not clear a newly started session's state.
     state = emptyState();
-    if (generation.binding === "unbound") return;
+    if (!generation.enabled || generation.binding === "unbound") return;
+    const invoker = generation.invoker!;
     const payload: HookPayload = {
       hook_event_name: "SessionEnd",
       cwd: generation.binding === "bound" ? generation.workspaceRoot : ctx?.cwd,

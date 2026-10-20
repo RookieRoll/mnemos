@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 // HookEntry describes a Claude Code hook to wire into settings.json. One
@@ -29,19 +31,18 @@ func (e HookEntry) eventName() string {
 }
 
 // ClaudeSettingsPath returns the path to the Claude Code user-scope
-// settings.json. Honours CLAUDE_CONFIG_DIR for parity with how .claude.json
-// is located; otherwise falls back to ~/.claude/settings.json.
-func ClaudeSettingsPath() string {
+// settings.json. An explicit client path overrides ~/.claude/settings.json.
+func ClaudeSettingsPath(options ...Options) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(claudeSettingsDir(home), "settings.json")
+	return filepath.Join(claudeSettingsDir(home, clientOptions(options)), "settings.json")
 }
 
-func claudeSettingsDir(home string) string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return d
+func claudeSettingsDir(home string, options Options) string {
+	if options.ClaudeConfigDir != "" {
+		return options.ClaudeConfigDir
 	}
 	return filepath.Join(home, ".claude")
 }
@@ -147,6 +148,164 @@ func UninstallHook(path string, entry HookEntry) (bool, error) {
 		return false, err
 	}
 	return true, writeAtomic(path, data)
+}
+
+// UninstallHookVariants removes selector variants of the owned hook command.
+// Older installations could inherit their configuration route from process
+// environment, while file-based installations carry --config in argv. During
+// init, remove all forms of the same executable and hook arguments before
+// installing the selected route.
+func UninstallHookVariants(path string, entry HookEntry, executable string) (bool, error) {
+	cfg, err := readSettings(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	wanted, ok := hookCommandIdentity(entry.Command, executable)
+	if !ok {
+		return false, fmt.Errorf("installer: parse owned hook command %q", entry.Command)
+	}
+	hooks := asStringMap(cfg["hooks"])
+	groups := asAnyList(hooks[entry.eventName()])
+	var variants []HookEntry
+	seen := make(map[string]bool)
+	for _, raw := range groups {
+		group, ok := raw.(map[string]any)
+		if !ok || str(group["matcher"]) != entry.Matcher {
+			continue
+		}
+		for _, rawHook := range asAnyList(group["hooks"]) {
+			hook, ok := rawHook.(map[string]any)
+			if !ok || (str(hook["type"]) != "command" && str(hook["type"]) != "") {
+				continue
+			}
+			command := str(hook["command"])
+			if command == entry.Command {
+				continue
+			}
+			identity, valid := hookCommandIdentity(command, executable)
+			if !valid || !equalCommandIdentity(identity, wanted) || seen[command] {
+				continue
+			}
+			seen[command] = true
+			variants = append(variants, HookEntry{Event: entry.Event, Matcher: entry.Matcher, Command: command})
+		}
+	}
+	changed := false
+	for _, variant := range variants {
+		removed, err := UninstallHook(path, variant)
+		if err != nil {
+			return changed, err
+		}
+		changed = changed || removed
+	}
+	return changed, nil
+}
+
+func hookCommandIdentity(command, executable string) ([]string, bool) {
+	words, ok := commandWords(command)
+	if !ok || len(words) == 0 {
+		return nil, false
+	}
+	exe := filepath.Clean(words[0])
+	if !samePath(exe, filepath.Clean(executable)) {
+		return nil, false
+	}
+	args := make([]string, 0, len(words)-1)
+	for i := 1; i < len(words); i++ {
+		arg := words[i]
+		switch {
+		case arg == "--config":
+			if i+1 >= len(words) || words[i+1] == "" {
+				return nil, false
+			}
+			i++
+		case strings.HasPrefix(arg, "--config="):
+			if strings.TrimPrefix(arg, "--config=") == "" {
+				return nil, false
+			}
+		default:
+			args = append(args, arg)
+		}
+	}
+	return args, true
+}
+
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func equalCommandIdentity(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// commandWords splits the quoted argv forms emitted by mnemos init. It
+// accepts single- and double-quoted words and backslash escapes inside them.
+func commandWords(command string) ([]string, bool) {
+	return commandWordsForOS(command, runtime.GOOS == "windows")
+}
+
+func commandWordsForOS(command string, windows bool) ([]string, bool) {
+	var words []string
+	var word strings.Builder
+	var quote rune
+	escaped, started := false, false
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if escaped {
+			word.WriteRune(r)
+			escaped, started = false, true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			} else if r == '\\' && quote == '"' && i+1 < len(runes) && runes[i+1] == '"' {
+				word.WriteRune(runes[i+1])
+				i++
+			} else {
+				word.WriteRune(r)
+			}
+			started = true
+			continue
+		}
+		switch {
+		case r == '"' || r == '\'':
+			quote, started = r, true
+		case r == '\\' && !windows:
+			escaped, started = true, true
+		case r == ' ' || r == '\t' || r == '\r' || r == '\n':
+			if started {
+				words = append(words, word.String())
+				word.Reset()
+				started = false
+			}
+		default:
+			word.WriteRune(r)
+			started = true
+		}
+	}
+	if escaped || quote != 0 {
+		return nil, false
+	}
+	if started {
+		words = append(words, word.String())
+	}
+	return words, len(words) > 0
 }
 
 // IsHookInstalled reports whether settings.json has a hook group under the

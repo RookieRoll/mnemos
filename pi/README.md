@@ -13,15 +13,23 @@ Continuity is optional. Before enabling it, restart **every host process using
 the same SQLite database** with a continuity-capable mnemos binary. An older
 adapter running the new binary is supported; an old binary sharing the database
 cannot protect the new sessions from its legacy session inference. To disable
-continuity, unset the flag and keep the new binary.
+continuity, set `[continuity].enabled = false` in the selected TOML file and keep
+the new binary.
 
-Start pi with `MNEMOS_CONTINUITY=1` in its environment. `MNEMOS_BIN` can select the
-binary; `MNEMOS_DISABLED` keeps the extension's automatic integration disabled.
-Without the continuity flag, the existing prewarm startup is retained.
+The package's `mcp.json` entry is the single executable and config route for both
+MCP and automatic hooks. Use an absolute executable path or a bare program name,
+and, when selecting a config explicitly, one absolute `--config` path. Pi rejects
+relative paths, duplicate or ambiguous selectors, shell wrappers, and server
+`env` overrides for `HOME`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, or `PATH`,
+because those settings can make the adapter and hooks resolve different files or
+executables. Other adapter-owned entry fields remain available. Feature switches
+come from the selected TOML file: `[continuity].enabled` opts into continuity
+startup, and `[integration].disabled` suppresses automatic pi integration. With
+continuity disabled, the existing prewarm startup is retained.
 Automatic pi startup resolves a Git worktree from its current directory. For a
 non-Git workspace, use the explicit continuity API with `workspace_root`; the
 extension does not guess a root from a directory name.
-There is currently no pi startup setting or environment variable for that root.
+There is currently no pi startup setting for that root.
 An agent can call `mnemos_session_start` explicitly with the
 [non-Git workspace input](../docs/MCP_TOOLS.md#shared-session-continuity-explicit-v1)
 and retain its returned session ID for subsequent explicit continuity calls;

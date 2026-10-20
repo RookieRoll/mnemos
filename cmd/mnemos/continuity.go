@@ -29,7 +29,7 @@ func runContinuity(ctx context.Context, args []string) error {
 	}
 	fs := flag.NewFlagSet("continuity "+args[0], flag.ContinueOnError)
 	payload := fs.String("payload", "", "explicit continuity v1 JSON request (maximum 32 KiB)")
-	configPath := fs.String("config", config.DefaultPath(), "path to config file")
+	configPath := fs.String("config", "", "path to config file")
 	if err := fs.Parse(args[1:]); err != nil {
 		return continuityCLIError(fmt.Errorf("%w: invalid flags", continuity.ErrValidation))
 	}
@@ -51,7 +51,16 @@ func runContinuity(ctx context.Context, args []string) error {
 	if err := continuity.DecodeJSON([]byte(*payload), target); err != nil {
 		return continuityCLIError(err)
 	}
-	cfg, err := config.Load(*configPath)
+	explicit := false
+	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "config" })
+	path, err := selectConfigPath(ctx, *configPath, explicit)
+	if err != nil {
+		return continuityCLIError(err)
+	}
+	if explicit {
+		ctx = config.ContextWithPath(ctx, path)
+	}
+	cfg, err := loadOperationConfig(ctx)
 	if err != nil {
 		return continuityCLIError(err)
 	}
@@ -64,9 +73,9 @@ func runContinuity(ctx context.Context, args []string) error {
 	core := continuity.New(continuity.Config{Store: db.Continuity()})
 	pw := prewarm.NewService(prewarm.Config{
 		Observations: db.Observations(), Sessions: db.Sessions(), Skills: db.Skills(),
-		Touches: db.Touches(), Injections: injection.NewLogger(db.Injections(), nil), MaxTokens: 500,
+		Touches: db.Touches(), Injections: injection.NewLogger(db.Injections(), nil), MaxTokens: cfg.Search.PrewarmMaxTokens,
 	})
-	flow := continuityflow.New(continuityflow.Config{Core: core, Composer: pw})
+	flow := continuityflow.New(continuityflow.Config{Core: core, Composer: pw, PrewarmMaxTokens: cfg.Search.PrewarmMaxTokens})
 	var out any
 	switch args[0] {
 	case "open":

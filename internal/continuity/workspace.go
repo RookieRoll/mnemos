@@ -77,6 +77,20 @@ func (LocalResolver) Sample(ctx context.Context, root string) WorkspaceState {
 	return WorkspaceState{}
 }
 
+// CanonicalDirectory verifies the physical directory using the same identity
+// normalization as continuity binding. Context cancellation bounds new probes;
+// an individual operating-system filesystem call may not be interruptible.
+func CanonicalDirectory(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	root, err := canonicalDirectory(path)
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	return root, err
+}
+
 func canonicalDirectory(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {

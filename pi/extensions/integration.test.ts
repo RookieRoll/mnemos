@@ -21,22 +21,19 @@ import { createSpawnInvoker, type PiApi } from "./hook-transport.ts";
 const exec = promisify(execFile);
 
 /**
- * Locates a mnemos binary. `MNEMOS_BIN` wins; otherwise the repo-root
- * build (which .gitignore excludes) is used, since that is what a
- * developer working on this change will have.
+ * A test-only selector supplies the candidate build. It is separate from
+ * the product's removed MNEMOS_BIN setting.
  *
  * The path is two levels up: this file is at pi/extensions/, and the
  * repo root carries the build.
  */
 function findBinary(): string {
-  if (process.env.MNEMOS_BIN) return process.env.MNEMOS_BIN;
-  const root = join(import.meta.dirname, "..", "..");
-  const local = join(root, process.platform === "win32" ? "mnemos.exe" : "mnemos");
-  return existsSync(local) ? local : "";
+  const candidate = process.env.MNEMOS_TEST_BIN;
+  return candidate && existsSync(candidate) ? candidate : "";
 }
 
 const binary = findBinary();
-const skip = binary === "" ? "no mnemos binary available (set MNEMOS_BIN or build ./mnemos)" : false;
+const skip = binary === "" ? "no candidate binary selected (set test-only MNEMOS_TEST_BIN)" : false;
 
 /** The correction the prompt and pre-tool tests expect to surface. */
 const CORRECTION = {
@@ -91,8 +88,8 @@ async function seededProject() {
   const home = mkdtempSync(join(tmpdir(), "mnemos-pi-it-"));
   const project = join(home, "mnemos");
   mkdirSync(project, { recursive: true });
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home, MNEMOS_BIN: binary };
-  delete env.MNEMOS_DISABLED;
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home };
+  writeFileSync(join(home, "config.toml"), `[storage]\npath = ${JSON.stringify(join(home, "mnemos.db"))}\n[embedding]\nprovider = "none"\n`);
 
   const seed = join(home, "seed.json");
   // Fidelity import preserves timestamps, including a missing timestamp's
@@ -111,7 +108,7 @@ async function seededProject() {
       skills: [],
     }),
   );
-  const { stdout } = await exec(binary, ["import", seed], { env });
+  const { stdout } = await exec(binary, ["--config", join(env.HOME!, "config.toml"), "import", seed], { env });
   assert.match(stdout, /observations 7 added/, `seed must land: ${stdout}`);
 
   return { home, project, env };
@@ -142,7 +139,7 @@ function realPi(env: NodeJS.ProcessEnv, cwd: string): PiApi {
 }
 
 function invokerFor(env: NodeJS.ProcessEnv, cwd: string) {
-  return createSpawnInvoker(realPi(env, cwd), env);
+  return createSpawnInvoker(realPi(env, cwd), { command: binary, configArgs: ["--config", join(env.HOME!, "config.toml")] });
 }
 
 test("prewarm returns the store's text and a session id", { skip }, async () => {
@@ -267,11 +264,11 @@ test("a touch is recorded and surfaces in the session summary", { skip }, async 
     20_000,
   );
 
-  const { stdout: sessions } = await exec(binary, ["sessions"], { env, cwd: project });
+  const { stdout: sessions } = await exec(binary, ["--config", join(env.HOME!, "config.toml"), "sessions"], { env, cwd: project });
   const id = sessions.trim().split(/\s+/)[0];
   assert.ok(id, `expected a session row:\n${sessions}`);
 
-  const { stdout: replay } = await exec(binary, ["replay", id], { env, cwd: project });
+  const { stdout: replay } = await exec(binary, ["--config", join(env.HOME!, "config.toml"), "replay", id], { env, cwd: project });
   assert.match(
     replay,
     /touched_by_test\.go/,
@@ -284,7 +281,7 @@ test("session-end closes the open session", { skip }, async () => {
   const invoker = invokerFor(env, project);
   await invoker.run(["prewarm"], { cwd: project }, 20_000);
 
-  const before = await exec(binary, ["sessions"], { env, cwd: project });
+  const before = await exec(binary, ["--config", join(env.HOME!, "config.toml"), "sessions"], { env, cwd: project });
   assert.match(before.stdout, /open|active/i, `expected an open session:\n${before.stdout}`);
 
   await invoker.run(
@@ -293,16 +290,13 @@ test("session-end closes the open session", { skip }, async () => {
     20_000,
   );
 
-  const after = await exec(binary, ["sessions"], { env, cwd: project });
+  const after = await exec(binary, ["--config", join(env.HOME!, "config.toml"), "sessions"], { env, cwd: project });
   assert.doesNotMatch(after.stdout, /status:\s*open/i, `session must be closed:\n${after.stdout}`);
 });
 
 test("an unavailable binary degrades to the empty result", { skip }, async () => {
-  // MNEMOS_BIN is how the invoker learns the binary path, so pointing it
-  // at nothing is the realistic "mnemos is missing" case.
-  const env = { ...process.env, MNEMOS_BIN: join(tmpdir(), "definitely-not-here-mnemos") };
-  delete env.MNEMOS_DISABLED;
-  const result = await createSpawnInvoker(realPi(env, tmpdir()), env).run(
+  // The explicit route can name an unavailable local executable.
+  const result = await createSpawnInvoker(realPi(process.env, tmpdir()), { command: join(tmpdir(), "definitely-not-here-mnemos"), configArgs: [] }).run(
     ["hook", "pre-tool"],
     { tool_name: "edit" },
     5_000,
@@ -326,7 +320,7 @@ test("the disable switch prevents any process from starting", { skip }, async ()
       return { stdout: "", stderr: "", code: 0, killed: false };
     },
   };
-  const invoker = createSpawnInvoker(pi, { ...process.env, MNEMOS_DISABLED: "1" });
+  const invoker = createSpawnInvoker(pi, { command: binary, configArgs: [] }, true);
   assert.equal(invoker.disabled(), true);
   assert.equal(calls.length, 0);
 });

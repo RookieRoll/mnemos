@@ -338,16 +338,38 @@ dream 顺序为：清理过期记忆 → 衰减闲置重要性 → 晋升技能 
 | --- | --- | --- |
 | 工具入口 | MCP server 配置启动 `mnemos serve` | 本地 package 经 MCP adapter 暴露工具 |
 | 生命周期 | 仅配置 MCP 不代表有自动启动 hook；agent 按 skill 显式调用 | 扩展处理启动、reload、new、resume、fork 等事件 |
-| 连续性开启 | 显式调用带 `continuity` 的 v1 session_start | 自动路径需 `MNEMOS_CONTINUITY=1` |
-| 非 Git 根目录 | 显式传 `workspace_root` | 可显式调用 API；自动扩展目前无该根目录配置，显式会话也不会绑定其自动 hooks |
+| 连续性开启 | agent 按 skill 显式调用；MCP 注册本身不隐含自动启动 | `[continuity].enabled = true` 后扩展按 package `mcp.json` 路由自动启动 |
+| 自动集成关闭 | `[integration].disabled = true` 关闭 Mnemos hooks/prewarm，显式 MCP 工具仍可调用 | 同一文件开关控制扩展自动行为 |
+| 非 Git 根目录 | 每次 continuity 调用显式传 `workspace_root` | Task Agent 可显式打开 continuity session；pi hooks 不会自动接管该 session |
 | 上下文交付 | 工具返回由 agent 使用，取决于宿主接入 | 启动块通过 `before_agent_start` 的 `systemPrompt` 交付 |
 | 扩展更新 | 新 MCP 进程加载新二进制 | 复制 package 到 pi 用户目录后 reload；本地目录包不由 `pi update` 下载更新 |
 
-当前本机 pi 副本位于 `~/.pi/agent/local-packages/mnemos`，是独立目录，运行时不从开发仓库加载。其 `mcp.json` 指向 `D:/software/mnemos/mnemos.exe`。更新副本时保留用户注册、MCP 的绝对程序路径及非本项目管理字段。
+pi 使用已安装 package 中的 `mcp.json` 作为 MCP 与 hook 的共同可执行文件/配置路由。离线本地副本位于 `~/.pi/agent/local-packages/mnemos` 时，更新需重新复制 package 的运行文件并 reload；`pi update` 不会下载或覆盖本地目录副本。
 
 pi 的 `tool_call` 是阻断/放行通道，不支持通过返回 system prompt 注入记忆。自动连续性启动结果未知时，扩展保持未绑定状态，不猜测其他 session；安全 guardrail 仍执行，依赖 session 的自动事件暂不发送，不排队补放。
 
 MCP 提供 23 个核心工具、4 个可选 rumination 工具，以及 4 个只读资源。只有开启 rumination 时才是 27 个工具。磁盘二进制替换后，已有 MCP 进程仍可能运行旧程序；启用连续性前，应重启同一数据库的所有旧宿主进程。
+
+### 10.1 配置选择与工作区诊断
+
+CLI 使用标准 `~/.mnemos/config.toml`，也可在命令前通过 `mnemos --config <绝对路径> <命令>` 选择配置。相对 storage、vault 和 client 路径以该 TOML 所在目录为基准；Mnemos 产品开关不从旧 `MNEMOS_*`、`CLAUDE_CONFIG_DIR`、`PI_CODING_AGENT_DIR` 或 `APPDATA` 环境变量读取。字段、默认值和限制见[配置参考](CONFIGURATION.md)。
+
+非 Git 项目由 Task Agent 根据用户明确的项目上下文、目录结构和相关构建文件判断边界，并在当前 invocation 显式传 `workspace_root`。单个 manifest 不是项目边界的证明；若多个模块或边界仍不明确，agent 应列出候选并暂不绑定。Mnemos 不创建 workspace registry、不添加必需 marker，也不把上次会话的历史根路径当作新会话的默认值。Maintenance Agent 可以按用户任务显式声明被维护项目的根；同样不维护全局 workspace 清单。
+
+```mermaid
+flowchart TD
+    Invocation["Task Agent / Maintenance Agent 当前任务"] --> Boundary["依据用户任务与宿主上下文判断项目边界"]
+    Boundary -->|"Git worktree"| GitRoot["使用已验证 worktree 根"]
+    Boundary -->|"non-Git 且清楚"| Explicit["本次调用显式 workspace_root"]
+    Boundary -->|"仍有歧义"| Ask["展示候选，暂不绑定"]
+    GitRoot --> Start["连续性 session_start"]
+    Explicit --> Start
+    Start --> Receipt["保留回执中的当前 session/root"]
+    Receipt --> Next["同一会话后续显式携带"]
+    Next --> NewSession["下一会话重新声明根目录"]
+```
+
+`mnemos doctor --workspaces` 是单独的只读报告路径：在进入普通 doctor 的配置创建、可写数据库初始化和客户端检查前分流；只读取已登记 binding 与聚合计数，只 probe 记录的根。WAL 模式要求已经存在 `-wal` 与 `-shm`；诊断可能更新已有 SHM reader mark，但不会创建/删除 sidecar 或修改主 DB/WAL 字节。物理路径相等只说明当前文件系统等价，不证明历史绑定可安全合并。详见[工作区诊断](WORKSPACE_DIAGNOSTICS.md)。
 
 当前安装构建 `0.15.1+f9de93a` 已分别通过真实 Codex app-server 19 次直接 MCP 调用、pi SDK/adapter 12 次直接工具调用，以及隔离注册的 `pi update --extensions`。这些验证不调用模型，不能推导出模型实际采纳率或 TUI 行为效果。记录见 [本轮验收](../openspec/changes/archive/2026-10-20-harden-local-memory-runtime/verification.md)。
 
@@ -359,6 +381,8 @@ MCP 提供 23 个核心工具、4 个可选 rumination 工具，以及 4 个只�
 | MCP 输入、回执、限制与错误 | [MCP_TOOLS.md](MCP_TOOLS.md) |
 | 上下文预算与投递来源 | [CONTEXT_PROTOCOL.md](CONTEXT_PROTOCOL.md) |
 | 向量 provider、兼容性与维护 | [EMBEDDINGS.md](EMBEDDINGS.md) |
+| TOML 字段、默认值与迁移 | [CONFIGURATION.md](CONFIGURATION.md) |
+| 工作区诊断分类与安全边界 | [WORKSPACE_DIAGNOSTICS.md](WORKSPACE_DIAGNOSTICS.md) |
 | 共享进度的设计取舍 | [共享会话连续性设计](../openspec/changes/archive/2026-10-19-add-shared-session-continuity/design.md) |
 | 并发升级、检索及读取优化 | [运行时加固设计](../openspec/changes/archive/2026-10-20-harden-local-memory-runtime/design.md) |
 

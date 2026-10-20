@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/polyxmedia/mnemos/internal/installer"
@@ -219,20 +221,48 @@ func TestUninstallHookMissingFile(t *testing.T) {
 	}
 }
 
-func TestClaudeSettingsPathHonoursEnv(t *testing.T) {
+func TestUninstallHookVariantsRemovesOldAndSelectedConfigRoutes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	exe := filepath.Join(dir, "mnemos O'Neil binary.exe")
+	quote := func(value string) string {
+		if runtime.GOOS == "windows" {
+			return `"` + strings.ReplaceAll(value, `"`, `\\"`) + `"`
+		}
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	desired := installer.HookEntry{Event: "SessionStart", Matcher: "startup|resume", Command: quote(exe) + " --config " + quote(filepath.Join(dir, "config O'Neil.toml")) + " prewarm"}
+	old := installer.HookEntry{Event: desired.Event, Matcher: desired.Matcher, Command: quote(exe) + " prewarm"}
+	other := installer.HookEntry{Event: desired.Event, Matcher: desired.Matcher, Command: `"` + filepath.Join(dir, "other.exe") + `" prewarm`}
+	for _, entry := range []installer.HookEntry{old, other} {
+		if _, err := installer.InstallHook(path, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changed, err := installer.UninstallHookVariants(path, desired, exe)
+	if err != nil || !changed {
+		t.Fatalf("UninstallHookVariants: changed=%v err=%v", changed, err)
+	}
+	if installer.IsHookInstalled(path, old) {
+		t.Fatal("old config-less command should be removed")
+	}
+	if !installer.IsHookInstalled(path, other) {
+		t.Fatal("unrelated executable hook should remain")
+	}
+}
+
+func TestClaudeSettingsPathUsesInjectedOrConventionalPath(t *testing.T) {
 	home := t.TempDir()
 	override := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	t.Setenv("CLAUDE_CONFIG_DIR", override)
-	got := installer.ClaudeSettingsPath()
+	got := installer.ClaudeSettingsPath(installer.Options{ClaudeConfigDir: override})
 	want := filepath.Join(override, "settings.json")
 	if got != want {
 		t.Errorf("with env: got %q, want %q", got, want)
 	}
 
-	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	got = installer.ClaudeSettingsPath()
 	want = filepath.Join(home, ".claude", "settings.json")
 	if got != want {

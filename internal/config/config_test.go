@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,9 @@ func TestDefaultReturnsSaneValues(t *testing.T) {
 	}
 	if d.Search.HybridAlpha != 0.5 {
 		t.Errorf("HybridAlpha: want 0.5, got %v", d.Search.HybridAlpha)
+	}
+	if d.Search.PrewarmMaxTokens != 500 || d.Diagnostics.Workspaces.MaxRoots != 1000 || d.Diagnostics.Workspaces.MaxCandidates != 200 || d.Diagnostics.Workspaces.Timeout != "10s" {
+		t.Errorf("unexpected operational defaults: search=%+v diagnostics=%+v", d.Search, d.Diagnostics)
 	}
 }
 
@@ -154,17 +158,44 @@ path = "~/vaults/mnemos"
 }
 
 func TestDefaultPathPointsUnderHome(t *testing.T) {
-	t.Setenv(config.ConfigEnv, "")
+	t.Setenv("MNEMOS_CONFIG", filepath.Join(t.TempDir(), "ignored.toml"))
 	p := config.DefaultPath()
 	if !strings.Contains(p, ".mnemos") {
 		t.Errorf("DefaultPath should contain .mnemos: %s", p)
 	}
+	if strings.Contains(p, "ignored.toml") {
+		t.Errorf("DefaultPath must ignore product environment configuration: %s", p)
+	}
 }
 
-func TestDefaultPathHonoursConfigEnv(t *testing.T) {
-	want := filepath.Join(t.TempDir(), "scratch.toml")
-	t.Setenv(config.ConfigEnv, want)
-	if got := config.DefaultPath(); got != want {
-		t.Errorf("DefaultPath with %s set = %q, want %q", config.ConfigEnv, got, want)
+func TestLoadReadOnlyMissingFileDoesNotCreate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "config.toml")
+	_, err := config.LoadReadOnly(path)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadReadOnly error = %v, want os.ErrNotExist", err)
+	}
+	if _, statErr := os.Stat(filepath.Dir(path)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("LoadReadOnly created parent directory: %v", statErr)
+	}
+}
+
+func TestLoadResolvesRelativePathsFromConfigDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[storage]\npath = \"data/mnemos.db\"\n[vault]\npath = \"vault\"\n[clients]\npi_agent_dir = \"pi agent\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for got, want := range map[string]string{
+		cfg.Storage.Path:       filepath.Join(dir, "data", "mnemos.db"),
+		cfg.Vault.Path:         filepath.Join(dir, "vault"),
+		cfg.Clients.PiAgentDir: filepath.Join(dir, "pi agent"),
+	} {
+		if got != want || !filepath.IsAbs(got) {
+			t.Errorf("relative path = %q, want %q", got, want)
+		}
 	}
 }

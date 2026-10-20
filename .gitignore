@@ -19,3 +19,4 @@ coverage.out
 
 # pi package tarballs (npm pack output, not a source artifact).
 /pi/*.tgz
+/verify/runners/runtime.local.json

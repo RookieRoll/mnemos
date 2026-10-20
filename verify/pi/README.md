@@ -12,14 +12,16 @@ Build the candidate mnemos binary first, then run from the repository root:
 node verify/pi/checkpoint-schema.mjs --sdk /path/to/pi-coding-agent --package /path/to/mnemos/pi --adapter /path/to/pi-mcp-adapter --binary /path/to/candidate/mnemos
 ```
 
-Each path can alternatively use `PI_VERIFY_SDK`, `PI_VERIFY_PACKAGE`,
-`PI_VERIFY_ADAPTER`, and `PI_VERIFY_BINARY`. Optional `--temp-parent /path` selects
-an existing writable directory for the retained fixture.
+All four paths are required command-line arguments. The verifier does not read
+process environment variables for its binary, package, SDK, or adapter selection.
+Optional `--temp-parent /path` selects an existing writable directory for the
+retained fixture.
 
 The script copies only the mnemos package's manifest, extensions, and skills to
 a temporary directory, writes that copy's `mcp.json` to launch the **candidate
-binary**, and loads it with the actual SDK and adapter. The original package and
-global installation remain unchanged. Hook execution uses the same candidate.
+binary with an absolute `--config` path**, and loads it with the actual SDK and
+adapter. The original package and global installation remain unchanged. Hook
+execution uses the same candidate and explicit config path.
 Home, pi settings, Git workspace, mnemos config, and SQLite database are isolated.
 Network fetches fail, credentials are empty in memory, and no model prompt is run.
 

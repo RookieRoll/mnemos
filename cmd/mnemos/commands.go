@@ -34,7 +34,7 @@ type deps struct {
 func (d *deps) close() { _ = d.db.Close() }
 
 func loadDeps(ctx context.Context) (*deps, error) {
-	cfg, err := config.Load(config.DefaultPath())
+	cfg, err := loadOperationConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
@@ -111,7 +111,7 @@ func runSearch(ctx context.Context, args []string) error {
 	}
 	defer d.close()
 
-	results, mode, err := d.mem.SearchWithMode(ctx, memory.SearchInput{Query: args[0], Limit: 20})
+	results, mode, err := d.mem.SearchWithMode(ctx, memory.SearchInput{Query: args[0]})
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}
@@ -346,18 +346,47 @@ func runPrune(ctx context.Context, _ []string) error {
 	return nil
 }
 
-func runConfig(_ context.Context, args []string) error {
+func runConfig(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
-	cfgPath := fs.String("path", config.DefaultPath(), "config path")
+	cfgPath := fs.String("path", "", "explicit config path")
+	client := fs.String("client", "", "nonsecret client projection (pi)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := config.Load(*cfgPath)
+	if fs.NArg() != 0 || (*client != "" && *client != "pi") {
+		return errors.New("config: expected --client pi and no positional arguments")
+	}
+	explicit := false
+	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "path" })
+	path, err := selectConfigPath(ctx, *cfgPath, explicit)
+	if err != nil {
+		return err
+	}
+	if explicit {
+		ctx = config.ContextWithPath(ctx, path)
+	}
+	var cfg config.Config
+	if *client == "pi" {
+		cfg, err = readOperationConfig(ctx)
+	} else {
+		cfg, err = loadOperationConfig(ctx)
+	}
 	if err != nil {
 		return err
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
+	if *client == "pi" {
+		return enc.Encode(struct {
+			ProtocolVersion int  `json:"protocol_version"`
+			Disabled        bool `json:"disabled"`
+			Continuity      struct {
+				Enabled bool `json:"enabled"`
+			} `json:"continuity"`
+		}{ProtocolVersion: 1, Disabled: cfg.Integration.Disabled, Continuity: struct {
+			Enabled bool `json:"enabled"`
+		}{Enabled: cfg.Continuity.Enabled}})
+	}
 	if err := enc.Encode(cfg); err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
@@ -481,7 +510,7 @@ func obsoleteClaudeHooks(selfPath string) []labeledHook {
 	}
 }
 
-func runInit(_ context.Context, args []string) error {
+func runInit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(os.Stdout)
 	fs.Usage = func() {
@@ -504,12 +533,24 @@ func runInit(_ context.Context, args []string) error {
 		return fmt.Errorf("init: unexpected positional arguments")
 	}
 	// Resolve every route before the first install writes user configuration.
-	plans := installer.PlanTargets()
+	cfg, err := readOperationConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("init: load config: %w", err)
+	}
+	opts := installerOptions(cfg)
+	plans := installer.PlanTargets(opts)
 	selfPath, err := os.Executable()
 	if err != nil {
 		selfPath = "mnemos"
 	}
 	entry := installer.ServerEntry{Command: selfPath, Args: []string{"serve"}}
+	if config.HasExplicitPath(ctx) {
+		entry.Args = []string{"--config", config.PathFromContext(ctx), "serve"}
+	}
+	hookPath, err := configuredCommand(ctx, selfPath)
+	if err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
 
 	if len(plans) == 0 {
 		fmt.Println("no agent clients detected (Claude Code, Claude Desktop, Cursor, Windsurf, Codex CLI, pi).")
@@ -545,7 +586,7 @@ func runInit(_ context.Context, args []string) error {
 	// optional to the agent, and agents skip optional calls when the task
 	// looks like plain editing — the failure this wiring exists to fix.
 	if hasClaudeCode {
-		settings := installer.ClaudeSettingsPath()
+		settings := installer.ClaudeSettingsPath(opts)
 		for _, old := range obsoleteClaudeHooks(selfPath) {
 			changed, err := installer.UninstallHook(settings, old.entry)
 			switch {
@@ -556,7 +597,10 @@ func runInit(_ context.Context, args []string) error {
 				fmt.Printf("  ✓ removed %s from %s\n", old.label, settings)
 			}
 		}
-		for _, h := range claudeHooks(selfPath) {
+		for _, h := range claudeHooks(hookPath) {
+			if _, err := installer.UninstallHookVariants(settings, h.entry, selfPath); err != nil {
+				failures = append(failures, fmt.Errorf("init: migrate %s (%s): %w", h.label, settings, err))
+			}
 			changed, err := installer.InstallHook(settings, h.entry)
 			switch {
 			case err != nil:
@@ -579,7 +623,10 @@ func runInit(_ context.Context, args []string) error {
 	return nil
 }
 
-func runDoctor(ctx context.Context, _ []string) error {
+func runDoctor(ctx context.Context, args []string) error {
+	if handled, err := doctorWorkspaceMode(ctx, args, os.Stdout); handled {
+		return err
+	}
 	ok := true
 	check := func(pass bool, format string, args ...any) {
 		prefix := "  ✓ "
@@ -593,12 +640,13 @@ func runDoctor(ctx context.Context, _ []string) error {
 	selfPath, _ := os.Executable()
 	check(selfPath != "", "binary path: %s", selfPath)
 
-	cfg, err := config.Load(config.DefaultPath())
+	cfg, err := loadOperationConfig(ctx)
 	if err != nil {
 		check(false, "config load: %v", err)
 		return fmt.Errorf("doctor: %w", err)
 	}
-	check(true, "config: %s", config.DefaultPath())
+	check(true, "config: %s", config.PathFromContext(ctx))
+	opts := installerOptions(cfg)
 
 	db, err := storage.Open(ctx, cfg.Storage.Path)
 	if err != nil {
@@ -609,7 +657,7 @@ func runDoctor(ctx context.Context, _ []string) error {
 	st, _ := db.Observations().Stats(ctx)
 	check(true, "storage: %s (%d observations)", cfg.Storage.Path, st.Observations)
 
-	targets := installer.DetectTargets()
+	targets := installer.DetectTargets(opts)
 	if len(targets) == 0 {
 		check(false, "no agent clients detected")
 	}
@@ -620,7 +668,7 @@ func runDoctor(ctx context.Context, _ []string) error {
 		if t.Name == "pi" && !installed {
 			// A package manifest can supply the same server without an
 			// adapter-global entry. Verify its actual files, not its name.
-			if ok, path := installer.PiPackageMCPInstalled(); ok {
+			if ok, path := installer.PiPackageMCPInstalled(opts); ok {
 				check(true, "pi package MCP %s", path)
 			} else {
 				check(false, "%s %s", t.Name, t.Path)
@@ -642,7 +690,7 @@ func runDoctor(ctx context.Context, _ []string) error {
 	// configuration (it is the Codex parity level), and failing the whole
 	// health check over an optional capability would be misleading.
 	if hasPi {
-		installed, path := installer.PiPackageInstalled()
+		installed, path := installer.PiPackageInstalled(opts)
 		if installed {
 			fmt.Printf("  • pi hooks: mnemos package present in %s\n", path)
 		} else {
@@ -651,8 +699,12 @@ func runDoctor(ctx context.Context, _ []string) error {
 	}
 
 	if hasClaudeCode {
-		settings := installer.ClaudeSettingsPath()
-		for _, h := range claudeHooks(selfPath) {
+		settings := installer.ClaudeSettingsPath(opts)
+		hookPath, err := configuredCommand(ctx, selfPath)
+		if err != nil {
+			return fmt.Errorf("doctor: %w", err)
+		}
+		for _, h := range claudeHooks(hookPath) {
 			check(installer.IsHookInstalled(settings, h.entry), "%s %s", h.label, settings)
 		}
 		for _, old := range obsoleteClaudeHooks(selfPath) {

@@ -37,6 +37,24 @@ Mnemos is a layered Go service with strict boundaries. This document walks the l
 └──────────────────────────────────────────────────────────┘
 ```
 
+## Runtime configuration and workspace diagnosis
+
+The CLI carries an explicit configuration selector in the command context. It has no process-wide override: the standard file is `~/.mnemos/config.toml`, and `mnemos --config <file> <command>` selects another file. Relative storage, vault and client paths resolve from the selected TOML file's directory. Normal first use may create the standard file; read-only projection and `doctor --workspaces` use built-in defaults only when that implicit file is absent. A missing explicit file is an error.
+
+```mermaid
+flowchart LR
+    CLI["CLI invocation"] --> Select["default TOML or explicit --config"]
+    Select --> Config["config.Load / LoadReadOnly"]
+    Config --> Consumers["serve · hooks · prewarm · installer · client projection"]
+    CLI -->|"doctor --workspaces first"| Doctor["read-only diagnostic route"]
+    Doctor --> Read["SQLite mode=ro/query_only"]
+    Read --> Metadata["existing continuity metadata snapshot"]
+    Metadata --> Probe["bounded probes of recorded roots"]
+    Probe --> Report["advisory text/JSON; never merges identities"]
+```
+
+Workspace identity is not a global configuration value. Non-Git projects provide `workspace_root` for the current explicit continuity invocation; Git worktree roots use existing canonicalization. `doctor --workspaces` only compares recorded bindings and bounded path metadata. It skips the mutating setup used by ordinary doctor, never migrates SQLite, crawls source trees, reads private checkpoint bodies or registers roots. WAL diagnostics require pre-existing readable `-wal` and `-shm` sidecars so committed rows are visible; SQLite may update reader marks in the existing SHM file. See [workspace diagnostics](WORKSPACE_DIAGNOSTICS.md) and [configuration](CONFIGURATION.md) for the user-facing limits.
+
 ## Storage
 
 `modernc.org/sqlite` (pure Go, no CGO). One file at `~/.mnemos/mnemos.db`. WAL mode, foreign keys on, 5s busy timeout. Schema versioned via `schema_migrations` + numbered SQL files embedded via `//go:embed`.
@@ -128,6 +146,14 @@ CLI and server paths share a small memory configuration factory: complete defaul
 rank/hybrid parameters are initialized, then configured decay and alpha override
 them, including an explicit alpha zero. Provider discovery remains at the existing
 embedding-aware call sites; continuity-only operations do not trigger it.
+
+Application settings come from `~/.mnemos/config.toml` or the explicit
+`mnemos --config <file> <command>` selector. The selector travels in the command
+context, so concurrent operations do not share a mutable process-wide config
+value. Relative storage, vault and client paths are anchored to the selected file.
+The pi package uses its `mcp.json` as the shared absolute executable/config route
+for MCP and hooks; its client projection returns switches only and does not open
+SQLite or initialize embedding.
 
 Vector-only recall and fusion use the same model/dimension/signal compatibility
 check. An incompatible stored vector is an absent source, preserving keyword
