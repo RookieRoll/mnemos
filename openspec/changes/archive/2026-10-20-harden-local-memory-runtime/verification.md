@@ -133,3 +133,80 @@ Windows has no configured GCC or golangci-lint. Local checks cannot replace CI's
 race detector or golangci-lint run. No remote CI success is implied by local
 acceptance. The pi SDK gate uses real local tools without a model prompt or
 provider request; it does not establish TUI behavior or model capture quality.
+
+## Codex MCP follow-up — 2026-10-20
+
+The initial Codex check verified configuration only. The following additional
+gate exercises the actual Codex client independently of the pi SDK gate.
+
+Tested installed build: `mnemos 0.15.1+1407b5e`, SHA-256
+`2a6c7c0d9cdc5f5548fd06fa46e60463a35b5598cfb6ddb217024d86c4103b87`.
+The local Codex app-server is version `0.163.0`. Its real JSON-RPC API reports
+Mnemos `connected` with this server version, 27 tools and four resources. Tool
+and resource counts describe discovery, not execution coverage.
+
+All 19 direct MCP tool calls passed: stats; observation write, scoped read and
+search; two independent session starts; checkpoint save, explicit cross-owner
+resume and save replay; forged workspace metadata rejection with revision/body
+unchanged; normal replacement; clear and clear replay; owner-visible cleared
+marker; closing both sessions; observation deletion and unavailable-after-delete
+read. The discovered checkpoint write schema excludes server-owned workspace
+metadata.
+
+The gate uses an isolated Codex home and SQLite store, with an ephemeral in-memory
+runtime. The launch command and arguments come from the actual user MCP entry.
+The child receives a fixture `MNEMOS_CONFIG` with isolated storage,
+`embedding.provider = "none"` and `rumination.enabled = true`; the 27 discovered
+tools include the four optional rumination tools. No authentication file or
+`turn/start` request is used, and the user Codex configuration hash stays unchanged.
+This verifies client discovery and execution, not model tool selection or capture
+quality. Method references: the installed client's generated JSON schemas and the
+[official App Server documentation](https://learn.chatgpt.com/docs/app-server),
+specifically `mcpServerStatus/list` and `mcpServer/tool/call`.
+
+Retained machine evidence is intentionally ignored by Git:
+`bin/codex-mcp-1407b5e-mv0aysmp/{result,inventory,transcript}.json`.
+The initial verifier incorrectly required JSON for a valid plain-text session-end
+receipt. That failed run remains under `bin/codex-mcp-1407b5e-c9zrgvn6/`; after
+fixing receipt parsing, the fresh 19-call run above passed. No server defect is
+inferred from that verifier error.
+
+The existing Codex desktop connection also passed actual continuity operations,
+including cross-owner recovery, rejected cross-owner clear, replay, owner clear
+and unavailable-after-clear. A genuine procedural correction was saved, read
+back and found in search; the fixture checkpoint was cleared and both task
+sessions closed. Selected receipts are retained in
+`bin/runtime-hardening-install/codex-live-mcp.json`.
+
+Those desktop calls do not establish that the long-lived connection runs the
+installed build: all nine observed existing Mnemos processes predate deployment,
+and the conversation still advertises the older workspace input field. Reconnect
+Mnemos or restart Codex to load the new executable. No active user process was
+terminated.
+
+## Installed binary and pi package follow-up
+
+The reviewed source at `1407b5e` was built with `CGO_ENABLED=0` and installed as
+`0.15.1+1407b5e`. The actual memory store upgraded from schema 9 to 10 with a
+consistent pre-upgrade backup; SQLite `quick_check` returned `ok`, and all saved
+pre-upgrade business-table primary keys remain present.
+
+The independent pi package at `~/.pi/agent/local-packages/mnemos` is version
+`0.15.1`. Its four runtime TypeScript files, skill and manifest match the committed
+sources. It is an ordinary directory copy. Its MCP entry continues to launch the
+installed absolute executable with `serve`; pi registration, MCP configuration,
+Codex configuration and Mnemos configuration hashes are unchanged.
+
+The installed-package pi SDK/adapter gate passed 12 direct tool executions, with
+zero model requests and no authentication use. Evidence:
+`bin/mnemos-pi-schema-S5cztq/{provenance,transcript}.json`. An isolated registration
+of the actual local package also passed `pi update --extensions` with exit 0 and
+offline bypass disabled; package and settings hashes stayed unchanged. This
+checks the Mnemos local route, not unrelated remote packages. Local package
+upgrades are performed by copying the new distribution files into this directory.
+
+These results apply to the identified build. Later documentation-only commits
+may rebuild the same runtime with a new commit suffix; their installation receipts
+belong under `bin/runtime-hardening-install/`. Existing pi sessions need `/reload`
+or a new session to load changed extension files, and existing MCP connections
+need reconnection to load a replaced executable. No release tag is implied.
