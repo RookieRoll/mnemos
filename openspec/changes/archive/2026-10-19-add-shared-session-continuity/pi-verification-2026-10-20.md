@@ -53,6 +53,9 @@ No product code, installed package, user configuration or global continuity
 setting was changed by this verification. The real memory database received none
 of the fixture session IDs; the test's own isolated database held the checkpoints.
 
+The subsequent [checkpoint write-schema fix and re-verification](checkpoint-schema-fix-2026-10-20.md)
+addresses the input-schema issue below; this report retains the original observation.
+
 ## Task and observed sequence
 
 The fixture started with two unimplemented functions and four fixed tests:

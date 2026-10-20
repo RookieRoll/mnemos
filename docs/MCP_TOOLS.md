@@ -61,6 +61,11 @@ Branch/HEAD is server sampled. Complete canonical payload is at most 16 KiB,
 raw request at most 32 KiB. Unknown fields, invalid UTF-8, oversize and high-risk
 content fail without partial writes. Hooks never invent checkpoint prose.
 
+Write only `task`, `state`, `summary`, `next_steps`, `blockers` and `references`
+inside `payload`. Read results also contain server-sampled `payload.workspace`;
+do not copy that field into a checkpoint save. The MCP input schema exposes only
+writable fields, while the service still rejects client-supplied workspace metadata.
+
 Trust only `{protocol_version:1,status:applied|replayed,session_id,revision,
 updated_at}` receipts. Exact retries of the current request preserve revision,
 time and workspace sample; older requests after a later write conflict. Clear

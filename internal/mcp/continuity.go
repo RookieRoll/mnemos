@@ -68,7 +68,46 @@ func hasContinuityErrorEnvelope(result *mcpsdk.CallToolResult) bool {
 	return false
 }
 
-func (s *Server) handleCheckpoint(ctx context.Context, req *mcpsdk.CallToolRequest, in continuity.CheckpointInput) (*mcpsdk.CallToolResult, any, error) {
+// checkpointArgs deliberately excludes server-sampled payload metadata from the
+// generated write schema. Read responses keep the complete domain Payload.
+type checkpointArgs struct {
+	ProtocolVersion  int                `json:"protocol_version"`
+	AgentID          string             `json:"agent_id,omitempty"`
+	CWD              string             `json:"cwd,omitempty"`
+	WorkspaceRoot    string             `json:"workspace_root,omitempty"`
+	SessionID        string             `json:"session_id"`
+	Action           string             `json:"action"`
+	ExpectedRevision *int64             `json:"expected_revision"`
+	RequestID        string             `json:"request_id"`
+	Visibility       string             `json:"visibility,omitempty"`
+	Payload          *checkpointPayload `json:"payload,omitempty"`
+}
+
+type checkpointPayload struct {
+	Task       string                 `json:"task"`
+	State      string                 `json:"state"`
+	Summary    string                 `json:"summary"`
+	NextSteps  []string               `json:"next_steps,omitempty"`
+	Blockers   []string               `json:"blockers,omitempty"`
+	References []continuity.Reference `json:"references,omitempty"`
+}
+
+func (in checkpointArgs) input() continuity.CheckpointInput {
+	out := continuity.CheckpointInput{
+		ProtocolVersion: in.ProtocolVersion, AgentID: in.AgentID, CWD: in.CWD,
+		WorkspaceRoot: in.WorkspaceRoot, SessionID: in.SessionID, Action: in.Action,
+		ExpectedRevision: in.ExpectedRevision, RequestID: in.RequestID, Visibility: in.Visibility,
+	}
+	if in.Payload != nil {
+		out.Payload = &continuity.Payload{
+			Task: in.Payload.Task, State: in.Payload.State, Summary: in.Payload.Summary,
+			NextSteps: in.Payload.NextSteps, Blockers: in.Payload.Blockers, References: in.Payload.References,
+		}
+	}
+	return out
+}
+
+func (s *Server) handleCheckpoint(ctx context.Context, req *mcpsdk.CallToolRequest, in checkpointArgs) (*mcpsdk.CallToolResult, any, error) {
 	if s.cfg.Continuity == nil {
 		return continuityError(continuity.ErrUnsupported)
 	}
@@ -77,7 +116,7 @@ func (s *Server) handleCheckpoint(ctx context.Context, req *mcpsdk.CallToolReque
 			return continuityError(err)
 		}
 	}
-	out, err := s.cfg.Continuity.Checkpoint(ctx, in)
+	out, err := s.cfg.Continuity.Checkpoint(ctx, in.input())
 	if err != nil {
 		return continuityError(err)
 	}

@@ -265,9 +265,14 @@ func TestContinuityCrossTransportScopeReceiptsAndBudget(t *testing.T) {
 	}
 	zero := int64(0)
 	save := continuity.CheckpointInput{ProtocolVersion: 1, AgentID: "publisher", CWD: f.root, WorkspaceRoot: f.root, SessionID: a, Action: "save", ExpectedRevision: &zero, RequestID: "publish-once", Visibility: "workspace", Payload: &continuity.Payload{Task: "transaction-fix", State: "blocked", Summary: "事务已修复，仍需核验当前迁移。", NextSteps: []string{"run migration tests"}, References: []continuity.Reference{{Kind: "observation", ID: private.Observation.ID}}}}
+	// A domain Payload includes the read-only sampled workspace even at its
+	// zero value. Model the advertised writable wire object explicitly here;
+	// invoke must keep passing all supplied metadata through unchanged.
+	checkpointWire := continuityConvert[map[string]any](t, save)
+	delete(checkpointWire["payload"].(map[string]any), "workspace")
 	var savedAt any
 	for i, transport := range continuityTransportNames() {
-		raw, failed := f.invoke(t, transport, "checkpoint", save)
+		raw, failed := f.invoke(t, transport, "checkpoint", checkpointWire)
 		out := continuityObject(t, raw)
 		if failed || out["revision"] != float64(1) {
 			t.Fatalf("%s checkpoint: %s", transport, raw)
@@ -326,8 +331,16 @@ func TestContinuityCrossTransportScopeReceiptsAndBudget(t *testing.T) {
 		{"wrong receiver owner", "context", "unavailable", func() continuity.ContextInput { v := read; v.AgentID = "wrong-owner"; return v }()},
 		{"invalid source filter", "context", "validation", func() continuity.ContextInput { v := read; v.Limit = 21; return v }()},
 		{"unsupported version", "context", "unsupported", func() continuity.ContextInput { v := read; v.ProtocolVersion = 2; return v }()},
-		{"stale revision", "checkpoint", "conflict", func() continuity.CheckpointInput { v := save; v.RequestID = "different-request"; return v }()},
-		{"shared does not grant mutation", "checkpoint", "unavailable", func() continuity.CheckpointInput { v := save; v.AgentID = "reader-b"; return v }()},
+		{"stale revision", "checkpoint", "conflict", func() map[string]any {
+			v := continuityConvert[map[string]any](t, checkpointWire)
+			v["request_id"] = "different-request"
+			return v
+		}()},
+		{"shared does not grant mutation", "checkpoint", "unavailable", func() map[string]any {
+			v := continuityConvert[map[string]any](t, checkpointWire)
+			v["agent_id"] = "reader-b"
+			return v
+		}()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, transport := range continuityTransportNames() {
@@ -347,12 +360,12 @@ func TestContinuityCrossTransportScopeReceiptsAndBudget(t *testing.T) {
 		input    any
 	}{
 		{"missing revision", "checkpoint", func() map[string]any {
-			v := continuityConvert[map[string]any](t, save)
+			v := continuityConvert[map[string]any](t, checkpointWire)
 			delete(v, "expected_revision")
 			return v
 		}()},
 		{"unknown field", "checkpoint", func() map[string]any {
-			v := continuityConvert[map[string]any](t, save)
+			v := continuityConvert[map[string]any](t, checkpointWire)
 			v["unexpected"] = true
 			return v
 		}()},
