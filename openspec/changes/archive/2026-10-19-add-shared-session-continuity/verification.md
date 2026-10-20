@@ -4,6 +4,9 @@ Date: 2026-10-19. Source baseline: `main@37ca6539` plus this unreleased working
 tree. This record describes development verification, not a published release,
 an installed plugin update, or a production-database migration.
 
+Follow-up: [installed pi real-model handoff verification, 2026-10-20](pi-verification-2026-10-20.md).
+The results below retain their original execution date and scope.
+
 ## Environment and execution scope
 
 - Windows amd64, Go 1.27.2, Node v26.10.0, go-sdk v1.8.0.
