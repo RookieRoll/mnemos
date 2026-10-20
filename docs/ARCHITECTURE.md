@@ -2,6 +2,8 @@
 
 Mnemos is a layered Go service with strict boundaries. This document walks the layers from the bottom up.
 
+中文说明与 Mermaid 架构图见 [Mnemos Memory 架构说明](ARCHITECTURE.zh-CN.md)。
+
 ## Principles
 
 - **Interfaces declared where they're consumed.** `memory.Reader/Writer/Maintenance/Exportable/Vectorable` live in the memory package because services depend on them; the `storage` package implicitly satisfies them. This is the stdlib `io.Reader` idiom — segregated, composable, easy to mock.
