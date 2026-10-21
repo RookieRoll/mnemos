@@ -1,15 +1,17 @@
 # Mnemos Memory 架构说明
 
-本文记录 0.16.0 的现行架构及 0.17.0-dev 工作树实现，整理日期为 2026-10-21。0.17.0-dev 候选二进制 SHA-256 为 `2a1e4d43983d69e78265ab36a830b642863144af32daa30f65929bda78812809`；本节验证对象尚非发布或本机安装版本。0.16.0 基线来源为 `main@79e68e8`（完整提交 `79e68e8308c5a1887c04092292d8b62e7507c408`）。
+本文记录 0.16.0 历史基线及 0.17.0 实现与本机交付状态，整理日期为 2026-10-21。0.16.0 基线来源为 `main@79e68e8`（完整提交 `79e68e8308c5a1887c04092292d8b62e7507c408`）。八个发布分发文件已随 0.17.0 源提交更新；release tag 与 GitHub 发布尚未执行。最终 0.17.0 本机交付构建、安装与验收记录见[交付验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-delivery.md)；此前 0.17.0-dev 候选验证作为开发阶段证据保留在归档 change 的 verification 记录中。
 英文主文档见 [ARCHITECTURE.md](ARCHITECTURE.md)，接口细节见 [MCP_TOOLS.md](MCP_TOOLS.md)。
 
 Mnemos 是运行在本机的 agent 持久记忆层：把值得长期保留的知识和明确发布的任务进度保存到 SQLite，在新会话开始或显式查询时提供受预算限制的上下文。模型负责理解、总结和判断；Mnemos 负责存储、检索、作用域校验和可靠提交。
 
-## 0.17.0-dev 已实现架构与状态
+## 0.17.0 已实现架构与本机交付状态
 
-> 本节描述当前工作树和候选构建的实现，不代表 0.17.0 正式发布或已安装。交付状态、构建来源和实际验收范围以 [0.17 profile 验证记录](../openspec/changes/simplify-agent-memory-workflow/verification-profiles.md) 及该 change 的其他 verification 记录为准。
+> 本节描述 0.17.0 的实现和本机安装状态。本机安装不代表已发布 GitHub release；在线发布仍走正式 release 流程。候选构建与最终交付验收范围分别见[开发阶段验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-flow.md)和[最终交付验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-delivery.md)。
 
-实现状态：本 change 的 19 项实现任务已完成并通过评审；0.17.0 交付准备与归档仍是独立后续步骤。验证针对 SHA-256 为 `2a1e4d43983d69e78265ab36a830b642863144af32daa30f65929bda78812809` 的 0.17.0-dev 候选二进制，不代表正式发布或本机安装状态。全量 `CGO_ENABLED=0 go test -p 1 ./... -count=1`、`go vet -p 1 ./...` 与 `git diff --check` 均通过；候选迁移测试覆盖 0011。Pi 1.3.0 SDK / pi-mcp-adapter 5.3.2 门禁通过，core 与 maintenance 分别发现 9/27 个工具并完成 12/13 次直接调用；profile refresh 后 active 工具面从 27 收敛至 9。Codex app-server 门禁通过，core / maintenance 分别发现 9/27 个工具和 4 个资源，并完成 16/19 次直接调用。Pi/Codex 门禁均使用隔离数据库且未发出模型请求；这些结果不代表模型采纳率或 TUI 行为效果。完整命令、边界和 fixture 记录见 [共享流程验证](../openspec/changes/simplify-agent-memory-workflow/verification-flow.md)、[profile 验证](../openspec/changes/simplify-agent-memory-workflow/verification-profiles.md) 与 [维护验证](../openspec/changes/simplify-agent-memory-workflow/verification-maintenance.md)。
+实现与本机交付状态：对应 change 的 19 项实现任务已完成并归档。最终二进制由源提交 `3651ba2b0cd56462f8e4d8a4a991ac6811032050` 构建，版本为 `0.17.0+3651ba2b`，SHA-256 为 `DFBC17047EFB8C4A057ADF126A41DFD52B29A62945C1E0DC9180375E5B2AA3F7`，安装于 `D:/software/mnemos/mnemos.exe`。一致性更新前备份 integrity 为 `ok`、schema 为 10；显式 maintenance CLI 打开数据库后迁移至 schema 11，integrity 仍为 `ok`。二进制安装时 TOML 哈希为 `7DD145F84AB6DA731AA835B422826D492C8EC98D14C9B831FCB57AC4954E1C43`；用户授权后显式写入 core profile、maintenance 默认预算和 integration enabled 策略，最终 TOML SHA-256 为 `7A644E58B85F2FBC52D059CC15B9B4BA1DA0424EAA7E057F348E97C43730CAB9`。配置加载验证确认 effective values 为 core、maintenance enabled、24h/5s/15s/2s、integration disabled=false、continuity enabled=true。配置前态备份、Pi 本地 package 副本和四项最终二进制 legacy 比较详见[最终交付验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-delivery.md)。该本机交付不代表 release tag 或 GitHub 发布已执行。
+
+全量 `CGO_ENABLED=0 go test -p 1 ./... -count=1`、`go vet -p 1 ./...` 和 migration/config 检查通过。最终二进制的四项真实 legacy 比较均 PASS 且无 skip；Codex app-server core/maintenance gate 均通过。Pi 扩展测试 62/62、无 skip；最终二进制 core/maintenance 工具面精确为 9/27，profile refresh 后 active surface 从 27 更新到 9。Pi 用户级 package-only 副本更新和离线 ZIP 的 CRC、逐文件 SHA、解压二进制版本及 Pi gate 均通过。所有客户端 gate 使用隔离数据库且不发模型请求；它们不代表模型采纳率或 TUI 行为效果。最终 ZIP 哈希及验证细节见[最终交付验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-delivery.md)；0.17.0-dev 候选的历史验证结果仍见[共享流程验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-flow.md)、[profile 验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-profiles.md)与[维护验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-maintenance.md)。
 
 ### 两种职责与系统层次
 
@@ -67,7 +69,7 @@ flowchart TB
 
 ### 固定工具面与职责入口
 
-0.17.0-dev 默认使用 `core` profile，精确暴露九个任务工具：`session_start`、`session_end`、`search`、`get_many`、`save`、`correct`、`convention`、`checkpoint`、`resume_context`。这是默认 MCP 工具面的 breaking change；依赖高级 MCP 工具的部署须在 TOML 中选 `maintenance` 并重启，该 profile 保留 23 个既有工具，`[rumination].enabled=true` 时再增加四个 rumination 工具，合计 27 个；资源另有四项只读能力。候选 Pi SDK/adapter gate 对两种 profile 实测精确暴露 9/27 个 Mnemos server 工具。
+0.17.0 默认使用 `core` profile，精确暴露九个任务工具：`session_start`、`session_end`、`search`、`get_many`、`save`、`correct`、`convention`、`checkpoint`、`resume_context`。这是默认 MCP 工具面的 breaking change；依赖高级 MCP 工具的部署须在 TOML 中选 `maintenance` 并重启，该 profile 保留 23 个既有工具，`[rumination].enabled=true` 时再增加四个 rumination 工具，合计 27 个；资源另有四项只读能力。
 
 当 MCP 固定为 `core` 时，维护 Agent 通过 `mnemos maintenance` JSON CLI 桥接读取候选证据并提交现有规则校验的 resolve/dismiss 操作。桥接不改变在线 MCP 工具列表，也不启动 Agent。候选没有活跃的宿主维护 Agent 可复核时保持 pending；Mnemos 不作语义推断或自行生成决策理由。
 
@@ -144,9 +146,9 @@ decay 是非幂等阶段：`cycle_id` 与 `decay_applied` marker 和 importance 
 
 ### 最小持久化边界与 stdio 限制
 
-协调表只保存必要的 `last_success`、lease owner/expiry、未完成 `cycle_id` 和 `decay_applied`；候选继续使用已有 rumination 状态。每次运行历史、诊断全文、临时上下文、prompt、空跑 observation 都不落库。只有用户任务或配置策略明确授权安装、配置或迁移时，维护 Agent 才在迁移操作前使用现有 SQLite 一致性备份能力备份；`storage.Open` 不会因每次启动自动先备份，本 change 也不新增每次会话快照。普通会话入口不做隐式知识迁移。
+协调表只保存必要的 `last_success`、lease owner/expiry、未完成 `cycle_id` 和 `decay_applied`；候选继续使用已有 rumination 状态。每次运行历史、诊断全文、临时上下文、prompt、空跑 observation 都不落库。只有用户任务或配置策略明确授权安装、配置或迁移时，维护 Agent 才在迁移操作前使用现有 SQLite 一致性备份能力备份；`storage.Open` 不会因每次启动自动先备份，0.17.0 也不新增每次会话快照。普通会话入口不做隐式知识迁移。
 
-stdio MCP 只能在已经启动且收到请求时工作，不能按时唤醒宿主模型。机会定义为有效 task-session start，所以 Pi 的 CLI continuity open、host hook prewarm 等启动路径可触发；只依赖 MCP `session_start` 的部署不能代表所有宿主启动机制。没有 eligible session 时不承诺到期即运行，也不承诺跨宿主 subagent 可用。严格 wall-clock 定时只交给用户明确配置的外部 scheduler；本 change 不实现常驻 daemon，也不自动部署 OS task。
+stdio MCP 只能在已经启动且收到请求时工作，不能按时唤醒宿主模型。机会定义为有效 task-session start，所以 Pi 的 CLI continuity open、host hook prewarm 等启动路径可触发；只依赖 MCP `session_start` 的部署不能代表所有宿主启动机制。没有 eligible session 时不承诺到期即运行，也不承诺跨宿主 subagent 可用。严格 wall-clock 定时只交给用户明确配置的外部 scheduler；0.17.0 不实现常驻 daemon，也不自动部署 OS task。
 
 ### 知识标签与进度身份的兼容边界
 
@@ -460,7 +462,7 @@ erDiagram
 
 ## 8. SQLite 并发、维护与备份
 
-数据库使用 WAL、外键和 busy timeout，迁移通过内嵌编号 SQL 与 `schema_migrations` 管理。现行 0.16.0 基线仍是迁移 **10**；尚未部署的 0.17.0-dev 工作树增加维护协调状态迁移后为 **11**。跨进程升级时，取得立即写事务后重新检查版本，再执行 DDL 和写入迁移标记，防止多个进程重复升级。
+数据库使用 WAL、外键和 busy timeout，迁移通过内嵌编号 SQL 与 `schema_migrations` 管理。0.16.0 基线 schema 为 **10**；本机 0.17.0 安装已应用维护协调状态迁移 **0011**，当前 schema 为 **11**。跨进程升级时，取得立即写事务后重新检查版本，再执行 DDL 和写入迁移标记，防止多个进程重复升级。
 
 首次 WAL 连接初始化的 Ping 阶段只对类型明确的 SQLite BUSY 错误进行有限重试；业务写入与迁移 SQL 不因此得到通用自动重试。驱动连接本身还受 busy timeout 影响，不能把应用层重试窗口当成绝对墙钟超时承诺。
 
@@ -496,7 +498,7 @@ pi 使用已安装 package 中的 `mcp.json` 作为 MCP 与 hook 的共同可执
 
 pi 的 `tool_call` 是阻断/放行通道，不支持通过返回 system prompt 注入记忆。自动连续性启动结果未知时，扩展保持未绑定状态，不猜测其他 session；安全 guardrail 仍执行，依赖 session 的自动事件暂不发送，不排队补放。
 
-0.17.0-dev 的默认 `core` profile 提供精确 9 个工具；显式 `maintenance` profile 保留 23 个既有工具，并在开启 rumination 时增加 4 个工具（共 27 个）。两种 profile 都提供 4 个只读资源。磁盘二进制替换后，已有 MCP 进程仍可能运行旧程序；启用连续性前，应重启同一数据库的所有旧宿主进程。
+0.17.0 的默认 `core` profile 提供精确 9 个工具；显式 `maintenance` profile 保留 23 个既有工具，并在开启 rumination 时增加 4 个工具（共 27 个）。两种 profile 都提供 4 个只读资源。磁盘二进制替换后，已有 MCP 进程仍可能运行旧程序；启用连续性前，应重启同一数据库的所有旧宿主进程。
 
 ### 10.1 配置选择与工作区诊断
 
@@ -519,7 +521,7 @@ flowchart TD
 
 `mnemos doctor --workspaces` 是单独的只读报告路径：在进入普通 doctor 的配置创建、可写数据库初始化和客户端检查前分流；只读取已登记 binding 与聚合计数，只 probe 记录的根。WAL 模式要求已经存在 `-wal` 与 `-shm`；诊断可能更新已有 SHM reader mark，但不会创建/删除 sidecar 或修改主 DB/WAL 字节。物理路径相等只说明当前文件系统等价，不证明历史绑定可安全合并。详见[工作区诊断](WORKSPACE_DIAGNOSTICS.md)。
 
-0.16.0 安装构建的历史基线为 `0.16.0+79e68e8`，源提交 `79e68e8308c5a1887c04092292d8b62e7507c408`，安装二进制 SHA-256 为 `c43ca3982d8e3e96e67145a4e36c702adc2be9f6488e1b6eab01df83498ebf89`。其 Pi 扩展测试 62/62 通过；对应真实 Pi 与 Codex 门禁和 package-only 更新记录见 [0.16.0 部署与 Pi 验收](../openspec/changes/archive/2026-10-21-file-based-runtime-configuration/verification-delivery.md)。当前 change 的 0.17.0-dev 候选验证结果见本节开头，不能与该历史安装状态混为一谈。
+0.16.0 安装构建的历史基线为 `0.16.0+79e68e8`，源提交 `79e68e8308c5a1887c04092292d8b62e7507c408`，安装二进制 SHA-256 为 `c43ca3982d8e3e96e67145a4e36c702adc2be9f6488e1b6eab01df83498ebf89`。其 Pi 扩展测试 62/62 通过；对应真实 Pi 与 Codex 门禁和 package-only 更新记录见[0.16.0 部署与 Pi 验收](../openspec/changes/archive/2026-10-21-file-based-runtime-configuration/verification-delivery.md)。当前 0.17.0 本机安装及最终二进制验证见本节开头和[交付验证](../openspec/changes/archive/2026-10-21-simplify-agent-memory-workflow/verification-delivery.md)；Pi package-only 更新和离线 ZIP 均已验收。
 
 ## 11. 阅读入口
 
