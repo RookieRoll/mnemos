@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 )
 
 // ErrNotFound is returned when an observation lookup misses.
@@ -78,6 +80,20 @@ type Writer interface {
 type Maintenance interface {
 	Prune(ctx context.Context, now time.Time) (int64, error)
 	DecayImportance(ctx context.Context, staleDays int, amount int) (int64, error)
+}
+
+// FencedMaintenance is the dream pass's transactionally fenced housekeeping
+// surface. Implementations validate the active owner, cycle, and DB-clock
+// lease both before and after each mutation in the same transaction.
+type FencedMaintenance interface {
+	PruneFenced(ctx context.Context, fence maintenance.Fence, now time.Time) (int64, error)
+	DecayImportanceFenced(ctx context.Context, fence maintenance.Fence, staleDays int, amount int) (int64, error)
+}
+
+// FencedJournalStore persists an explicit dream journal under its cycle ID.
+// Implementations return an existing journal without changing access counts.
+type FencedJournalStore interface {
+	SaveDreamJournalFenced(ctx context.Context, fence maintenance.Fence, o *Observation) (*SaveResult, error)
 }
 
 // Exportable tracks external-system sync state (currently: Obsidian vault).

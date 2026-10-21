@@ -12,7 +12,7 @@ const flags = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {
   assert.ok(process.argv[index].startsWith('--') && process.argv[index + 1], 'arguments must be --name value pairs');
   const name = process.argv[index].slice(2);
-  assert.ok(['binary', 'package', 'sdk', 'adapter', 'temp-parent'].includes(name), `unknown option --${name}`);
+  assert.ok(['binary', 'package', 'sdk', 'adapter', 'temp-parent', 'profile'].includes(name), `unknown option --${name}`);
   assert.ok(!flags.has(name), `duplicate option --${name}`);
   flags.set(name, process.argv[index + 1]);
 }
@@ -27,6 +27,8 @@ const sdkPath = option('sdk');
 const packagePath = option('package');
 const adapterPath = option('adapter');
 const binary = option('binary');
+const profile = flags.get('profile');
+assert.ok(profile === 'core' || profile === 'maintenance', 'supply --profile core or --profile maintenance');
 for (const path of [sdkPath, packagePath, adapterPath]) assert.ok(statSync(path).isDirectory(), 'SDK/package/adapter must be local directories');
 assert.ok(statSync(binary).isFile(), 'candidate binary must be a local file');
 const tempParent = resolve(flags.get('temp-parent') ?? tmpdir());
@@ -72,13 +74,13 @@ Object.assign(process.env, preservedEnv, {
   MNEMOS_DISABLED: '1', MNEMOS_CONTINUITY: '1',
   PI_MCP_ADAPTER_TEST_AUTH_STORE: 'memory', PI_MCP_ADAPTER_DISABLE_AUTH_CACHE: '1',
 });
-writeFileSync(config, `[storage]\npath = ${JSON.stringify(join(fixture, 'mnemos.db').replaceAll('\\', '/'))}\n[embedding]\nprovider = "none"\n[integration]\ndisabled = true\n[continuity]\nenabled = false\n`);
+writeFileSync(config, `[storage]\npath = ${JSON.stringify(join(fixture, 'mnemos.db').replaceAll('\\', '/'))}\n[embedding]\nprovider = "none"\n[mcp]\nprofile = ${JSON.stringify(profile)}\n[rumination]\nenabled = true\n[integration]\ndisabled = true\n[continuity]\nenabled = false\n`);
 const candidateSHA256 = sha256(binary);
 const candidateVersion = execFileSync(binary, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }).trim();
 const parsedMCP = JSON.parse(readFileSync(join(isolatedPackage, 'mcp.json'), 'utf8')).mcpServers.mnemos;
 assert.equal(parsedMCP.command, binary);
 assert.deepEqual(parsedMCP.args, ['--config', config, 'serve']);
-const provenance = { candidateBinary: binary, candidateSHA256, candidateVersion, packageVersion: manifest.version,
+const provenance = { candidateBinary: binary, candidateSHA256, candidateVersion, profile, packageVersion: manifest.version,
   packageSource: packagePath, isolatedPackage, copiedTypeScript, mcpCommand: parsedMCP.command, mcpArgs: parsedMCP.args };
 writeFileSync(join(fixture, 'provenance.json'), JSON.stringify(provenance, null, 2));
 const git = args => execFileSync('git', ['-C', cwd, ...args], { windowsHide: true, timeout: 30000 });
@@ -134,6 +136,19 @@ try {
     resourceLoader: loader, sessionManager: sdk.SessionManager.inMemory(cwd), noTools: 'builtin' }));
   const errors = [];
   await session.bindExtensions({ mode: 'rpc', onError: error => errors.push(error) });
+  const coreNames = ['mnemos_session_start', 'mnemos_session_end', 'mnemos_search', 'mnemos_get_many', 'mnemos_save', 'mnemos_correct', 'mnemos_convention', 'mnemos_checkpoint', 'mnemos_resume_context'];
+  const maintenanceNames = ['mnemos_checkpoint', 'mnemos_context', 'mnemos_convention', 'mnemos_correct', 'mnemos_delete', 'mnemos_evidence_check', 'mnemos_get', 'mnemos_get_many', 'mnemos_link', 'mnemos_neighborhood', 'mnemos_pin', 'mnemos_premortem', 'mnemos_promote', 'mnemos_resume_context', 'mnemos_ruminate_dismiss', 'mnemos_ruminate_list', 'mnemos_ruminate_pack', 'mnemos_ruminate_resolve', 'mnemos_save', 'mnemos_search', 'mnemos_session_end', 'mnemos_session_start', 'mnemos_skill_match', 'mnemos_skill_save', 'mnemos_skill_score', 'mnemos_stats', 'mnemos_touch'];
+  const expectedNames = profile === 'core' ? coreNames : maintenanceNames;
+  const adapterServerPrefix = `mcp__${manifest.name}__mnemos_`;
+  const exposedNames = session.getAllTools()
+    .filter(tool => tool.name.startsWith(adapterServerPrefix))
+    .map(tool => tool.name.slice(adapterServerPrefix.length))
+    // pi-mcp-adapter contributes read_* helpers under the same package prefix;
+    // only normalized mnemos_* names belong to the configured MCP server.
+    .filter(name => name.startsWith('mnemos_'))
+    .sort();
+  assert.deepEqual(exposedNames, [...expectedNames].sort(), `${profile} profile MCP tool set differs`);
+  assert.equal(new Set(exposedNames).size, exposedNames.length, `${profile} profile has duplicate MCP suffixes`);
   const required = ['mnemos_session_start', 'mnemos_checkpoint', 'mnemos_resume_context'];
   const deadline = Date.now() + 30000;
   while (!required.every(suffix => session.getAllTools().some(tool => tool.name.endsWith(suffix)))) {
@@ -146,6 +161,13 @@ try {
     return [suffix, tool];
   });
   const tools = new Map(definitions);
+  if (profile === 'maintenance') {
+    const statsTool = session.getAllTools().find(tool => tool.name.endsWith('mnemos_stats'));
+    assert.ok(statsTool && session.getActiveToolNames().includes(statsTool.name), 'maintenance-only stats tool is not visible');
+    adapterDirectExecutions++;
+    const statsResult = await session.getToolDefinition(statsTool.name).execute(randomUUID(), {}, new AbortController().signal);
+    assert.ok(!statsResult.isError, `maintenance-only stats call failed: ${JSON.stringify(statsResult)}`);
+  }
   const schema = tools.get('mnemos_checkpoint').parameters;
   writeFileSync(join(fixture, 'agent-checkpoint-schema.json'), JSON.stringify(schema, null, 2));
   const payloadSchema = dereference(schema.properties.payload, schema);
@@ -201,7 +223,7 @@ try {
   writeFileSync(join(fixture, 'transcript.json'), JSON.stringify(transcript, null, 2));
   console.log(JSON.stringify({ ok: true, fixture, ...provenance, adapter: adapterPath,
     modelRequests, adapterDirectExecutions, usedAuth: false, schemaWithoutWorkspace: true,
-    forgedMetadataRejectedWithoutMutation: true, saveReplayClear: true }, null, 2));
+    exposedMCPToolNames: exposedNames, forgedMetadataRejectedWithoutMutation: true, saveReplayClear: true }, null, 2));
 } catch (error) {
   console.error(`Verification failed; isolated fixture retained at ${fixture}`);
   throw error;

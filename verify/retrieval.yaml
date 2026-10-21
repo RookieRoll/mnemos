@@ -5,6 +5,13 @@
 # in the store but unreachable from the situation it was meant to guide.
 
 probes:
+  - id: 01M5CBT1EAAQTYJ1MWMMVGJX1R
+    title: opportunity maintenance shares the session-flow seam and durable lease
+    queries:
+      - "maintenance lease takeover cycle decay applied last success continuityflow"
+      - "stdio session-start automatic maintenance has no background scheduler"
+    expect_in_top: 5
+
   - id: 01KPDDVHCPRYJ2J38WFJTR61C1
     title: agent skipped mnemos_session_start on editing tasks
     queries:

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 	"github.com/polyxmedia/mnemos/internal/rumination"
 )
 
@@ -21,6 +22,16 @@ type ruminationStore struct{ db *sql.DB }
 // evidence, updated_at) but preserves detected_at and status — a repeat
 // detection must not reopen a resolved candidate or backdate a pending one.
 func (s *ruminationStore) Upsert(ctx context.Context, c rumination.Candidate) (bool, error) {
+	return s.upsert(ctx, nil, c)
+}
+
+// UpsertFenced commits a deterministic candidate refresh under the active
+// maintenance fence.
+func (s *ruminationStore) UpsertFenced(ctx context.Context, fence maintenance.Fence, c rumination.Candidate) (bool, error) {
+	return s.upsert(ctx, &fence, c)
+}
+
+func (s *ruminationStore) upsert(ctx context.Context, fence *maintenance.Fence, c rumination.Candidate) (bool, error) {
 	if c.ID == "" {
 		return false, fmt.Errorf("rumination: id required")
 	}
@@ -52,6 +63,11 @@ func (s *ruminationStore) Upsert(ctx context.Context, c rumination.Candidate) (b
 		return false, fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if fence != nil {
+		if err := checkMaintenanceFence(ctx, tx, *fence); err != nil {
+			return false, err
+		}
+	}
 
 	var existingID string
 	err = tx.QueryRowContext(ctx,
@@ -73,6 +89,11 @@ func (s *ruminationStore) Upsert(ctx context.Context, c rumination.Candidate) (b
 		); err != nil {
 			return false, fmt.Errorf("insert candidate: %w", err)
 		}
+		if fence != nil {
+			if err := checkMaintenanceFence(ctx, tx, *fence); err != nil {
+				return false, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return false, fmt.Errorf("commit: %w", err)
 		}
@@ -91,12 +112,19 @@ func (s *ruminationStore) Upsert(ctx context.Context, c rumination.Candidate) (b
 		); err != nil {
 			return false, fmt.Errorf("update candidate: %w", err)
 		}
+		if fence != nil {
+			if err := checkMaintenanceFence(ctx, tx, *fence); err != nil {
+				return false, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return false, fmt.Errorf("commit: %w", err)
 		}
 		return false, nil
 	}
 }
+
+var _ rumination.FencedStore = (*ruminationStore)(nil)
 
 // Get returns a candidate by ID. Returns rumination.ErrNotFound when
 // absent; all other driver errors are wrapped verbatim.
@@ -197,6 +225,59 @@ func (s *ruminationStore) Resolve(ctx context.Context, id, resolvedBy string, at
 		}
 		return fmt.Errorf("rumination: cannot resolve candidate in status=%s (resolved_by=%q)",
 			existingStatus.String, existingResolvedBy.String)
+	}
+	return nil
+}
+
+// ResolveFenced closes a provenance-addressed candidate in the same
+// transaction that validates the maintenance owner and cycle.
+func (s *ruminationStore) ResolveFenced(ctx context.Context, fence maintenance.Fence, id, resolvedBy string, at time.Time) error {
+	if id == "" {
+		return fmt.Errorf("rumination: id required")
+	}
+	if resolvedBy == "" {
+		return fmt.Errorf("rumination: resolved_by required — the revision must carry provenance")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("storage: begin fenced resolve: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := checkMaintenanceFence(ctx, tx, fence); err != nil {
+		return err
+	}
+	var status, existingResolvedBy sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT status, resolved_by FROM rumination_candidates WHERE id = ?`, id).
+		Scan(&status, &existingResolvedBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return rumination.ErrNotFound
+		}
+		return fmt.Errorf("storage: read candidate for fenced resolve: %w", err)
+	}
+	switch rumination.Status(status.String) {
+	case rumination.StatusPending:
+		if _, err := tx.ExecContext(ctx, `UPDATE rumination_candidates
+			SET status = ?, resolved_by = ?, resolved_at = ?, updated_at = ?
+			WHERE id = ? AND status = ?`,
+			string(rumination.StatusResolved), resolvedBy, at.UTC(), at.UTC(), id,
+			string(rumination.StatusPending)); err != nil {
+			return fmt.Errorf("storage: update fenced resolve: %w", err)
+		}
+	case rumination.StatusResolved:
+		if existingResolvedBy.String != resolvedBy {
+			return fmt.Errorf("rumination: cannot resolve candidate in status=%s (resolved_by=%q)", status.String, existingResolvedBy.String)
+		}
+	default:
+		return fmt.Errorf("rumination: cannot resolve candidate in status=%s (resolved_by=%q)", status.String, existingResolvedBy.String)
+	}
+	if err := checkMaintenanceFence(ctx, tx, fence); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("storage: commit fenced resolve: %w", err)
 	}
 	return nil
 }

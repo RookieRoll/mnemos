@@ -1,6 +1,19 @@
 # MCP tools reference
 
-All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. A standard server exposes 23 core tools; enabling rumination adds 4 more (27 total).
+All tool names are namespaced with `mnemos_`. Every tool has a JSON Schema in its definition — your agent client shows these automatically. The startup-fixed `[mcp].profile` defaults to `core`, which exposes exactly nine task tools: `mnemos_session_start`, `mnemos_session_end`, `mnemos_search`, `mnemos_get_many`, `mnemos_save`, `mnemos_correct`, `mnemos_convention`, `mnemos_checkpoint`, and `mnemos_resume_context`. Select `maintenance` to restore the existing full MCP set (23 existing tools, plus 4 rumination tools when enabled). The 0.17.0 default is a breaking change for clients that relied on an advanced MCP tool without selecting a profile. Profiles control discovery and responsibility, not account authorization; restart the server to change the profile.
+
+An active host agent using the `core` profile can inspect and explicitly resolve candidate reviews through the JSON CLI bridge. `pi.exec` has no stdin channel, so decision input is passed with `--payload`:
+
+```text
+mnemos maintenance list --limit 20
+mnemos maintenance evidence --id CANDIDATE_ID
+mnemos maintenance resolve --payload '{"candidate_id":"CANDIDATE_ID","resolved_by":"REVISION_ID","why_better":"The revision predicts this concrete input will now succeed."}'
+mnemos maintenance dismiss --payload '{"candidate_id":"CANDIDATE_ID","reason":"The evidence is a one-off and the rule still holds."}'
+```
+
+The JSON payload is one object up to 32 KiB. `resolve` requires `candidate_id`, `resolved_by`, and `why_better` (at least 16 Unicode characters); `dismiss` requires `candidate_id` and a reason of at least 8 Unicode characters. Unknown fields and trailing JSON are rejected. Mnemos validates the same required fields and lengths for MCP and CLI; the active host agent makes the semantic decision. Automatic maintenance never performs semantic resolve/dismiss and never calls a model.
+
+The tool descriptions below document the complete `maintenance` profile, including shared core tools and advanced tools. A call to an advanced tool requires selecting `maintenance` before the server starts; the default core process does not advertise those tools.
 
 Writes that omit `project` (`mnemos_save`, `mnemos_correct`, `mnemos_convention`, `mnemos_touch`, `mnemos_session_start`) land in the project the server was started in, which is the basename of its working directory. Claude Code and Codex start the server in the project root. Pass `"project": "*"` to save a memory that applies to every project.
 

@@ -29,8 +29,10 @@ type Server struct {
 // Config bundles the dependencies a Server needs. Every field except
 // Name, Version, Logger, and Rumination is required.
 type Config struct {
-	Name        string
-	Version     string
+	Name    string
+	Version string
+	// Profile is fixed before construction and selects the startup tool set.
+	Profile     string
 	Memory      *memory.Service
 	Sessions    *session.Service
 	Skills      *skills.Service
@@ -46,12 +48,27 @@ type Config struct {
 	DefaultProject string
 	// Continuity is optional; its explicit v1 operations never use legacy inference.
 	Continuity *continuityflow.Service
+	// Flow is the unified task-session/context entry point. Continuity is kept
+	// as a source-compatible alias for existing server constructors.
+	Flow *continuityflow.Service
 }
 
 // NewServer constructs an MCP server with all Mnemos tools and resources
 // registered. The server is ready to call Run/ServeStdio; no further
 // registration is required.
 func NewServer(cfg Config) *Server {
+	if cfg.Profile == "" {
+		cfg.Profile = "core"
+	}
+	if cfg.Flow == nil {
+		cfg.Flow = cfg.Continuity
+	}
+	if cfg.Flow == nil && (cfg.Sessions != nil || cfg.Prewarm != nil) {
+		cfg.Flow = continuityflow.New(continuityflow.Config{LegacySessions: cfg.Sessions, Composer: cfg.Prewarm})
+	}
+	if cfg.Continuity == nil && cfg.Flow != nil && cfg.Flow.SupportsContinuity() {
+		cfg.Continuity = cfg.Flow
+	}
 	if cfg.Name == "" {
 		cfg.Name = "mnemos"
 	}

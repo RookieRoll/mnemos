@@ -257,7 +257,7 @@ Pipeline, in order:
 
 ## MCP
 
-We use the [official Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.8.0). Each tool is registered via `mcp.AddTool[In, Out]` with a typed argument struct — JSON schemas are inferred from `json` and `jsonschema` struct tags, and the SDK validates inputs before invoking the handler. `internal/mcp` owns the constructor wiring, 23 core tools plus 4 optional rumination tools, and four resources. Protocol framing, JSON-RPC, version negotiation, cancellation, and transport plumbing are the SDK's job.
+We use the [official Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk) (v1.8.0). Each tool is registered via `mcp.AddTool[In, Out]` with a typed argument struct — JSON schemas are inferred from `json` and `jsonschema` struct tags, and the SDK validates inputs before invoking the handler. `internal/mcp` exposes a startup-fixed profile: `core` has exactly nine tools, while `maintenance` retains the existing 23-tool set plus four optional rumination tools when rumination is enabled; both expose four resources. Protocol framing, JSON-RPC, version negotiation, cancellation, and transport plumbing are the SDK's job.
 
 Resources (`mnemos://session/current`, `mnemos://skills/index`, `mnemos://stats`,
 `mnemos://capabilities`) are read-only JSON snapshots.

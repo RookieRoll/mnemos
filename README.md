@@ -117,7 +117,7 @@ Facts have valid and invalid timestamps. The default ranker only surfaces curren
 
 ### Pinned core memory
 
-Some things must not rot: the rule you keep re-explaining, the architectural call everyone forgets, the mistake you already paid for. Pin them — `mnemos_pin`, or `pinned` on save — and they stop decaying, survive the dream pass, drop any TTL, and always show up first in the prewarm block. Everything else decays at a rate matched to its type: conventions and architecture barely move, corrections fade fastest, so promoted skill outranks raw history on its own.
+Some things must not rot: the rule you keep re-explaining, the architectural call everyone forgets, the mistake you already paid for. In the default core profile, set `pinned=true` when saving; the standalone `mnemos_pin` tool is available in the maintenance profile. Pinned memories stop decaying, survive the dream pass, drop any TTL, and always show up first in the prewarm block. Everything else decays at a rate matched to its type: conventions and architecture barely move, corrections fade fastest, so promoted skill outranks raw history on its own.
 
 ### Graph recall and contradiction warnings
 
@@ -140,7 +140,7 @@ see [embedding configuration and maintenance](docs/EMBEDDINGS.md).
 
 ### Compaction recovery
 
-When Claude Code compacts mid-session you lose your in-session state. `mnemos_context` in `recovery` mode reconstructs goal, decisions, and in-session observations so the agent can keep going.
+When Claude Code compacts mid-session you lose your in-session state. With the maintenance profile, `mnemos_context` in `recovery` mode reconstructs goal, decisions, and in-session observations. The core `mnemos_resume_context` tool restores only explicitly saved continuity checkpoints; it does not recover every in-session memory.
 
 ### Skill packs and Obsidian export
 
@@ -296,7 +296,7 @@ To unregister the copy, run `pi remove "$env:USERPROFILE\.pi\agent\local-package
 
 ### Any MCP-compatible client
 
-Stdio: point the client at `mnemos serve`. The server advertises 23 tools and 4 resources on the `initialize` handshake (27 tools when rumination is enabled).
+Stdio: point the client at `mnemos serve`. In 0.17.0 the startup-fixed default `core` profile advertises exactly nine task tools and 4 resources. Select `[mcp].profile = "maintenance"` to restore the existing advanced MCP surface (23 tools, or 27 when rumination is enabled). The default core surface is a breaking change for clients that depended on an advanced tool without an explicit profile; select the profile and restart the server to change it.
 
 ### HTTP transport
 
@@ -328,6 +328,7 @@ All runtime settings live in TOML. Use `mnemos --config <file> <command>` to sel
 | `mnemos import <file>` | Restore from JSON |
 | `mnemos prune` | Remove expired observations |
 | `mnemos dream [--watch]` | Consolidation pass |
+| `mnemos maintenance list\|evidence\|resolve\|dismiss` | JSON bridge for explicit candidate review when the core profile is active |
 | `mnemos vault export\|watch\|status` | Obsidian sync |
 | `mnemos embed status\|backfill` | Embedding tools |
 | `mnemos embed backfill --rebuild-incompatible` | Rebuild missing or incompatible model/dimension vectors |
@@ -338,9 +339,11 @@ All runtime settings live in TOML. Use `mnemos --config <file> <command>` to sel
 
 ## MCP tools
 
-`mnemos_save` `mnemos_search` `mnemos_get` `mnemos_delete` `mnemos_link` `mnemos_pin` `mnemos_session_start` `mnemos_session_end` `mnemos_context` `mnemos_premortem` `mnemos_promote` `mnemos_correct` `mnemos_convention` `mnemos_touch` `mnemos_skill_match` `mnemos_skill_save` `mnemos_skill_score` `mnemos_stats`
+The default 0.17.0 `core` profile exposes exactly `mnemos_session_start` `mnemos_session_end` `mnemos_search` `mnemos_get_many` `mnemos_save` `mnemos_correct` `mnemos_convention` `mnemos_checkpoint` `mnemos_resume_context`.
 
-With `[rumination].enabled = true`: `mnemos_ruminate_list` `mnemos_ruminate_pack` `mnemos_ruminate_resolve` `mnemos_ruminate_dismiss`
+Set `[mcp].profile = "maintenance"` to expose the previous full MCP tool set: 23 existing tools, plus `mnemos_ruminate_list` `mnemos_ruminate_pack` `mnemos_ruminate_resolve` `mnemos_ruminate_dismiss` when `[rumination].enabled = true`. The profile is a startup-fixed discovery surface, not an account ACL.
+
+An active host agent can use `mnemos maintenance list --limit 20`, `mnemos maintenance evidence --id ID`, or submit explicit `resolve` / `dismiss` JSON with `--payload`. Payloads are limited to 32 KiB and use the same validation as the MCP tools. The core profile does not change while the server runs; the CLI path does not wake a model or make semantic decisions on its own.
 
 Parameters: [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md).
 
@@ -392,6 +395,16 @@ contradiction_threshold   = 1
 transport = "stdio"
 http_addr = ":8080"
 api_key   = ""
+
+[mcp]
+profile = "core"              # maintenance restores advanced MCP tools; restart to change
+
+[maintenance]
+enabled = true
+interval = "24h"
+max_pass_duration = "5s"
+lease_duration = "15s"
+renew_interval = "2s"
 
 [integration]
 disabled = false

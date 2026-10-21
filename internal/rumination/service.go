@@ -6,6 +6,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/polyxmedia/mnemos/internal/maintenance"
+
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/skills"
 )
@@ -77,7 +79,10 @@ func (s *Service) Detect(ctx context.Context) ([]Candidate, error) {
 		if all[i].Severity != all[j].Severity {
 			return all[i].Severity > all[j].Severity
 		}
-		return all[i].Reason < all[j].Reason
+		if all[i].Reason != all[j].Reason {
+			return all[i].Reason < all[j].Reason
+		}
+		return all[i].ID < all[j].ID
 	})
 	return all, nil
 }
@@ -110,6 +115,36 @@ func (s *Service) PersistDetected(ctx context.Context) (inserted, updated int, e
 	}
 	for _, c := range candidates {
 		fresh, err := s.store.Upsert(ctx, c)
+		if err != nil {
+			return inserted, updated, fmt.Errorf("upsert %s: %w", c.ID, err)
+		}
+		if fresh {
+			inserted++
+		} else {
+			updated++
+		}
+	}
+	return inserted, updated, nil
+}
+
+// PersistDetectedFenced is the maintenance-only counterpart to
+// PersistDetected. Detection stays read-only; each candidate upsert is
+// fenced in its storage transaction and remains replay-safe by its composite
+// monitor/target identity.
+func (s *Service) PersistDetectedFenced(ctx context.Context, fence maintenance.Fence) (inserted, updated int, err error) {
+	if s.store == nil {
+		return 0, 0, fmt.Errorf("rumination: store not configured")
+	}
+	store, ok := s.store.(FencedStore)
+	if !ok {
+		return 0, 0, fmt.Errorf("rumination: fenced store not configured")
+	}
+	candidates, err := s.Detect(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, c := range candidates {
+		fresh, err := store.UpsertFenced(ctx, fence, c)
 		if err != nil {
 			return inserted, updated, fmt.Errorf("upsert %s: %w", c.ID, err)
 		}
@@ -175,6 +210,19 @@ func (s *Service) Resolve(ctx context.Context, id, resolvedBy string) error {
 		return fmt.Errorf("rumination: store not configured")
 	}
 	return s.store.Resolve(ctx, id, resolvedBy, s.now())
+}
+
+// ResolveFenced performs deterministic provenance-tag auto-resolution under
+// the active maintenance lease. Semantic decisions remain on Resolve.
+func (s *Service) ResolveFenced(ctx context.Context, fence maintenance.Fence, id, resolvedBy string) error {
+	if s.store == nil {
+		return fmt.Errorf("rumination: store not configured")
+	}
+	store, ok := s.store.(FencedStore)
+	if !ok {
+		return fmt.Errorf("rumination: fenced store not configured")
+	}
+	return store.ResolveFenced(ctx, fence, id, resolvedBy, s.now())
 }
 
 // Dismiss closes the candidate as "rule stands; evidence was noise". The

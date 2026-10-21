@@ -6,13 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
 
+	"github.com/polyxmedia/mnemos/internal/continuityflow"
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
-	"github.com/polyxmedia/mnemos/internal/session"
 )
 
 // hookInput mirrors the JSON payload Claude Code writes to hook stdin.
@@ -100,29 +100,40 @@ func runPrewarm(ctx context.Context, args []string) error {
 		MaxTokens:    d.cfg.Search.PrewarmMaxTokens,
 	})
 
-	var sessID string
+	flowConfig := continuityflow.Config{
+		LegacySessions: d.sess, Composer: pw, PrewarmMaxTokens: d.cfg.Search.PrewarmMaxTokens,
+	}
 	if *openSession && pwMode == prewarm.ModeSessionStart {
-		if sess := adoptableOpenSession(ctx, d, in.SessionID, proj); sess != nil {
-			sessID = sess.ID
-		} else if sess, err := d.sess.Open(ctx, session.OpenInput{
-			Project: proj, Goal: *goal, HostSessionID: in.SessionID,
-		}); err == nil {
-			sessID = sess.ID
+		if maintenance, buildErr := newMaintenanceRuntime(d.cfg, d.db, d.mem, d.skl, d.rum, d.db.Sessions(), d.db.Injections(), slog.Default()); buildErr == nil {
+			flowConfig.Maintenance = maintenance
+		}
+	}
+	flow := continuityflow.New(flowConfig)
+	var sessID string
+	var block *prewarm.Block
+	startedSession := false
+	if *openSession && pwMode == prewarm.ModeSessionStart {
+		started, startErr := flow.Start(ctx, continuityflow.TaskSessionInput{
+			Project: proj, Goal: *goal, HostSessionID: in.SessionID, AdoptLegacy: true,
+		})
+		if startErr == nil && started.Receipt.LegacySession != nil {
+			startedSession = true
+			sessID = started.Receipt.LegacySession.ID
+			block = started.LegacyBlock
 		}
 	} else if pwMode == prewarm.ModeCompactionRecovery {
 		// Recovery restores the state of the session that was compacted:
 		// the one SessionStart opened for this host conversation.
-		if sess, err := d.sess.Resolve(ctx, in.SessionID, proj); err == nil && sess != nil {
+		if sess, err := flow.ResolveLegacy(ctx, in.SessionID, proj); err == nil && sess != nil {
 			sessID = sess.ID
 		}
 	}
 
-	block, err := pw.Build(ctx, prewarm.Request{
-		Mode:      pwMode,
-		Project:   proj,
-		Goal:      *goal,
-		SessionID: sessID,
-	})
+	if !startedSession {
+		block, err = flow.Compose(ctx, prewarm.Request{
+			Mode: pwMode, Project: proj, Goal: *goal, SessionID: sessID,
+		})
+	}
 	if err != nil || block == nil {
 		return nil
 	}
@@ -150,44 +161,6 @@ func runPrewarm(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
-}
-
-// sessionAdoptWindow bounds how recently an open session must have started
-// for a new SessionStart firing to adopt it instead of opening a twin.
-// SessionStart hooks installed at both user and project scope both fire
-// within milliseconds of each other; before this guard every Claude
-// session on such a setup left a duplicate mnemos session that never
-// closed. The window is deliberately short so a genuinely new session an
-// hour later still gets its own row.
-const sessionAdoptWindow = 90 * time.Second
-
-// adoptableOpenSession returns the session a SessionStart firing should
-// reuse instead of opening a twin, or nil. With a host session ID only a
-// session opened for that same host conversation qualifies, so a second
-// terminal started in the same project inside the window still gets its
-// own session. Without one it falls back to the newest open session for
-// the project if it started within sessionAdoptWindow. Best-effort: lookup
-// failures mean "open a fresh one".
-func adoptableOpenSession(ctx context.Context, d *deps, hostSessionID, project string) *session.Session {
-	if hostSessionID != "" {
-		owned, err := d.sess.ListLegacyOpenByHost(ctx, hostSessionID)
-		if err != nil || len(owned) == 0 {
-			return nil
-		}
-		return &owned[0]
-	}
-	if project == "" {
-		return nil
-	}
-	open, err := d.sess.ListLegacyOpen(ctx, project)
-	if err != nil || len(open) == 0 {
-		return nil
-	}
-	newest := open[0]
-	if time.Since(newest.StartedAt) > sessionAdoptWindow {
-		return nil
-	}
-	return &newest
 }
 
 func parsePrewarmMode(s string) (prewarm.Mode, error) {

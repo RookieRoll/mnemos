@@ -1,4 +1,4 @@
-# Explicit pi checkpoint schema verification
+# Explicit pi profile and checkpoint schema verification
 
 `checkpoint-schema.mjs` is a manually invoked, model-free integration gate. It
 uses an existing pi SDK and pi-mcp-adapter installation; it installs nothing,
@@ -9,10 +9,18 @@ required. The script targets the pi 1.3 SDK API and pi-mcp-adapter direct tools.
 Build the candidate mnemos binary first, then run from the repository root:
 
 ```sh
-node verify/pi/checkpoint-schema.mjs --sdk /path/to/pi-coding-agent --package /path/to/mnemos/pi --adapter /path/to/pi-mcp-adapter --binary /path/to/candidate/mnemos
+node verify/pi/checkpoint-schema.mjs --profile core --sdk /path/to/pi-coding-agent --package /path/to/mnemos/pi --adapter /path/to/pi-mcp-adapter --binary /path/to/candidate/mnemos
+node verify/pi/checkpoint-schema.mjs --profile maintenance --sdk /path/to/pi-coding-agent --package /path/to/mnemos/pi --adapter /path/to/pi-mcp-adapter --binary /path/to/candidate/mnemos
 ```
 
-All four paths are required command-line arguments. The verifier does not read
+Pass `--profile core` and `--profile maintenance` in separate runs. Each run
+writes that explicit profile to its isolated TOML file and checks the exact MCP
+tool-name set: nine task tools for `core`, or the existing 27-tool surface for
+`maintenance` with rumination enabled. The maintenance run also calls the
+existing maintenance-only `mnemos_stats` tool once. Both profiles exercise the
+checkpoint lifecycle through direct adapter tools.
+
+All four paths and the profile are required command-line arguments. The verifier does not read
 process environment variables for its binary, package, SDK, or adapter selection.
 Optional `--temp-parent /path` selects an existing writable directory for the
 retained fixture.
@@ -25,7 +33,7 @@ execution uses the same candidate and explicit config path.
 Home, pi settings, Git workspace, mnemos config, and SQLite database are isolated.
 Network fetches fail, credentials are empty in memory, and no model prompt is run.
 
-The gate examines the tool schema visible through the SDK, then executes actual
+The gate examines the exact profile tool list and checkpoint schema visible through the SDK, then executes actual
 adapter tools for independent session opens, save, explicit resume, exact replay,
 a normal update, clear, and clear replay. It asserts `payload.workspace` is absent
 from input, server-sampled workspace remains in output, and submitting forged

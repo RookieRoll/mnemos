@@ -13,6 +13,7 @@ import (
 
 	"github.com/polyxmedia/mnemos/internal/contextfmt"
 	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 	"github.com/polyxmedia/mnemos/internal/safety"
 )
 
@@ -235,6 +236,90 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 	}
 
 	return &SaveResult{Observation: o, Deduped: false}, nil
+}
+
+// SaveDreamJournalFenced saves an explicit dream journal with the cycle ID as
+// its stable observation ID. A retry returns that same row without a Get or
+// access-count mutation; the storage transaction validates the active fence.
+func (s *Service) SaveDreamJournalFenced(ctx context.Context, fence maintenance.Fence, in SaveInput) (*SaveResult, error) {
+	if fence.OwnerToken == "" || fence.CycleID == "" {
+		return nil, maintenance.ErrFenceLost
+	}
+	if strings.TrimSpace(in.Title) == "" {
+		return nil, fmt.Errorf("dream journal: title is required")
+	}
+	if strings.TrimSpace(in.Content) == "" {
+		return nil, fmt.Errorf("dream journal: content is required")
+	}
+	in.Type = TypeDream
+	if in.Importance == 0 {
+		in.Importance = 3
+	}
+	if in.Importance < 1 || in.Importance > 10 {
+		return nil, fmt.Errorf("dream journal: importance must be 1..10")
+	}
+	now := s.clock().UTC()
+	validFrom := now
+	if in.ValidFrom != nil {
+		validFrom = in.ValidFrom.UTC()
+	}
+	agent := defaultString(in.AgentID, "default")
+	sourceKind := in.SourceKind
+	if sourceKind == "" {
+		sourceKind = SourceUser
+	}
+	if !sourceKind.Valid() {
+		return nil, fmt.Errorf("dream journal: invalid source_kind %q", sourceKind)
+	}
+	trustTier := in.TrustTier
+	if trustTier == "" {
+		trustTier = TrustCurated
+	}
+	if !trustTier.Valid() {
+		return nil, fmt.Errorf("dream journal: invalid trust_tier %q", trustTier)
+	}
+	trustTier = clampTrustTier(sourceKind, trustTier)
+	topic, err := NormalizeTopic(in.TopicKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := scanTopicWrite(topic); err != nil {
+		return nil, err
+	}
+	tags := append([]string(nil), in.Tags...)
+	cycleTag := "dream-cycle:" + fence.CycleID
+	hasCycleTag := false
+	for _, tag := range tags {
+		hasCycleTag = hasCycleTag || tag == cycleTag
+	}
+	if !hasCycleTag {
+		tags = append(tags, cycleTag)
+	}
+	o := &Observation{
+		ID: fence.CycleID, SessionID: in.SessionID, AgentID: agent,
+		Project: in.Project, Title: in.Title, Content: in.Content,
+		Type: TypeDream, Tags: tags, Importance: in.Importance,
+		CreatedAt: now, ValidFrom: validFrom,
+		ValidUntil: in.ValidUntil, ContentHash: hashContent(TypeDream, in.Title, in.Content, in.Rationale, in.Structured),
+		Structured: in.Structured, Rationale: in.Rationale,
+		SourceKind: sourceKind, TrustTier: trustTier,
+		DerivedFrom: in.DerivedFrom, Pinned: false, TopicKey: topic,
+	}
+	if in.TTLDays > 0 {
+		expires := now.AddDate(0, 0, in.TTLDays)
+		o.ExpiresAt = &expires
+	}
+	if s.HybridEnabled() {
+		if vec, err := s.embedder.Embed(ctx, embedText(o)); err == nil && len(vec) > 0 {
+			o.Embedding = vec
+			o.EmbeddingModel = s.embedder.Model()
+		}
+	}
+	store, ok := s.store.(FencedJournalStore)
+	if !ok {
+		return nil, fmt.Errorf("dream journal: fenced store not configured")
+	}
+	return store.SaveDreamJournalFenced(ctx, fence, o)
 }
 
 // Restore reinserts an exported observation verbatim, preserving its ID,

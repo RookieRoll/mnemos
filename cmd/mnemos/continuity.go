@@ -6,13 +6,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/polyxmedia/mnemos/internal/config"
 	"github.com/polyxmedia/mnemos/internal/continuity"
 	"github.com/polyxmedia/mnemos/internal/continuityflow"
+	"github.com/polyxmedia/mnemos/internal/embedding"
 	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
+	"github.com/polyxmedia/mnemos/internal/session"
+	"github.com/polyxmedia/mnemos/internal/skills"
 	"github.com/polyxmedia/mnemos/internal/storage"
 )
 
@@ -71,11 +76,25 @@ func runContinuity(ctx context.Context, args []string) error {
 	defer db.Close()
 	// A progress-only call must not probe or initialize an embedding provider.
 	core := continuity.New(continuity.Config{Store: db.Continuity()})
+	injections := injection.NewLogger(db.Injections(), nil)
 	pw := prewarm.NewService(prewarm.Config{
 		Observations: db.Observations(), Sessions: db.Sessions(), Skills: db.Skills(),
-		Touches: db.Touches(), Injections: injection.NewLogger(db.Injections(), nil), MaxTokens: cfg.Search.PrewarmMaxTokens,
+		Touches: db.Touches(), Injections: injections, MaxTokens: cfg.Search.PrewarmMaxTokens,
 	})
-	flow := continuityflow.New(continuityflow.Config{Core: core, Composer: pw, PrewarmMaxTokens: cfg.Search.PrewarmMaxTokens})
+	legacySessions := session.NewService(session.Config{Store: db.Sessions()})
+	flowConfig := continuityflow.Config{
+		Core: core, LegacySessions: legacySessions, Composer: pw,
+		PrewarmMaxTokens: cfg.Search.PrewarmMaxTokens,
+	}
+	if args[0] == "open" {
+		skl := skills.NewService(skills.Config{Store: db.Skills()})
+		mem := memory.NewService(memoryServiceConfig(cfg.Search, db.Observations(), embedding.NewNoop(), injections))
+		rum := newRumination(cfg, db, skl)
+		if maintenance, buildErr := newMaintenanceRuntime(cfg, db, mem, skl, rum, db.Sessions(), db.Injections(), slog.Default()); buildErr == nil {
+			flowConfig.Maintenance = maintenance
+		}
+	}
+	flow := continuityflow.New(flowConfig)
 	var out any
 	switch args[0] {
 	case "open":

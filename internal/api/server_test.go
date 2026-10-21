@@ -147,6 +147,10 @@ func TestSaveSearchRoundTrip(t *testing.T) {
 
 func TestSessionStartIncludesPrewarm(t *testing.T) {
 	ts := newAPIServer(t, "")
+	capabilityCode, capabilities := request(t, ts, "GET", "/v1/continuity/capabilities", "", nil)
+	if capabilityCode != http.StatusOK || capabilities["supported"] != false {
+		t.Fatalf("legacy-only constructor advertised v1 continuity: %d %#v", capabilityCode, capabilities)
+	}
 	// Seed a convention.
 	request(t, ts, "POST", "/v1/convention", "", map[string]any{
 		"title": "error wrap", "rule": "use %w", "project": "mnemos",

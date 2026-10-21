@@ -3,7 +3,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -35,42 +37,51 @@ func main() {
 	}
 
 	if err := handler(ctx, args); err != nil {
-		fmt.Fprintf(os.Stderr, "mnemos: %s: %v\n", cmd, err)
-		os.Exit(1)
+		os.Exit(commandFailure(cmd, err, os.Stderr))
 	}
+}
+
+func commandFailure(cmd string, err error, stderr io.Writer) int {
+	var jsonErr maintenanceJSONError
+	if errors.As(err, &jsonErr) {
+		return 1
+	}
+	fmt.Fprintf(stderr, "mnemos: %s: %v\n", cmd, err)
+	return 1
 }
 
 type handler func(ctx context.Context, args []string) error
 
 var commands = map[string]handler{
-	"serve":      runServe,
-	"search":     runSearch,
-	"stats":      runStats,
-	"digest":     runDigest,
-	"efficacy":   runEfficacy,
-	"sessions":   runSessions,
-	"export":     runExport,
-	"import":     runImport,
-	"prune":      runPrune,
-	"dream":      runDream,
-	"vault":      runVault,
-	"embed":      runEmbed,
-	"skill":      runSkill,
-	"replay":     runReplay,
-	"prewarm":    runPrewarm,
-	"continuity": runContinuity,
-	"hook":       runHook,
-	"version":    runVersion,
-	"config":     runConfig,
-	"init":       runInit,
-	"update":     runUpdate,
-	"doctor":     runDoctor,
-	"verify":     runVerify,
-	"-v":         runVersion,
-	"--version":  runVersion,
-	"-h":         runHelp,
-	"--help":     runHelp,
-	"help":       runHelp,
+	"serve":       runServe,
+	"search":      runSearch,
+	"stats":       runStats,
+	"digest":      runDigest,
+	"efficacy":    runEfficacy,
+	"sessions":    runSessions,
+	"export":      runExport,
+	"import":      runImport,
+	"prune":       runPrune,
+	"dream":       runDream,
+	"maintenance": runMaintenance,
+	"vault":       runVault,
+	"embed":       runEmbed,
+	"skill":       runSkill,
+	"replay":      runReplay,
+	"prewarm":     runPrewarm,
+	"continuity":  runContinuity,
+	"hook":        runHook,
+	"version":     runVersion,
+	"config":      runConfig,
+	"init":        runInit,
+	"update":      runUpdate,
+	"doctor":      runDoctor,
+	"verify":      runVerify,
+	"-v":          runVersion,
+	"--version":   runVersion,
+	"-h":          runHelp,
+	"--help":      runHelp,
+	"help":        runHelp,
 }
 
 func runVersion(_ context.Context, _ []string) error {
@@ -103,6 +114,13 @@ Commands:
   import <file>          Import data from JSON
   prune                  Remove expired observations
   dream [--watch]        Run a consolidation pass (or daemon with --watch)
+  maintenance list      List pending semantic maintenance candidates as JSON
+  maintenance evidence --id ID
+                         Print candidate evidence and review context as JSON
+  maintenance resolve --payload JSON
+                         Resolve a candidate with an agent-authored prediction
+  maintenance dismiss --payload JSON
+                         Dismiss a candidate with an agent-authored reason
   vault export           Export memory to an Obsidian-compatible vault
   vault watch            Daemon: keep the vault in sync on a timer
   vault status           Show vault sync status

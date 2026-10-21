@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 )
 
 // ErrNotFound is returned when a candidate lookup misses. Callers should
@@ -53,6 +55,13 @@ type Store interface {
 	// Counts returns totals by status. Cheap enough to call from stats and
 	// from tests that assert state transitions.
 	Counts(ctx context.Context) (Counts, error)
+}
+
+// FencedStore exposes only the candidate writes used by deterministic dream
+// maintenance. Each mutation is fenced in its own transaction.
+type FencedStore interface {
+	UpsertFenced(ctx context.Context, fence maintenance.Fence, c Candidate) (bool, error)
+	ResolveFenced(ctx context.Context, fence maintenance.Fence, id, resolvedBy string, at time.Time) error
 }
 
 // Counts bundles the three status totals Counts returns. Named struct keeps

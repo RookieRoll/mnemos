@@ -79,8 +79,13 @@ func runServe(ctx context.Context, args []string) error {
 		Injections:   injLog,
 		MaxTokens:    cfg.Search.PrewarmMaxTokens,
 	})
+	maintenance, err := newMaintenanceRuntime(cfg, db, mem, skl, rum, db.Sessions(), db.Injections(), logger)
+	if err != nil {
+		return fmt.Errorf("build maintenance runtime: %w", err)
+	}
 	continuitySvc := continuityflow.New(continuityflow.Config{
-		Core: continuity.New(continuity.Config{Store: db.Continuity()}), Composer: pw,
+		Core: continuity.New(continuity.Config{Store: db.Continuity()}), LegacySessions: sess,
+		Composer: pw, Maintenance: maintenance,
 		PrewarmMaxTokens: cfg.Search.PrewarmMaxTokens,
 	})
 
@@ -90,14 +95,14 @@ func runServe(ctx context.Context, args []string) error {
 			addr = cfg.Server.HTTPAddr
 		}
 		httpSrv := api.NewServer(api.Config{
-			Continuity: continuitySvc,
-			Memory:     mem,
-			Sessions:   sess,
-			Skills:     skl,
-			Touches:    db.Touches(),
-			Prewarm:    pw,
-			APIKey:     cfg.Server.APIKey,
-			Logger:     logger,
+			Flow:     continuitySvc,
+			Memory:   mem,
+			Sessions: sess,
+			Skills:   skl,
+			Touches:  db.Touches(),
+			Prewarm:  pw,
+			APIKey:   cfg.Server.APIKey,
+			Logger:   logger,
 			StorageSize: func() (int64, error) {
 				fi, err := os.Stat(cfg.Storage.Path)
 				if err != nil {
@@ -111,9 +116,10 @@ func runServe(ctx context.Context, args []string) error {
 	}
 
 	srv := mcp.NewServer(mcp.Config{
-		Continuity: continuitySvc,
+		Flow:       continuitySvc,
 		Name:       "mnemos",
 		Version:    version.Version,
+		Profile:    cfg.MCP.Profile,
 		Memory:     mem,
 		Sessions:   sess,
 		Skills:     skl,

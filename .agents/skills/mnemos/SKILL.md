@@ -1,8 +1,8 @@
 ---
 name: mnemos
 description: Persistent memory and learning-loop skills for AI coding agents using mnemos MCP tools. Use whenever mnemos_* MCP tools are available and you are doing work worth remembering. Cross-session memory, conventions, corrections, and architectural decisions surface back into context automatically. Triggers on session start (record a goal), session end (record a summary), the user says "save", "remember", "record this", "we were wrong about", and on any genuine correction or architectural decision. Keeps mnemos's memory store alive across sessions so the next session starts smarter. Without this skill, agents silently edit and the store goes empty.
-allowed-tools: mcp__mnemos mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_pin mcp__mnemos_mnemos_checkpoint mcp__mnemos_mnemos_resume_context
-version: 0.16.0
+allowed-tools: mcp__mnemos mcp__mnemos_mnemos_session_start mcp__mnemos_mnemos_session_end mcp__mnemos_mnemos_search mcp__mnemos_mnemos_get_many mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_checkpoint mcp__mnemos_mnemos_resume_context
+version: 0.17.0
 author: André Figueira <andre@polyxmedia.com>
 license: MIT
 compatibility: "Designed for any MCP-capable agent host (Claude Code, Claude Desktop, Cursor, Windsurf, OpenAI Codex CLI, pi). The client MCP route must resolve the mnemos executable through PATH or an absolute path; run mnemos doctor to verify. On pi, install the package copy to add harness hooks."
@@ -111,7 +111,7 @@ mnemos_session_start(
 
 Without a goal, the prompt hook backfills the first real prompt when available. With a goal, the session becomes a durable record that `mnemos replay` and future prewarms can use.
 
-**End.** When the user signals done ("ship it", "that's it", "commit and close", "we're done"), close the session:
+**End.** At the end of completed work or the current session (or when the user explicitly asks to end it), close the exact current session:
 
 ```
 mnemos_session_end(
@@ -125,45 +125,22 @@ Status values: `ok` | `failed` | `blocked` | `abandoned`. An open session with n
 
 ### Which tool for which signal
 
-| Signal from the user or the work | Tool to call |
+| Signal from the user or the work | Core tool to call |
 | --- | --- |
-| About to execute a non-trivial plan (after deciding approach, before first edit) | `mnemos_premortem(plan, project)` — returns how similar attempts failed; read it before proceeding |
-| A non-obvious decision, pattern, or architectural call worth preserving | `mnemos_save` with `type=decision` / `architecture` / `pattern` |
-| A core architectural invariant that must never decay or be evicted | `mnemos_pin(id, pinned=true)` (or `mnemos_save` with `pinned=true`) |
-| User corrects an approach: "actually no, do X because Y" | `mnemos_correct(tried, wrong_because, fix)` |
-| A rule that should apply to the project forever: "always wrap errors with %w" | `mnemos_convention(title, rule, rationale, project)` |
-| A file you are editing heavily and will revisit | `mnemos_touch(path, project)` |
-| Reloading state mid-session after a context compaction | `mnemos_context(session_id=..., mode="recovery")` |
-| Checking history before doing something you might already have figured out | `mnemos_search(query, project)` |
-| Quick state check ("is mnemos actually recording?") | `mnemos_stats` |
-| Linking two observations so they surface together | `mnemos_link(from_id, to_id, relation)` |
-| At the top of a long session, or when the user questions a stored rule | `mnemos_ruminate_list` → pick one → `mnemos_ruminate_pack` |
-| Replacing a weak skill or stale rule after hostile review | `mnemos_ruminate_resolve(id, resolved_by, why_better)` |
-| Leaving a rule intact because the evidence was noise | `mnemos_ruminate_dismiss(id, reason)` |
+| Start a task when no session receipt was injected by the host | `mnemos_session_start` — it returns the prewarm context and session ID. Reuse that ID. |
+| Recall prior knowledge for a non-trivial task | `mnemos_search`, then `mnemos_get_many` for selected full observations. |
+| The user says “remember”, corrects an assumption, or declares a durable project rule | `mnemos_save`, `mnemos_correct`, or `mnemos_convention`. |
+| Record progress at a milestone, blocker, handoff, or before compaction | `mnemos_checkpoint` with the exact current session/workspace receipt. |
+| Resume after compaction or inspect progress candidates | `mnemos_resume_context` with the exact current receipt; choose a source explicitly when ambiguous. |
+| Close the exact current session at the end of the task/session, or when the user explicitly ends it | `mnemos_session_end` with a concise, truthful summary and status; do not wait for a separate user prompt to close completed work. |
 
-### Progressive reading, topics, and source checks
+### Advanced maintenance tools
 
-When search finds useful candidates, `mnemos_get_many(ids, project)` reads selected
-full details in one call; `mnemos_neighborhood(id, project, before, after)` browses
-bounded same-session summaries. Both require a project and keep agent/project,
-trust, and historical visibility explicit. `unavailable` covers missing or filtered
-IDs; `omitted_for_size` means retry selected IDs with a larger permitted byte budget
-if those details matter. Neighbourhood summaries do not count as detail reads.
+Advanced MCP actions are available only when the server was started with `[mcp].profile = "maintenance"`. The default `core` profile has exactly the nine tools above. When a core-profile task explicitly authorizes candidate review, use `mnemos maintenance list`, `mnemos maintenance evidence --id ID`, and the JSON `resolve` or `dismiss` commands documented in `docs/CONFIGURATION.md`. The active host agent makes semantic decisions; neither the CLI nor automatic maintenance calls a model. The profile is a startup discovery setting, not an account permission boundary.
 
-Optional `topic_key` groups related assertions, including a rule and its exception.
-It does not replace existing knowledge. Use `mnemos_save(..., replaces_id=...)`
-only to revise the named live version in the same scope; on conflict inspect the
-current version before choosing a new target. A pinned predecessor stays pinned
-unless `unpin_replacement=true` explicitly acknowledges removing that protection.
+### Progressive reading and source checks
 
-Evidence stores up to 16 submitted locator/revision/selector/fingerprint references,
-without copying source bodies. New references start `unverified`; replacements do
-not inherit the old version's evidence. After inspecting a source when the task
-calls for it, `mnemos_evidence_check(observation_id, evidence_key, status)` records
-only the latest **caller-reported** result/time. `matched` requires a stored
-fingerprint baseline. Mnemos never fetches the source or automatically certifies a
-claim; a changed/unavailable source does not itself invalidate memory, and distinct
-references are not independent proof. See `docs/MCP_TOOLS.md` for limits and fields.
+Start with `mnemos_search` and select relevant IDs with `mnemos_get_many`. Keep `agent_id` and `project` scope explicit when provided. The core profile does not expose the advanced neighborhood or evidence-check tools; use them only when the server was explicitly started with the `maintenance` profile.
 
 ### What not to do
 
@@ -171,53 +148,37 @@ references are not independent proof. See `docs/MCP_TOOLS.md` for limits and fie
 - Don't call `mnemos_correct` for trivial typos or one-off slips. Corrections are for conceptual mistakes that would repeat.
 - Don't fabricate tool arguments. Derive `project` from the git remote or the working directory; if unclear, ask.
 - Don't spam `mnemos_search` before every edit. It is fast but the goal is a richer memory, not a pre-check ritual.
-- Don't skip `mnemos_session_end`. Check for open sessions via `mnemos_stats` at the top of a session; if one is open from a past run, close it.
+- Use `mnemos_session_end` only for the exact current session ID; do not infer or adopt an older session.
 
 ### Rumination: when a stored rule looks wrong
 
-Mnemos flags stored knowledge whose effectiveness has fallen below the threshold. These are **rumination candidates** and they want a hostile review, not a rubber stamp.
+Candidate review is an explicit Maintenance Agent task, not a required step in every Task Agent session. Automatic maintenance may surface or update deterministic candidates but does not make semantic resolve/dismiss decisions. When an authorized review is assigned, use `maintenance` profile tools or the core-compatible JSON CLI bridge:
 
-Trigger situations where you should check the queue:
+1. List candidates with `mnemos maintenance list` and fetch one review with `mnemos maintenance evidence --id ID`.
+2. Read the hypothesis and evidence, then decide whether the rule should change. Mnemos validates required fields and minimum lengths but does not judge whether the new prediction is persuasive.
+3. Resolve with `mnemos maintenance resolve --payload JSON` including `candidate_id`, `resolved_by`, and `why_better` (at least 16 Unicode characters), or dismiss with `mnemos maintenance dismiss --payload JSON` including `candidate_id` and a reason (at least 8 Unicode characters). Review CLI output as JSON and treat a nonzero exit as failure.
 
-- At the top of any long or consequential session (run `mnemos_ruminate_list`).
-- When the user questions a rule the memory layer is surfacing ("is this still true?").
-- When you just watched a saved skill or convention fail in practice.
-
-Workflow:
-
-1. `mnemos_ruminate_list` → returns `{candidates: [...], counts: {...}}`. Pick one by ID.
-2. `mnemos_ruminate_pack(id)` → returns a review block with **Hypothesis**, **Disconfirming evidence**, **Falsifiable restatement**, **Hostile review** prompts, and an **Action** section. Read the block. Answer the hostile prompts honestly. The prompts are ordered: steel-man the opposite → find the fatal flaw → decide falsification vs noise → check whether context shifted → state the new prediction.
-3. Decide one of two outcomes:
-    - **Resolve** with a concrete revision: `mnemos_ruminate_resolve(id, resolved_by, why_better)`. `resolved_by` is the ID of the new skill version or superseding observation. `why_better` **must be a sentence naming a new prediction the revision makes that the old version did not** — Popper's falsifiability guard. Cosmetic rewording is rejected by the server (min 16 chars, but length is not the real test — the test is whether you can state a new prediction).
-    - **Dismiss** with an honest reason: `mnemos_ruminate_dismiss(id, reason)`. Use when the hostile review convinced you the rule stands and the evidence was a one-off. The reason is preserved so a future rumination pass doesn't re-raise the same flag without context.
-
-Never close a candidate silently or with filler. A rumination that resolves to "no change" is either a dismissal with a real reason or a bug in the monitor — both belong in the provenance trail, not in the void.
+The CLI receives JSON through argv because `pi.exec` has no stdin parameter. In PowerShell, build a compact payload with `ConvertTo-Json -Compress` and pass it as one argument. Do not run semantic review automatically or imply that a pending candidate wakes an agent.
 
 ### Quick self-check
 
-Before wrapping any multi-step session, run through this:
-
-1. Do I have a `mnemos_session_id` from the prewarm hook or `mnemos_session_start`? If not, call `mnemos_session_start` now and cite what the goal was retroactively.
-2. Is there a correction from this session? If the user said "no, do X instead", record it before they have to ask.
-3. Is there a decision worth preserving? If the answer took thinking to arrive at, save it.
-4. Did I check `mnemos_ruminate_list` at least once this session? If the queue had pending candidates on a topic I touched, I should have resolved or dismissed them.
-5. Did I close the session with a summary that future-me can read in a prewarm?
+Before wrapping a multi-step task/session, confirm the current session receipt, record durable corrections or decisions when relevant, checkpoint meaningful progress, and close that exact session with a concise, truthful summary and status. Do not wait for a separate user prompt after work is complete, and do not call advanced tools that are absent from the active profile.
 
 ## Output
 
 - `mnemos_session_start` returns a `session_id` plus a pre-warmed context block (conventions, recent sessions, matching skills, corrections, hot files) already token-budgeted for injection.
 - `mnemos_save` / `mnemos_correct` / `mnemos_convention` persist a structured observation and return its ID. Corrections store `tried` / `wrong_because` / `fix` as structured fields.
 - Three corrections that cluster on the same `(agent, project, label)` are auto-promoted into a skill by the deterministic dream pass — no LLM in the loop, so the same corrections always yield the same skill.
-- `mnemos_search` / `mnemos_context` return ranked observations with provenance (`source_kind`, `trust_tier`); raw-tier (quarantined) content is excluded unless `include_raw=true`.
-- `mnemos_stats` returns counts, top tags, and recent sessions so you can confirm the store is actually recording.
+- `mnemos_search` returns ranked observations; use `mnemos_get_many` to read selected details within the requested project scope.
+- Advanced status and review tools require the `maintenance` MCP profile; do not assume they are available in `core`.
 
 ## Error Handling
 
 - **`mnemos_*` tools are not visible.** The MCP server is not connected. Tell the user to run `mnemos doctor`; if a client shows red, `mnemos init` re-wires it. Do not silently proceed without memory — that is the failure mode this skill exists to prevent.
 - **No `mnemos_session_id` in context.** The SessionStart hook did not run (non-hooked client or hook disabled). Call `mnemos_session_start` before doing real work.
-- **An open session from a past run.** `mnemos_stats` surfaces it. Close it with `mnemos_session_end(..., status="abandoned")` before opening a new one, or it pollutes the next prewarm.
+- **No session receipt is available.** Do not guess an ID or adopt another session. Start a new task session with `mnemos_session_start` when needed.
 - **A save is rejected with a `[MNEMOS: FLAGGED]` / safety error.** The write-boundary scanner caught a prompt-injection pattern in the content. Do not retry verbatim — strip the suspicious payload or save only the genuine, user-authored signal.
-- **A `mnemos_ruminate_resolve` is rejected.** The `why_better` did not name a new prediction (Popper guard). Rewrite it to state what the revision predicts that the old version did not.
+- **A maintenance decision is rejected.** Read the JSON error, correct the required fields or length, and retry only when the explicit task still authorizes that decision.
 
 ## Examples
 

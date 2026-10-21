@@ -56,7 +56,7 @@ func TestScopedReadTransportParity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	srv := mcp.NewServer(mcp.Config{Memory: svc})
+	srv := mcp.NewServer(mcp.Config{Profile: "maintenance", Memory: svc})
 	left, right := mcpsdk.NewInMemoryTransports()
 	ss, err := srv.SDK().Connect(ctx, left, nil)
 	if err != nil {

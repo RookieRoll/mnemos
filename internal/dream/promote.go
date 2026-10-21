@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/session"
 	"github.com/polyxmedia/mnemos/internal/skills"
@@ -68,7 +69,7 @@ const (
 // frequency alone is weak evidence that a skill would change behavior.
 // Version bumps of an already-admitted skill skip the gate: updating an
 // existing skill with new corrections is maintenance, not admission.
-func (s *Service) promoteSkillsFromCorrections(ctx context.Context) (promoted, deferred int, err error) {
+func (s *Service) promoteSkillsFromCorrections(ctx context.Context, fence maintenance.Fence) (promoted, deferred int, err error) {
 	if s.skills == nil || s.reader == nil {
 		return 0, 0, nil
 	}
@@ -96,13 +97,15 @@ func (s *Service) promoteSkillsFromCorrections(ctx context.Context) (promoted, d
 	groups := groupCorrections(eligible)
 
 	for _, g := range groups {
+		if err := ctx.Err(); err != nil {
+			return promoted, deferred, err
+		}
 		if len(g.corrections) < minCorrectionsPerGroup {
 			continue
 		}
 		existing, err := s.findSkillByOrigin(ctx, g.agentID, g.hash)
 		if err != nil {
-			s.log.Warn("promote skill", "err", err, "label", g.label, "project", g.project)
-			continue
+			return promoted, deferred, fmt.Errorf("find promoted origin %s: %w", g.hash, err)
 		}
 		if existing == nil {
 			gate := s.promotionGate(ctx, g)
@@ -116,16 +119,15 @@ func (s *Service) promoteSkillsFromCorrections(ctx context.Context) (promoted, d
 			s.log.Info("skill promotion admitted",
 				"label", g.label, "project", g.project, "reason", gate.reason)
 		}
-		ok, err := s.upsertPromotedSkill(ctx, g, existing)
+		ok, err := s.upsertPromotedSkill(ctx, fence, g, existing)
 		if err != nil {
-			s.log.Warn("promote skill", "err", err, "label", g.label, "project", g.project)
-			continue
+			return promoted, deferred, fmt.Errorf("promote %s: %w", g.hash, err)
 		}
 		if ok {
 			promoted++
 		}
 	}
-	return promoted, deferred, nil
+	return promoted, deferred, ctx.Err()
 }
 
 // gateResult is the explainable outcome of the promotion gate: admit or
@@ -283,6 +285,9 @@ func groupCorrections(obs []memory.Observation) []correctionGroup {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].agent != keys[j].agent {
+			return keys[i].agent < keys[j].agent
+		}
 		if keys[i].project != keys[j].project {
 			return keys[i].project < keys[j].project
 		}
@@ -290,7 +295,14 @@ func groupCorrections(obs []memory.Observation) []correctionGroup {
 	})
 	out := make([]correctionGroup, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, *byKey[k])
+		group := *byKey[k]
+		sort.Slice(group.corrections, func(i, j int) bool {
+			if !group.corrections[i].CreatedAt.Equal(group.corrections[j].CreatedAt) {
+				return group.corrections[i].CreatedAt.Before(group.corrections[j].CreatedAt)
+			}
+			return group.corrections[i].ID < group.corrections[j].ID
+		})
+		out = append(out, group)
 	}
 	return out
 }
@@ -335,7 +347,7 @@ func defaultAgent(id string) string {
 // first promotion); the caller already fetched it for the admission gate.
 // Returns true when the skill was created or updated (version went up),
 // false when the existing skill already matched exactly.
-func (s *Service) upsertPromotedSkill(ctx context.Context, g correctionGroup, existing *skills.Skill) (bool, error) {
+func (s *Service) upsertPromotedSkill(ctx context.Context, fence maintenance.Fence, g correctionGroup, existing *skills.Skill) (bool, error) {
 	procedure, pitfalls := synthesisePromotion(g)
 
 	sources := sessionIDs(g.corrections)
@@ -362,7 +374,7 @@ func (s *Service) upsertPromotedSkill(ctx context.Context, g correctionGroup, ex
 		name = existing.Name
 	}
 
-	_, err := s.skills.Save(ctx, skills.SaveInput{
+	_, err := s.skills.SaveFenced(ctx, fence, skills.SaveInput{
 		AgentID:        g.agentID,
 		Name:           name,
 		Description:    description,

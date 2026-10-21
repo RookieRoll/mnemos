@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/session"
@@ -165,6 +166,7 @@ type promoteFixture struct {
 	mem  *memory.Service
 	sess *session.Service
 	sk   *skills.Service
+	db   *storage.DB
 }
 
 func newPromoteFixture(t *testing.T) *promoteFixture {
@@ -180,13 +182,25 @@ func newPromoteFixture(t *testing.T) *promoteFixture {
 	sk := skills.NewService(skills.Config{Store: db.Skills()})
 	ds := NewService(Config{
 		Memory:    mem,
-		Store:     db.Observations(),
+		Store:     db.FencedObservations(),
 		Reader:    db.Observations(),
 		Skills:    sk,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		StaleDays: 1,
 	})
-	return &promoteFixture{ds: ds, mem: mem, sess: sess, sk: sk}
+	return &promoteFixture{ds: ds, mem: mem, sess: sess, sk: sk, db: db}
+}
+
+func runFencedTestPass(t *testing.T, ctx context.Context, svc *Service, db *storage.DB, writeJournal bool) (*Journal, error) {
+	t.Helper()
+	coordinator, err := NewCoordinator(CoordinatorConfig{
+		Store: db.Maintenance(), Runner: svc, AutomaticEnabled: true,
+		Interval: time.Hour, MaxPassDuration: 5 * time.Second, LeaseDuration: 15 * time.Second, RenewInterval: 2 * time.Second,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return coordinator.Run(ctx, writeJournal)
 }
 
 // seedCorrection opens a session (to satisfy the FK on observations.session_id)
@@ -255,7 +269,7 @@ func TestPromoteExcludesRawTierCorrections(t *testing.T) {
 		f.seedRawCorrection(t, "api", "oauth", "oauth retry "+string(rune('a'+i)))
 	}
 
-	j, err := f.ds.Run(ctx, false)
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +291,7 @@ func TestPromoteRawCorrectionsDoNotCountTowardThreshold(t *testing.T) {
 	f.seedCorrection(t, "api", "oauth", "oauth b")
 	f.seedRawCorrection(t, "api", "oauth", "oauth poisoned")
 
-	j, err := f.ds.Run(ctx, false)
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +307,7 @@ func TestPromoteBelowThresholdIsNoOp(t *testing.T) {
 	f.seedCorrection(t, "api", "oauth", "oauth a")
 	f.seedCorrection(t, "api", "oauth", "oauth b")
 
-	j, err := f.ds.Run(ctx, false)
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +328,7 @@ func TestPromoteAtThresholdCreatesSkill(t *testing.T) {
 			"oauth retry "+string(rune('a'+i)))
 	}
 
-	j, err := f.ds.Run(ctx, false)
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +380,7 @@ func TestPromoteIsIdempotent(t *testing.T) {
 	}
 
 	// First pass promotes.
-	if _, err := f.ds.Run(ctx, false); err != nil {
+	if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
 		t.Fatal(err)
 	}
 	list, _ := f.sk.List(ctx, "")
@@ -374,7 +388,7 @@ func TestPromoteIsIdempotent(t *testing.T) {
 
 	// Second pass: same corpus. Must not create a duplicate or bump
 	// version; nothing changed since the first run.
-	j, err := f.ds.Run(ctx, false)
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +412,7 @@ func TestPromoteVersionBumpsWhenNewCorrectionsJoin(t *testing.T) {
 		f.seedCorrection(t, "api", "oauth",
 			"oauth retry "+string(rune('a'+i)))
 	}
-	_, _ = f.ds.Run(ctx, false)
+	_, _ = runFencedTestPass(t, ctx, f.ds, f.db, false)
 	list, _ := f.sk.List(ctx, "")
 	versionOne := list[0].Version
 
@@ -406,7 +420,7 @@ func TestPromoteVersionBumpsWhenNewCorrectionsJoin(t *testing.T) {
 	// existing skill rather than creating a new one.
 	f.seedCorrection(t, "api", "oauth", "oauth retry d")
 
-	j, err := f.ds.Run(ctx, false)
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,11 +453,11 @@ func TestPromoteDisabledWhenReaderMissing(t *testing.T) {
 	mem := memory.NewService(memory.Config{Store: db.Observations()})
 	ds := NewService(Config{
 		Memory:    mem,
-		Store:     db.Observations(),
+		Store:     db.FencedObservations(),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		StaleDays: 1,
 	})
-	j, err := ds.Run(context.Background(), false)
+	j, err := runFencedTestPass(t, context.Background(), ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +478,7 @@ func TestPromoteHandlesMultipleGroups(t *testing.T) {
 		f.seedCorrection(t, "api", "serialisation",
 			"ser y"+string(rune('a'+i)))
 	}
-	j, err := f.ds.Run(ctx, false)
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
 	if err != nil {
 		t.Fatal(err)
 	}

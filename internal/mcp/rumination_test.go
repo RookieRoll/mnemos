@@ -49,6 +49,7 @@ func newRumHarness(t *testing.T) *rumHarness {
 	})
 
 	srv := mcp.NewServer(mcp.Config{
+		Profile:  "maintenance",
 		Name:     "mnemos",
 		Version:  "test",
 		Memory:   memory.NewService(memory.Config{Store: db.Observations()}),

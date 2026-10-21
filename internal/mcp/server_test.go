@@ -71,6 +71,7 @@ func newHarnessWith(t *testing.T, adjust func(*mcp.Config)) *harness {
 
 	cfg := mcp.Config{
 		Name:     "mnemos",
+		Profile:  "maintenance",
 		Version:  "test",
 		Memory:   memory.NewService(memory.Config{Store: db.Observations()}),
 		Sessions: session.NewService(session.Config{Store: db.Sessions()}),

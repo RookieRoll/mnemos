@@ -26,6 +26,16 @@ transport = "stdio"
 http_addr = ":8080"
 api_key = ""
 
+[mcp]
+profile = "core"
+
+[maintenance]
+enabled = true
+interval = "24h"
+max_pass_duration = "5s"
+lease_duration = "15s"
+renew_interval = "2s"
+
 [embedding]
 provider = "auto"
 model = "nomic-embed-text"
@@ -85,6 +95,12 @@ Omitting a field uses the default shown above. Boolean `false`, empty strings an
 | `server.transport` | `stdio` | 服务传输方式：`stdio` 或 `http`。 |
 | `server.http_addr` | `:8080` | HTTP 服务监听地址；仅 HTTP 模式使用。 |
 | `server.api_key` | 空 | HTTP API bearer key；为空时不启用 key 校验。按密钥管理，不要提交到仓库。 |
+| `mcp.profile` | `core` | 启动时固定工具面：`core` 只注册九个常用任务工具；`maintenance` 恢复完整既有 MCP 工具集合。未知值在启动前拒绝。默认值改变是 0.17.0 的 MCP 工具面破坏性变更；需要高级工具的宿主须显式设为 `maintenance` 并重启。 |
+| `maintenance.enabled` | `true` | 是否在有效任务会话开始时尝试到期维护；也可独立关闭自动维护。显式 `mnemos dream` / `mnemos maintenance` 命令仍可执行。 |
+| `maintenance.interval` | `24h` | 自动维护的到期周期，正 Go duration。未完成且租约过期的周期优先恢复，即使上次成功时间较近。 |
+| `maintenance.max_pass_duration` | `5s` | 每轮维护最长执行时间；正数，严格短于租约，最大 `5m`。 |
+| `maintenance.lease_duration` | `15s` | dream、watch 与自动机会共享的数据库租约时长；正数，最大 `10m`。 |
+| `maintenance.renew_interval` | `2s` | 租约续期间隔；正数且短于租约。 |
 | `embedding.provider` | `auto` | Provider：`auto`、`ollama`、`openai` 或 `none`。 |
 | `embedding.model` | `nomic-embed-text` | Provider 使用的模型名。 |
 | `embedding.dimension` | `768` | 预期向量维度；必须与模型输出一致。 |
@@ -114,6 +130,19 @@ Omitting a field uses the default shown above. Boolean `false`, empty strings an
 | `diagnostics.workspaces.timeout` | `10s` | 工作区诊断总时间预算，Go duration 格式且必须为正数。 |
 
 配置投影 `mnemos config --client pi` 只输出非密钥字段，不会打开数据库或初始化 embedding provider。正常 `mnemos config` 会显示解析后的完整配置，因此输出可能包含服务或 provider 密钥；分享日志前先检查并遮蔽密钥。
+
+`core`/`maintenance` 是启动时固定的 MCP 发现面，不是账号 ACL。`core` 注册 `session_start`、`session_end`、`search`、`get_many`、`save`、`correct`、`convention`、`checkpoint` 和 `resume_context`；profile 不会在进程运行中变化。需要高级 MCP 操作时设 `[mcp].profile = "maintenance"` 后重启。Pi adapter 会缓存 direct-tool 元数据；只切换 TOML profile 后，可在同一 Pi 会话运行 `mcp({ connect: "<Mnemos server name>" })` 或 `/mcp-adapter reconnect <server name>`，按 `/mcp-adapter` 显示的名称刷新列表和缓存。改了 Pi package 或 adapter 配置文件后再运行 `/reload`。使用 `core` 的活动宿主仍可通过 JSON CLI 桥接执行显式维护决策：
+
+```text
+mnemos maintenance list --limit 20
+mnemos maintenance evidence --id CANDIDATE_ID
+mnemos maintenance resolve --payload '{"candidate_id":"CANDIDATE_ID","resolved_by":"REVISION_ID","why_better":"The revised rule predicts this concrete case will now succeed."}'
+mnemos maintenance dismiss --payload '{"candidate_id":"CANDIDATE_ID","reason":"The counterexample was a one-off and the rule still holds."}'
+```
+
+CLI 只验证必填字段与长度，并复用 MCP 同一决策服务；是否有足够证据以及是否应该修改知识由活动宿主 agent 判断。没有会话时不会唤醒 agent，也不会自动作语义 resolve/dismiss。安装、改配置、备份和迁移必须由明确任务或已配置策略授权；会话启动的机会维护不会自行做这些管理操作。
+
+需要升级数据库 schema 时，由获明确授权的 Maintenance Agent 先调用现有一致性备份能力，再执行迁移。普通启动与每次会话开始不创建额外数据库快照；离线交付包不携带用户设置、凭据或 provider 密钥。
 
 `examples/hooks/` 中的 HTTP hook 使用 Python 3.11+ 标准库 `tomllib` 和 `urllib`，从同一个 `config.toml` 读取 `[server].http_addr` 与 `[server].api_key`。可通过 `--config <绝对路径>` 选择文件，并通过 `--project <名称>` 显式给出 legacy project label；没有该参数时从 Git root 或当前目录派生名称。JSON 用标准库编码，包含引号或换行的文件名/提交正文不会拼接进 JSON 字符串。hook 示例不读取产品环境变量，也不增加第三方依赖。
 

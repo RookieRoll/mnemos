@@ -1,6 +1,6 @@
 {
   "name": "kls-mnemos-pi",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "private": true,
   "type": "module",
   "description": "pi integration for mnemos: MCP tools plus the harness-side push (prewarm, prompt recall, capture directive, write guardrail, file touches, session close).",

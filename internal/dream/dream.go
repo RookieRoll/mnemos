@@ -15,12 +15,14 @@ package dream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/rumination"
 	"github.com/polyxmedia/mnemos/internal/session"
@@ -82,7 +84,7 @@ func (j Journal) Summary() string {
 // service for threshold-breach detection.
 type Service struct {
 	mem        *memory.Service
-	store      memory.Maintenance
+	store      memory.FencedMaintenance
 	reader     memory.Reader
 	skills     *skills.Service
 	rumination *rumination.Service
@@ -98,7 +100,7 @@ type Service struct {
 // Config bundles dependencies.
 type Config struct {
 	Memory      *memory.Service
-	Store       memory.Maintenance
+	Store       memory.FencedMaintenance
 	Reader      memory.Reader       // optional; enables correction → skill promotion
 	Skills      *skills.Service     // optional; required alongside Reader for promotion
 	Rumination  *rumination.Service // optional; enables threshold-breach detection
@@ -139,32 +141,48 @@ func NewService(cfg Config) *Service {
 	}
 }
 
-// Run executes one consolidation pass and returns the journal. Idempotent
-// within a time window — calling twice in the same minute produces a
-// near-empty journal on the second call.
-func (s *Service) Run(ctx context.Context, writeJournal bool) (*Journal, error) {
+// Run executes one explicitly fenced consolidation pass and returns its
+// partial journal together with any stage errors. Every mutation validates
+// the owner, cycle, and DB-clock lease in its write transaction.
+func (s *Service) Run(ctx context.Context, fence maintenance.Fence, writeJournal bool) (*Journal, error) {
 	j := &Journal{StartedAt: time.Now().UTC()}
+	var stageErrors []error
+	stage := func(name string, err error) bool {
+		if err == nil {
+			return false
+		}
+		stageErrors = append(stageErrors, fmt.Errorf("%s: %w", name, err))
+		j.Notes = append(j.Notes, name+" stage failed")
+		return errors.Is(err, maintenance.ErrFenceLost) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil
+	}
 
 	// 1. Prune expired observations.
-	pruned, err := s.store.Prune(ctx, time.Now().UTC())
-	if err != nil {
-		return nil, fmt.Errorf("prune: %w", err)
+	pruned, err := s.store.PruneFenced(ctx, fence, time.Now().UTC())
+	if stage("prune", err) {
+		j.FinishedAt = time.Now().UTC()
+		return j, errors.Join(stageErrors...)
 	}
-	j.Pruned = pruned
+	if err == nil {
+		j.Pruned = pruned
+	}
 
 	// 2. Importance decay on stale observations.
-	decayed, err := s.store.DecayImportance(ctx, s.staleDays, s.decayAmount)
-	if err != nil {
-		return nil, fmt.Errorf("decay: %w", err)
+	decayed, err := s.store.DecayImportanceFenced(ctx, fence, s.staleDays, s.decayAmount)
+	if stage("decay", err) {
+		j.FinishedAt = time.Now().UTC()
+		return j, errors.Join(stageErrors...)
 	}
-	j.Decayed = decayed
+	if err == nil {
+		j.Decayed = decayed
+	}
 
-	// 3. Skill promotion from correction clusters. Optional: guarded
-	// internally when reader/skills are not wired. Never fatal; the rest
-	// of the pass should complete even if promotion fails.
-	if promoted, deferred, err := s.promoteSkillsFromCorrections(ctx); err != nil {
-		s.log.Warn("promote skills", "err", err)
-	} else {
+	// 3. Skill promotion from correction clusters. A missing reader or skill
+	// service remains an intentional no-op; configured-stage errors are
+	// returned so the coordinator cannot report a false success.
+	if promoted, deferred, err := s.promoteSkillsFromCorrections(ctx, fence); stage("promotion", err) {
+		j.FinishedAt = time.Now().UTC()
+		return j, errors.Join(stageErrors...)
+	} else if err == nil {
 		j.Promoted = promoted
 		j.PromotionDeferred = deferred
 	}
@@ -174,19 +192,21 @@ func (s *Service) Run(ctx context.Context, writeJournal bool) (*Journal, error) 
 	// skills, contradicted conventions, superseded-fact leaks). Same
 	// pattern as promotion: optional, non-fatal, guarded on nil service.
 	if s.rumination != nil {
-		ins, upd, err := s.rumination.PersistDetected(ctx)
-		if err != nil {
-			s.log.Warn("rumination detection", "err", err)
-		} else {
+		ins, upd, err := s.rumination.PersistDetectedFenced(ctx, fence)
+		if stage("rumination detection", err) {
+			j.FinishedAt = time.Now().UTC()
+			return j, errors.Join(stageErrors...)
+		} else if err == nil {
 			j.RuminatedInserted = ins
 			j.RuminatedUpdated = upd
 		}
 		// 5. Auto-resolve candidates whose target carries the provenance
 		// tag. Runs after detection so a freshly-raised candidate can be
 		// closed in the same pass if the revision already landed.
-		if closed, err := s.autoResolveRuminations(ctx); err != nil {
-			s.log.Warn("rumination auto-resolve", "err", err)
-		} else {
+		if closed, err := s.autoResolveRuminations(ctx, fence); stage("rumination auto-resolve", err) {
+			j.FinishedAt = time.Now().UTC()
+			return j, errors.Join(stageErrors...)
+		} else if err == nil {
 			j.RuminatedResolved = closed
 		}
 	}
@@ -204,9 +224,9 @@ func (s *Service) Run(ctx context.Context, writeJournal bool) (*Journal, error) 
 	// 3. Write the dream journal as a memory observation so the agent can
 	// retrieve it via standard search. Guarded because callers may run
 	// consolidation frequently and don't always want an observation per run.
-	if writeJournal && (j.Pruned > 0 || j.Decayed > 0 || j.Linked > 0 || j.Promoted > 0 ||
+	if writeJournal && (len(stageErrors) > 0 || j.Pruned > 0 || j.Decayed > 0 || j.Linked > 0 || j.Promoted > 0 ||
 		j.RuminatedInserted > 0 || j.RuminatedUpdated > 0 || j.RuminatedResolved > 0) {
-		_, err := s.mem.Save(ctx, memory.SaveInput{
+		_, err := s.mem.SaveDreamJournalFenced(ctx, fence, memory.SaveInput{
 			Title:      "dream pass " + j.StartedAt.Format("2006-01-02 15:04"),
 			Content:    j.Summary(),
 			Type:       memory.TypeDream,
@@ -214,9 +234,12 @@ func (s *Service) Run(ctx context.Context, writeJournal bool) (*Journal, error) 
 			Importance: 3, // low — housekeeping, not content
 		})
 		if err != nil {
-			s.log.Warn("failed to write dream journal", "err", err)
+			stage("journal", err)
+			if errors.Is(err, maintenance.ErrFenceLost) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+				return j, errors.Join(stageErrors...)
+			}
 		}
 	}
 
-	return j, nil
+	return j, errors.Join(stageErrors...)
 }

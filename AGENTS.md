@@ -45,10 +45,11 @@ in one SQLite file, and injects a token-budgeted block of them at session start.
 ## Layout
 
 ```
-cmd/mnemos/            CLI: serve, init, doctor, prewarm, hook, dream, vault,
+cmd/mnemos/            CLI: serve, init, doctor, prewarm, hook, dream, maintenance, vault,
                        verify, skill, replay, update, digest, efficacy, ...
-internal/mcp/          official Model Context Protocol Go SDK wrapper: 23 core tools,
-                       4 optional rumination tools,
+internal/mcp/          official Model Context Protocol Go SDK wrapper: default core
+                       profile has 9 tools; maintenance restores 23 existing tools,
+                       plus 4 optional rumination tools,
                        4 resources — thin adapter only
 internal/api/          stdlib net/http REST transport + API-key middleware
 internal/memory/       observation domain: types, service, hybrid ranker, decay,
@@ -169,16 +170,18 @@ usage text lives in `printUsage` in the same file. Add a subcommand by writing a
 registering it in both places.
 
 MCP tools are registered with `mcpsdk.AddTool` in `internal/mcp/tools.go`
-(schemas inferred from struct tags). There are 27 registrations: 23 core, 4
-optional `mnemos_ruminate_*` tools enabled by `[rumination].enabled`. Resources
-are read-only JSON snapshots in `internal/mcp/resources.go`. Tool descriptions are
+(schemas inferred from struct tags). The startup-fixed default `[mcp].profile =
+"core"` registers exactly nine task tools; `maintenance` restores the 23 existing
+advanced/core tools and exposes 4 optional `mnemos_ruminate_*` tools when
+`[rumination].enabled` is true. Both profiles expose the same four read-only
+resources from `internal/mcp/resources.go`. Tool descriptions are
 **load-bearing** — they are tuned from capture-rate measurements in `README.md`;
 treat edits to them as behavioural changes, not copy edits.
 
 ## Configuration and environment
 
 `~/.mnemos/config.toml`, all fields optional, auto-created on first normal run.
-Sections are `storage`, `search`, `server`, `embedding`, `vault`, `dream`,
+Sections are `storage`, `search`, `server`, `mcp`, `maintenance`, `embedding`, `vault`, `dream`,
 `rumination`, `integration`, `continuity`, `clients` and `diagnostics.workspaces`.
 Defaults live in `config.Default()` in `internal/config/config.go`; `Load` applies
 defaults, resolves relative paths against the selected TOML directory, expands `~`,
@@ -211,7 +214,7 @@ compares both plugin copies byte-for-byte, and checks their version agreement:
 | `.agents/skills/mnemos/SKILL.md` | frontmatter `version:` |
 | `pi/skills/mnemos/SKILL.md` | frontmatter `version:` |
 
-All eight distribution files are currently unified at `0.16.0`. Release flow is
+All eight distribution files are currently unified at `0.17.0`. Release flow is
 `make release V=vX.Y.Z` (tags + pushes; GitHub Actions + goreleaser does the rest) —
 never hand-build release artifacts. A local development installation is not a
 release; keep the release workflow for published artifacts.

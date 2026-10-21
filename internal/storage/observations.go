@@ -15,6 +15,10 @@ import (
 // Observations returns the observation store backed by this DB.
 func (d *DB) Observations() memory.Store { return &obsStore{db: d.sql} }
 
+// FencedObservations returns the observation store's transaction-fenced
+// maintenance surface for dream passes.
+func (d *DB) FencedObservations() memory.FencedMaintenance { return &obsStore{db: d.sql} }
+
 type obsStore struct{ db *sql.DB }
 
 const obsColumns = `

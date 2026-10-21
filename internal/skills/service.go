@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 )
 
 // Service is the agent-facing API for procedural memory. It validates input
@@ -38,6 +40,25 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*Skill, error) {
 		return nil, fmt.Errorf("skill save: procedure required")
 	}
 	return s.store.Upsert(ctx, in)
+}
+
+// SaveFenced is the dream-promotion path. It retains Save's validation and
+// requires a store that can fence the upsert in its write transaction.
+func (s *Service) SaveFenced(ctx context.Context, fence maintenance.Fence, in SaveInput) (*Skill, error) {
+	if strings.TrimSpace(in.Name) == "" {
+		return nil, fmt.Errorf("skill save: name required")
+	}
+	if strings.TrimSpace(in.Description) == "" {
+		return nil, fmt.Errorf("skill save: description required")
+	}
+	if strings.TrimSpace(in.Procedure) == "" {
+		return nil, fmt.Errorf("skill save: procedure required")
+	}
+	store, ok := s.store.(FencedStore)
+	if !ok {
+		return nil, fmt.Errorf("skill save: fenced store not configured")
+	}
+	return store.UpsertFenced(ctx, fence, in)
 }
 
 // Match returns skills ranked by FTS relevance, with effectiveness as a

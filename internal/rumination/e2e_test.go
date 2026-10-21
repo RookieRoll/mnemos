@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/polyxmedia/mnemos/internal/dream"
 	"github.com/polyxmedia/mnemos/internal/memory"
@@ -15,6 +16,28 @@ import (
 	"github.com/polyxmedia/mnemos/internal/skills"
 	"github.com/polyxmedia/mnemos/internal/storage"
 )
+
+type countingEmbedder struct{ calls int }
+
+func (e *countingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	e.calls++
+	return []float32{1}, nil
+}
+
+func (e *countingEmbedder) Dimension() int { return 1 }
+func (e *countingEmbedder) Model() string  { return "test-counting" }
+
+func runDreamPass(t *testing.T, ctx context.Context, runner *dream.Service, db *storage.DB) (*dream.Journal, error) {
+	t.Helper()
+	coordinator, err := dream.NewCoordinator(dream.CoordinatorConfig{
+		Store: db.Maintenance(), Runner: runner, AutomaticEnabled: true,
+		Interval: time.Hour, MaxPassDuration: 5 * time.Second, LeaseDuration: 15 * time.Second, RenewInterval: 2 * time.Second,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return coordinator.Run(ctx, false)
+}
 
 // TestRumination_EndToEnd is the integration test that exercises every
 // layer: real SQLite store, all four monitors, dream detection, prewarm
@@ -45,7 +68,8 @@ func TestRumination_EndToEnd(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	mem := memory.NewService(memory.Config{Store: db.Observations()})
+	embedder := &countingEmbedder{}
+	mem := memory.NewService(memory.Config{Store: db.Observations(), Embedder: embedder})
 	skl := skills.NewService(skills.Config{Store: db.Skills()})
 
 	// --- 1. Failing skill (SkillEffectivenessMonitor target) ------------
@@ -98,11 +122,12 @@ func TestRumination_EndToEnd(t *testing.T) {
 	// Three corrections tagged "oauth" after the skill exists.
 	for i := 0; i < 3; i++ {
 		if _, err := mem.Save(ctx, memory.SaveInput{
-			Title:   "oauth failed again " + string(rune('a'+i)),
-			Content: "the skill procedure isn't covering this case",
-			Type:    memory.TypeCorrection,
-			Tags:    []string{"oauth"},
-			Project: "proj",
+			Title:      "oauth failed again " + string(rune('a'+i)),
+			Content:    "the skill procedure isn't covering this case",
+			Type:       memory.TypeCorrection,
+			Tags:       []string{"oauth"},
+			Project:    "proj",
+			Structured: `{"tried":"reused expired credentials","wrong_because":"the token was already expired","fix":"refresh the token before retrying","trigger_context":"an oauth request returns 401"}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -122,18 +147,37 @@ func TestRumination_EndToEnd(t *testing.T) {
 		Store:  db.Rumination(),
 	})
 	ds := dream.NewService(dream.Config{
-		Memory: mem, Store: db.Observations(), Reader: db.Observations(),
+		Memory: mem, Store: db.FencedObservations(), Reader: db.Observations(),
 		Skills: skl, Rumination: rum, Logger: log, StaleDays: 365,
 	})
 
-	// --- 4. First dream pass: all three conditions fire. ----------------
-	j, err := ds.Run(ctx, false)
+	// --- 4. Automatic maintenance raises the candidates without a journal
+	// observation or an embedding/provider call. -------------------------
+	coordinator, err := dream.NewCoordinator(dream.CoordinatorConfig{
+		Store: db.Maintenance(), Runner: ds, AutomaticEnabled: true,
+		Interval: 24 * time.Hour, MaxPassDuration: 5 * time.Second,
+		LeaseDuration: 15 * time.Second, RenewInterval: 2 * time.Second,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Three conditions: failing skill, contradicted convention, repeat-under-skill.
-	if j.RuminatedInserted < 3 {
-		t.Fatalf("first pass should raise at least 3 candidates, got %d: %+v", j.RuminatedInserted, j)
+	statsBefore, err := mem.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedsBefore := embedder.calls
+	if err := coordinator.MaybeRun(ctx); err != nil {
+		t.Fatal(err)
+	}
+	statsAfter, err := mem.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statsAfter.Observations != statsBefore.Observations {
+		t.Fatalf("automatic pass wrote an observation: before=%d after=%d", statsBefore.Observations, statsAfter.Observations)
+	}
+	if embedder.calls != embedsBefore {
+		t.Fatalf("automatic pass called the embedder %d additional times", embedder.calls-embedsBefore)
 	}
 	pending, err := db.Rumination().Pending(ctx, 0)
 	if err != nil {
@@ -141,6 +185,11 @@ func TestRumination_EndToEnd(t *testing.T) {
 	}
 	if len(pending) < 3 {
 		t.Fatalf("store should have at least 3 pending candidates, got %d", len(pending))
+	}
+	for _, candidate := range pending {
+		if candidate.Status != rumination.StatusPending {
+			t.Errorf("automatic maintenance made a semantic decision for %s: status=%s", candidate.ID, candidate.Status)
+		}
 	}
 
 	// Verify the three monitors all contributed.
@@ -156,6 +205,9 @@ func TestRumination_EndToEnd(t *testing.T) {
 		if byMonitor[name] == 0 {
 			t.Errorf("monitor %q did not produce any candidates (byMonitor=%+v)", name, byMonitor)
 		}
+	}
+	if statsAfter.Observations == 0 {
+		t.Fatal("fixture should seed observations before maintenance")
 	}
 
 	// --- 5. Prewarm surfaces the queue. ---------------------------------
@@ -208,7 +260,7 @@ func TestRumination_EndToEnd(t *testing.T) {
 	// and closes any remaining tagged-but-unresolved candidates
 	// (none in this scenario, but the path must not blow up and must
 	// be idempotent against the one we already closed).
-	j2, err := ds.Run(ctx, false)
+	j2, err := runDreamPass(t, ctx, ds, db)
 	if err != nil {
 		t.Fatal(err)
 	}

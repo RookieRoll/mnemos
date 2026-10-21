@@ -20,7 +20,7 @@ test("stdio discovery exposes new tools and preserves versioned save/check/read 
   const home = mkdtempSync(join(tmpdir(), "mnemos-pi-evolution-"));
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home };
   const config = join(home, "config with spaces.toml");
-  writeFileSync(config, `[storage]\npath = ${JSON.stringify(join(home, "memory.db"))}\n[embedding]\nprovider = "none"\n`);
+  writeFileSync(config, `[storage]\npath = ${JSON.stringify(join(home, "memory.db"))}\n[embedding]\nprovider = "none"\n[mcp]\nprofile = "maintenance"\n`);
   const server = spawn(binary, ["--config", config, "serve"], { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   const closed = once(server, "close");
   const lines = createInterface({ input: server.stdout });

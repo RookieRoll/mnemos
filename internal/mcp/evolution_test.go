@@ -28,7 +28,7 @@ func TestEvolutionTransportParityAndConflicts(t *testing.T) {
 	}
 	defer db.Close()
 	svc := memory.NewService(memory.Config{Store: db.Observations(), Clock: func() time.Time { return now }})
-	srv := mcp.NewServer(mcp.Config{Memory: svc})
+	srv := mcp.NewServer(mcp.Config{Profile: "maintenance", Memory: svc})
 	left, right := mcpsdk.NewInMemoryTransports()
 	ss, err := srv.SDK().Connect(ctx, left, nil)
 	if err != nil {
@@ -176,7 +176,7 @@ func TestEvidenceCheckMCPConflictIsStructured(t *testing.T) {
 	}
 	defer db.Close()
 	svc := memory.NewService(memory.Config{Store: conflictingMCPEvidenceStore{Store: db.Observations()}})
-	server := mcp.NewServer(mcp.Config{Memory: svc})
+	server := mcp.NewServer(mcp.Config{Profile: "maintenance", Memory: svc})
 	left, right := mcpsdk.NewInMemoryTransports()
 	ss, err := server.SDK().Connect(ctx, left, nil)
 	if err != nil {

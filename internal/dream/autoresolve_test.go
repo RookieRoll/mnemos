@@ -37,7 +37,7 @@ func TestDreamAutoResolvesViaProvenanceTag(t *testing.T) {
 		Store:    db.Rumination(),
 	})
 	ds := dream.NewService(dream.Config{
-		Memory: mem, Store: db.Observations(), Reader: db.Observations(),
+		Memory: mem, Store: db.FencedObservations(), Reader: db.Observations(),
 		Skills: skl, Rumination: rum,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -56,7 +56,7 @@ func TestDreamAutoResolvesViaProvenanceTag(t *testing.T) {
 	}
 
 	// First pass: candidate surfaced.
-	j1, err := ds.Run(ctx, false)
+	j1, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestDreamAutoResolvesViaProvenanceTag(t *testing.T) {
 	}
 
 	// Second pass: auto-resolve closes the candidate.
-	j2, err := ds.Run(ctx, false)
+	j2, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestDreamAutoResolvesViaProvenanceTag(t *testing.T) {
 
 	// Third pass: same revision, already resolved; RuminatedResolved must
 	// stay at zero. This is the idempotency guard on the dream side.
-	j3, err := ds.Run(ctx, false)
+	j3, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestDreamAutoResolveIgnoresUnrelatedTags(t *testing.T) {
 		Skills: skl, Memory: db.Observations(), Store: db.Rumination(),
 	})
 	ds := dream.NewService(dream.Config{
-		Memory: mem, Store: db.Observations(), Reader: db.Observations(),
+		Memory: mem, Store: db.FencedObservations(), Reader: db.Observations(),
 		Skills: skl, Rumination: rum,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -141,7 +141,7 @@ func TestDreamAutoResolveIgnoresUnrelatedTags(t *testing.T) {
 		Tags: []string{"auto-promoted", "project:x"},
 	})
 
-	j, err := ds.Run(ctx, false)
+	j, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestDreamAutoResolveSkipsMissingCandidate(t *testing.T) {
 		Skills: skl, Memory: db.Observations(), Store: db.Rumination(),
 	})
 	ds := dream.NewService(dream.Config{
-		Memory: mem, Store: db.Observations(), Reader: db.Observations(),
+		Memory: mem, Store: db.FencedObservations(), Reader: db.Observations(),
 		Skills: skl, Rumination: rum,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -178,7 +178,7 @@ func TestDreamAutoResolveSkipsMissingCandidate(t *testing.T) {
 		Tags: []string{"ruminated-from:rumination-does-not-exist"},
 	})
 
-	j, err := ds.Run(ctx, false)
+	j, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 )
 
 // ErrNotFound is returned when a skill lookup misses.
@@ -98,4 +100,10 @@ type Store interface {
 	List(ctx context.Context, agentID string) ([]Skill, error)
 	RecordUse(ctx context.Context, in FeedbackInput) error
 	Count(ctx context.Context) (int64, error)
+}
+
+// FencedStore adds dream-only writes that commit under an active maintenance
+// owner, cycle, and unexpired DB-clock lease.
+type FencedStore interface {
+	UpsertFenced(ctx context.Context, fence maintenance.Fence, in SaveInput) (*Skill, error)
 }

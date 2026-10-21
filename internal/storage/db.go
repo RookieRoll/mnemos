@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
@@ -18,7 +19,8 @@ import (
 // DB wraps a *sql.DB with the concrete store implementations. One DB value
 // backs all three domains (observations, sessions, skills).
 type DB struct {
-	sql *sql.DB
+	sql         *sql.DB
+	maintenance *sql.DB
 }
 
 // Open returns a ready-to-use DB at path. Parent directories are created if
@@ -57,7 +59,33 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("storage: migrate: %w", err)
 	}
 
-	return &DB{sql: sqlDB}, nil
+	maintenanceDB := sqlDB
+	if !isMemoryDatabasePath(path) {
+		// Claims and renewals use a separate, short-wait pool. The primary
+		// pool deliberately has one connection; a long stage read must not
+		// make its own lease heartbeat wait behind that connection. This pool
+		// points at the same file and never runs migrations.
+		maintenanceDSN := fmt.Sprintf("file:%s?_pragma=busy_timeout(75)&_txlock=immediate", path)
+		maintenanceDB, err = sql.Open("sqlite", maintenanceDSN)
+		if err != nil {
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("storage: open maintenance connection: %w", err)
+		}
+		maintenanceDB.SetMaxOpenConns(1)
+		if err := pingSQLite(ctx, maintenanceDB, time.Second); err != nil {
+			_ = maintenanceDB.Close()
+			_ = sqlDB.Close()
+			return nil, fmt.Errorf("storage: ping maintenance connection: %w", err)
+		}
+	}
+
+	return &DB{sql: sqlDB, maintenance: maintenanceDB}, nil
+}
+
+func isMemoryDatabasePath(path string) bool {
+	lower := strings.ToLower(path)
+	return lower == ":memory:" || strings.HasPrefix(lower, "file::memory:") ||
+		(strings.HasPrefix(lower, "file:") && strings.Contains(lower, "mode=memory"))
 }
 
 type sqlitePinger interface {
@@ -123,7 +151,12 @@ func pingSQLite(ctx context.Context, pinger sqlitePinger, window time.Duration) 
 
 // Close releases the database handle.
 func (d *DB) Close() error {
-	return d.sql.Close()
+	if d.maintenance == nil || d.maintenance == d.sql {
+		return d.sql.Close()
+	}
+	maintenanceErr := d.maintenance.Close()
+	primaryErr := d.sql.Close()
+	return errors.Join(primaryErr, maintenanceErr)
 }
 
 // SQL returns the underlying *sql.DB. Exposed for tests and advanced tooling

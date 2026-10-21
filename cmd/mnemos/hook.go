@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/polyxmedia/mnemos/internal/continuityflow"
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
@@ -37,13 +38,18 @@ func projectFromHook(in hookInput) string {
 	return filepath.Base(cwd)
 }
 
+func legacyLifecycle(d *deps) *continuityflow.Service {
+	return continuityflow.New(continuityflow.Config{LegacySessions: d.sess})
+}
+
 // resolveHookSession keeps the two payload ID contracts distinct. Claude sends
 // its host conversation ID; neutral consumers send the Mnemos ID prewarm returned.
 // An explicit neutral ID must never fall back to another terminal's session.
 func resolveHookSession(ctx context.Context, d *deps, in hookInput, neutral bool) (*session.Session, error) {
 	project := projectFromHook(in)
+	flow := legacyLifecycle(d)
 	if neutral && in.SessionID != "" {
-		sess, err := d.sess.Get(ctx, in.SessionID)
+		sess, err := flow.GetLegacy(ctx, in.SessionID)
 		if err != nil {
 			return nil, err
 		}
@@ -52,7 +58,7 @@ func resolveHookSession(ctx context.Context, d *deps, in hookInput, neutral bool
 		}
 		return sess, nil
 	}
-	return d.sess.Resolve(ctx, in.SessionID, project)
+	return flow.ResolveLegacy(ctx, in.SessionID, project)
 }
 
 // runHook is the parent dispatcher for harness-side hook subcommands. Each
@@ -180,7 +186,7 @@ func collectUserPrompt(ctx context.Context, in hookInput, neutral ...bool) userP
 	case err != nil && !errors.Is(err, session.ErrNotFound):
 		fmt.Fprintln(os.Stderr, "mnemos hook user-prompt:", err)
 	case sess != nil && sess.Goal == "":
-		if err := d.sess.SetGoalIfEmpty(ctx, sess.ID, truncateGoal(in.Prompt)); err != nil {
+		if err := legacyLifecycle(d).SetGoalIfEmpty(ctx, sess.ID, truncateGoal(in.Prompt)); err != nil {
 			fmt.Fprintln(os.Stderr, "mnemos hook user-prompt:", err)
 		}
 	}
@@ -598,12 +604,12 @@ func runHookSessionEnd(ctx context.Context, args []string) error {
 	if flags.neutral() && in.SessionID != "" {
 		if sess, err := resolveHookSession(ctx, d, in, true); err == nil {
 			closeIn.ID = sess.ID
-			closeErr = d.sess.Close(ctx, closeIn)
+			closeErr = legacyLifecycle(d).End(ctx, closeIn)
 		} else if !errors.Is(err, session.ErrNotFound) {
 			closeErr = err
 		}
 	} else {
-		_, closeErr = d.sess.CloseForHost(ctx, in.SessionID, proj, closeIn)
+		_, closeErr = legacyLifecycle(d).EndForHost(ctx, in.SessionID, proj, closeIn)
 	}
 	if closeErr != nil {
 		fmt.Fprintln(os.Stderr, "mnemos hook session-end:", closeErr)
@@ -616,7 +622,7 @@ func runHookSessionEnd(ctx context.Context, args []string) error {
 // closeSessionQuietly closes one session, logging anything except the
 // benign already-closed race to stderr. Hooks never fail loudly.
 func closeSessionQuietly(ctx context.Context, d *deps, in session.CloseInput) {
-	if err := d.sess.Close(ctx, in); err != nil && !errors.Is(err, session.ErrNotFound) {
+	if err := legacyLifecycle(d).End(ctx, in); err != nil && !errors.Is(err, session.ErrNotFound) {
 		fmt.Fprintln(os.Stderr, "mnemos hook session-end:", err)
 	}
 }
@@ -1100,7 +1106,7 @@ func compactionRecoveryBlock(ctx context.Context, in hookInput, event string, ne
 		Injections:   injection.NewLogger(d.db.Injections(), nil),
 		MaxTokens:    d.cfg.Search.PrewarmMaxTokens,
 	})
-	block, err := pw.Build(ctx, prewarm.Request{
+	block, err := continuityflow.New(continuityflow.Config{LegacySessions: d.sess, Composer: pw}).Compose(ctx, prewarm.Request{
 		Mode:      prewarm.ModeCompactionRecovery,
 		Project:   proj,
 		SessionID: sessID,

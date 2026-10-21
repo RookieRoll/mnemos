@@ -31,6 +31,7 @@ type Server struct {
 	apiKey      string
 	storageSize func() (int64, error)
 	continuity  *continuityflow.Service
+	flow        *continuityflow.Service
 }
 
 // Config bundles dependencies. APIKey is optional; when empty, auth is off.
@@ -45,10 +46,22 @@ type Config struct {
 	StorageSize func() (int64, error)
 	// Continuity enables the explicit versioned session-progress endpoints.
 	Continuity *continuityflow.Service
+	// Flow is the unified task-session/context entry point. Continuity remains
+	// a compatibility alias for existing server constructors.
+	Flow *continuityflow.Service
 }
 
 // NewServer wires a Config into an HTTP server.
 func NewServer(cfg Config) *Server {
+	if cfg.Flow == nil {
+		cfg.Flow = cfg.Continuity
+	}
+	if cfg.Flow == nil && cfg.Sessions != nil {
+		cfg.Flow = continuityflow.New(continuityflow.Config{LegacySessions: cfg.Sessions, Composer: cfg.Prewarm})
+	}
+	if cfg.Continuity == nil && cfg.Flow != nil && cfg.Flow.SupportsContinuity() {
+		cfg.Continuity = cfg.Flow
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -62,6 +75,7 @@ func NewServer(cfg Config) *Server {
 		apiKey:      cfg.APIKey,
 		storageSize: cfg.StorageSize,
 		continuity:  cfg.Continuity,
+		flow:        cfg.Flow,
 	}
 }
 
@@ -126,21 +140,27 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/sessions", jsonIn(
 		http.StatusBadRequest, nil,
 		func(r *http.Request, in session.OpenInput) (int, map[string]any, error) {
-			sess, err := s.sess.Open(r.Context(), in)
+			var sessID string
+			var startedAt time.Time
+			var block *prewarm.Block
+			if s.flow == nil {
+				return 0, nil, fmt.Errorf("api: task-session flow unavailable")
+			}
+			started, err := s.flow.Start(r.Context(), continuityflow.TaskSessionInput{
+				AgentID: in.AgentID, Project: in.Project, Goal: in.Goal,
+			})
 			if err != nil {
 				return 0, nil, err
 			}
-			out := map[string]any{"session_id": sess.ID, "started_at": sess.StartedAt}
-			if s.prewarm != nil {
-				if block, err := s.prewarm.Build(r.Context(), prewarm.Request{
-					Mode:      prewarm.ModeSessionStart,
-					AgentID:   in.AgentID,
-					Project:   in.Project,
-					Goal:      in.Goal,
-					SessionID: sess.ID,
-				}); err == nil && block != nil {
-					out["prewarm"] = block
-				}
+			if started.Receipt.LegacySession == nil {
+				return 0, nil, fmt.Errorf("api: legacy session receipt unavailable")
+			}
+			sessID = started.Receipt.LegacySession.ID
+			startedAt = started.Receipt.LegacySession.StartedAt
+			block = started.LegacyBlock
+			out := map[string]any{"session_id": sessID, "started_at": startedAt}
+			if block != nil {
+				out["prewarm"] = block
 			}
 			return http.StatusCreated, out, nil
 		}))
@@ -151,10 +171,16 @@ func (s *Server) Handler() http.Handler {
 			if status == "" {
 				status = session.StatusOK
 			}
-			err := s.sess.Close(r.Context(), session.CloseInput{
+			closeInput := session.CloseInput{
 				ID: r.PathValue("id"), Summary: in.Summary, Reflection: in.Reflection,
 				Status: status, OutcomeTags: in.OutcomeTags,
-			})
+			}
+			var err error
+			if s.flow == nil {
+				err = fmt.Errorf("api: task-session flow unavailable")
+			} else {
+				err = s.flow.End(r.Context(), closeInput)
+			}
 			return http.StatusOK, map[string]any{"ok": err == nil}, err
 		}))
 

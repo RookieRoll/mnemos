@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/polyxmedia/mnemos/internal/dream"
 	"github.com/polyxmedia/mnemos/internal/vault"
 )
 
@@ -29,18 +28,11 @@ func runDream(ctx context.Context, args []string) error {
 	}
 	defer d.close()
 
-	svc := dream.NewService(dream.Config{
-		Memory:      d.mem,
-		Store:       d.db.Observations(),
-		Reader:      d.db.Observations(),
-		Skills:      d.skl,
-		Rumination:  d.rum,
-		Sessions:    d.db.Sessions(),
-		Injections:  d.db.Injections(),
-		Logger:      slog.Default(),
-		StaleDays:   d.cfg.Dream.StaleDays,
-		DecayAmount: d.cfg.Dream.DecayAmount,
-	})
+	svc, err := newMaintenanceRuntime(d.cfg, d.db, d.mem, d.skl, d.rum,
+		d.db.Sessions(), d.db.Injections(), slog.Default())
+	if err != nil {
+		return err
+	}
 
 	if *watch {
 		every := *interval
@@ -55,7 +47,7 @@ func runDream(ctx context.Context, args []string) error {
 			every = 6 * time.Hour
 		}
 		fmt.Fprintf(os.Stderr, "dream watch: every %s (ctrl-c to stop)\n", every)
-		return svc.Watch(ctx, every)
+		return svc.Watch(ctx, every, true)
 	}
 
 	j, err := svc.Run(ctx, true)

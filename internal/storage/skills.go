@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 	"github.com/polyxmedia/mnemos/internal/skills"
 )
 
@@ -18,6 +19,16 @@ func (d *DB) Skills() skills.Store { return &skillStore{db: d.sql} }
 type skillStore struct{ db *sql.DB }
 
 func (s *skillStore) Upsert(ctx context.Context, in skills.SaveInput) (*skills.Skill, error) {
+	return s.upsert(ctx, nil, in)
+}
+
+// UpsertFenced commits a skill promotion only while the supplied maintenance
+// owner still holds the active cycle.
+func (s *skillStore) UpsertFenced(ctx context.Context, fence maintenance.Fence, in skills.SaveInput) (*skills.Skill, error) {
+	return s.upsert(ctx, &fence, in)
+}
+
+func (s *skillStore) upsert(ctx context.Context, fence *maintenance.Fence, in skills.SaveInput) (*skills.Skill, error) {
 	if in.Name == "" {
 		return nil, fmt.Errorf("skill: name required")
 	}
@@ -42,6 +53,11 @@ func (s *skillStore) Upsert(ctx context.Context, in skills.SaveInput) (*skills.S
 		return nil, fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if fence != nil {
+		if err := checkMaintenanceFence(ctx, tx, *fence); err != nil {
+			return nil, err
+		}
+	}
 
 	var (
 		existingID      string
@@ -68,6 +84,11 @@ func (s *skillStore) Upsert(ctx context.Context, in skills.SaveInput) (*skills.S
 			now, now); err != nil {
 			return nil, fmt.Errorf("insert skill: %w", err)
 		}
+		if fence != nil {
+			if err := checkMaintenanceFence(ctx, tx, *fence); err != nil {
+				return nil, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit: %w", err)
 		}
@@ -89,12 +110,19 @@ func (s *skillStore) Upsert(ctx context.Context, in skills.SaveInput) (*skills.S
 			string(tags), string(sources), existingVersion+1, now, existingID); err != nil {
 			return nil, fmt.Errorf("update skill: %w", err)
 		}
+		if fence != nil {
+			if err := checkMaintenanceFence(ctx, tx, *fence); err != nil {
+				return nil, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit: %w", err)
 		}
 		return s.Get(ctx, existingID)
 	}
 }
+
+var _ skills.FencedStore = (*skillStore)(nil)
 
 // Restore inserts a skill verbatim, preserving its ID, version, effectiveness,
 // use/success counts, and timestamps exactly as exported. Unlike Upsert (which

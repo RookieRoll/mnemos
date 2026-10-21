@@ -10,6 +10,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/polyxmedia/mnemos/internal/continuity"
+	"github.com/polyxmedia/mnemos/internal/continuityflow"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
 	"github.com/polyxmedia/mnemos/internal/rumination"
@@ -22,7 +23,7 @@ import (
 // before calling our handler.
 func (s *Server) registerTools() {
 	// Save / search / get / delete / link --------------------------------
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_save",
 		Description: "Call IMMEDIATELY when the user says \"save this\", \"remember\", \"note this\", " +
 			"\"record\", \"keep this for next time\", \"for future sessions\", or shares an architectural " +
@@ -33,7 +34,7 @@ func (s *Server) registerTools() {
 			"not routine task progress. Better to over-save a real signal than skip it.",
 	}, s.handleSave)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_search",
 		Description: "Call BEFORE any non-trivial code change, design decision, or refactor in this " +
 			"project to surface prior decisions, conventions, and corrections. Skipping risks repeating " +
@@ -42,60 +43,60 @@ func (s *Server) registerTools() {
 			"Cheap; call liberally with the user's request as the query.",
 	}, s.handleSearch)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name:        "mnemos_get",
 		Description: "Fetch a full observation by ID. Bumps the access counter.",
 	}, s.handleGet)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_delete",
 		Description: "Hard-delete a mistaken save. For facts that changed, use mnemos_link with " +
 			"link_type=supersedes — preserves provenance and hides the stale fact from default search.",
 	}, s.handleDelete)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_link",
 		Description: "Link two observations (related, caused_by, supersedes, contradicts, refines). " +
 			"'supersedes' auto-invalidates the target.",
 	}, s.handleLink)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name:        "mnemos_get_many",
 		Description: "Read selected observation details in first-requested order. Requires project; agent defaults to the save identity. Accepts 1-32 IDs, deduplicated. Live non-raw by default; explicit raw/stale/history options remain scoped. Encoded selected observation objects share a 32 KiB default byte budget (max 256 KiB); per-ID statuses expose unavailable and size-omitted items. Counts only returned details as reads, never successful use.",
 	}, s.handleGetMany)
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name:        "mnemos_neighborhood",
 		Description: "Browse bounded chronological summaries around a visible observation in its session, project and agent scope. Requires project. Defaults to 3 before and after (0-10 each), live non-raw visibility, 32 KiB encoded selected-summary budget (max 256 KiB). Explicit raw/stale/history inspection stays scoped. Returns availability, window/size limits and UTF-8-safe summary truncation; does not increment detail access counters.",
 	}, s.handleNeighborhood)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name:        "mnemos_evidence_check",
 		Description: "Record the latest explicit caller-reported source check (matched, changed, unavailable or unverified) for an existing observation reference. A matched report requires a stored fingerprint baseline. Mnemos does not fetch sources or independently certify the claim. Replaces the prior marker/time only; never changes trust, validity, pinning or ranking and keeps no check history.",
 	}, s.handleEvidenceCheck)
 
 	// Sessions -----------------------------------------------------------
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_session_start",
 		Description: "Open a session. Returns session_id AND a pre-warmed context block composed " +
 			"of conventions, recent sessions, matching skills, corrections, and hot files. Push, not pull.",
 	}, s.handleSessionStart)
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name:        "mnemos_checkpoint",
 		Description: "Explicitly save or clear the exact current session's latest progress checkpoint. Requires continuity v1, exact session/workspace/owner, expected_revision (0 initially) and stable request_id. Save agent-authored task/state/summary, optional next_steps/blockers/references; visibility defaults to owner, workspace explicitly publishes it. Full replacement, no merge. Trust only applied/replayed receipts; retry unknown outcomes with the identical request. Does not save permanent knowledge or close the session.",
 	}, s.handleCheckpoint)
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name:        "mnemos_resume_context",
 		Description: "Read bounded progress candidates or an exact source from the current continuity-bound workspace. Requires v1 and exact current session, never creates/claims/consumes work. No automatic selection without resume_intent and one fresh matching checkpoint; ambiguous, stale and changed-workspace sources need explicit choice and verification of current files/tests. References do not grant access to private memories.",
 	}, s.handleResumeContext)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_session_end",
 		Description: "Close a session with summary, status (ok|failed|blocked|abandoned), and " +
 			"reflection. Failed sessions' observations get a ranking boost — agents learn from mistakes.",
 	}, s.handleSessionEnd)
 
 	// Context ------------------------------------------------------------
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_context",
 		Description: "Call when starting a substantial task to assemble a token-budgeted context block " +
 			"(conventions + corrections + prior decisions matching the goal). Cheaper than reading the " +
@@ -103,7 +104,7 @@ func (s *Server) registerTools() {
 			"session state after a compaction — the 'oh shit' button.",
 	}, s.handleContext)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_premortem",
 		Description: "Call BEFORE executing a non-trivial plan — after deciding the approach, before " +
 			"the first edit. Submit the plan text; returns how similar attempts failed: matching " +
@@ -115,7 +116,7 @@ func (s *Server) registerTools() {
 	}, s.handlePremortem)
 
 	// Provenance / promotion (Bet 2 phase 2) ----------------------------
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_promote",
 		Description: "Promote an observation between trust tiers (raw → curated when " +
 			"tool-output content is validated, curated → skill when a pattern is worth " +
@@ -124,7 +125,7 @@ func (s *Server) registerTools() {
 			"reasons (<16 chars) are rejected.",
 	}, s.handlePromote)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_pin",
 		Description: "Pin or unpin an observation as core memory. Pinned memories are immune to " +
 			"time decay (recency factor 1.0), exempt from dream-pass idle importance decay, " +
@@ -133,7 +134,7 @@ func (s *Server) registerTools() {
 	}, s.handlePin)
 
 	// Agent supercharge --------------------------------------------------
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_correct",
 		Description: "Call IMMEDIATELY when the user signals a correction or shares a past failure. " +
 			"Trigger phrases include: \"no\", \"don't\", \"that's wrong\", \"actually\", \"we tried X\", " +
@@ -144,7 +145,7 @@ func (s *Server) registerTools() {
 			"anti-repeat-mistakes loop; every skipped call is a future repeat.",
 	}, s.handleCorrect)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_convention",
 		Description: "Call IMMEDIATELY when the user declares a project rule or you derive one from " +
 			"repeated patterns. Trigger phrases: \"we always\", \"we never\", \"the convention here " +
@@ -155,25 +156,25 @@ func (s *Server) registerTools() {
 			"agent on this project starts knowing it.",
 	}, s.handleConvention)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_touch",
 		Description: "Record a file touch for the heat map. Frequently-touched files get priority in " +
 			"session pre-warming so the agent focuses on what actually matters.",
 	}, s.handleTouch)
 
 	// Skills -------------------------------------------------------------
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name:        "mnemos_skill_match",
 		Description: "Find skills matching a task. Ranking factors in effectiveness (skills that worked before rise up).",
 	}, s.handleSkillMatch)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_skill_save",
 		Description: "Save or version a reusable procedure. Keyed by (agent_id, name); same name bumps " +
 			"the version.",
 	}, s.handleSkillSave)
 
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_skill_score",
 		Description: "Return a structured quality report for one skill: raw effectiveness, use_count, " +
 			"success_count, Bayesian-shrunk effectiveness (so a 1/1 record doesn't outrank 9/10), a " +
@@ -186,7 +187,7 @@ func (s *Server) registerTools() {
 	// service is wired. Makes rumination.enabled = false (in config) a
 	// clean no-op instead of surfacing tools that immediately error.
 	if s.cfg.Rumination != nil {
-		mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		addProfileTool(s, &mcpsdk.Tool{
 			Name: "mnemos_ruminate_list",
 			Description: "List pending rumination candidates (skills whose effectiveness has " +
 				"fallen below the threshold, or other threshold breaches). Ordered severity-desc, " +
@@ -194,7 +195,7 @@ func (s *Server) registerTools() {
 				"ritual — fetch the full review block with mnemos_ruminate_pack.",
 		}, s.handleRuminateList)
 
-		mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		addProfileTool(s, &mcpsdk.Tool{
 			Name: "mnemos_ruminate_pack",
 			Description: "Fetch the review block for one rumination candidate: hypothesis verbatim, " +
 				"disconfirming evidence, falsifiable restatement, and hostile-review prompts. Answer " +
@@ -202,7 +203,7 @@ func (s *Server) registerTools() {
 				"reasoning over the stored belief.",
 		}, s.handleRuminatePack)
 
-		mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		addProfileTool(s, &mcpsdk.Tool{
 			Name: "mnemos_ruminate_resolve",
 			Description: "Close a rumination candidate by naming the revision that replaces the " +
 				"flagged belief. Requires resolved_by (the ID of the new skill version or superseding " +
@@ -210,7 +211,7 @@ func (s *Server) registerTools() {
 				"makes that the old version did not — Popper's falsifiability guard).",
 		}, s.handleRuminateResolve)
 
-		mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+		addProfileTool(s, &mcpsdk.Tool{
 			Name: "mnemos_ruminate_dismiss",
 			Description: "Close a rumination candidate as noise — the rule stands. Reason is " +
 				"required; it prevents the next dream pass from re-raising the same flag without " +
@@ -220,10 +221,36 @@ func (s *Server) registerTools() {
 	}
 
 	// Stats --------------------------------------------------------------
-	mcpsdk.AddTool(s.sdk, &mcpsdk.Tool{
+	addProfileTool(s, &mcpsdk.Tool{
 		Name:        "mnemos_stats",
 		Description: "System statistics: counts, top tags, recent sessions, embedding status, storage size.",
 	}, s.handleStats)
+}
+
+func isCoreProfileTool(name string) bool {
+	switch name {
+	case "mnemos_session_start", "mnemos_session_end", "mnemos_search", "mnemos_get_many",
+		"mnemos_save", "mnemos_correct", "mnemos_convention", "mnemos_checkpoint", "mnemos_resume_context":
+		return true
+	default:
+		return false
+	}
+}
+
+// addProfileTool registers one startup tool unless the fixed core profile
+// excludes it. Unknown profiles fail closed; configuration validation rejects
+// them before production server startup.
+func addProfileTool[In, Out any](s *Server, tool *mcpsdk.Tool, handler mcpsdk.ToolHandlerFor[In, Out]) {
+	switch s.cfg.Profile {
+	case "core":
+		if !isCoreProfileTool(tool.Name) {
+			return
+		}
+	case "maintenance":
+	default:
+		return
+	}
+	mcpsdk.AddTool(s.sdk, tool, handler)
 }
 
 // GlobalProject is the project a caller names to save a memory that
@@ -420,7 +447,7 @@ type sessionStartArgs struct {
 
 func (s *Server) handleSessionStart(ctx context.Context, req *mcpsdk.CallToolRequest, a sessionStartArgs) (*mcpsdk.CallToolResult, any, error) {
 	if a.Continuity != nil {
-		if s.cfg.Continuity == nil {
+		if s.cfg.Flow == nil || !s.cfg.Flow.SupportsContinuity() {
 			return continuityError(continuity.ErrUnsupported)
 		}
 		if req != nil && req.Params != nil {
@@ -438,37 +465,43 @@ func (s *Server) handleSessionStart(ctx context.Context, req *mcpsdk.CallToolReq
 		if a.Goal != "" {
 			in.Goal = a.Goal
 		}
-		out, err := s.cfg.Continuity.Open(ctx, in)
+		out, err := s.cfg.Flow.Start(ctx, continuityflow.TaskSessionInput{
+			AgentID: a.AgentID, Project: a.Project, Goal: a.Goal, Continuity: &in,
+		})
 		if err != nil {
 			return continuityError(err)
 		}
-		return continuityResult(out)
+		if out.Receipt.Continuity == nil {
+			return continuityError(continuity.ErrUnavailable)
+		}
+		return continuityResult(&continuityflow.OpenResult{
+			OpenResult: *out.Receipt.Continuity, ContextStatus: out.ContextStatus,
+			Prewarm: out.Prewarm, ContinuityRefs: out.ContinuityRefs,
+		})
 	}
 	project := s.writeProject(a.Project)
-	sess, err := s.cfg.Sessions.Open(ctx, session.OpenInput{
+	flow := s.cfg.Flow
+	if flow == nil {
+		return nil, nil, fmt.Errorf("mcp: task-session flow unavailable")
+	}
+	out, err := flow.Start(ctx, continuityflow.TaskSessionInput{
 		AgentID: a.AgentID, Project: project, Goal: a.Goal,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
-	out := map[string]any{"session_id": sess.ID, "started_at": sess.StartedAt}
-	if s.cfg.Prewarm != nil {
-		if block, err := s.cfg.Prewarm.Build(ctx, prewarm.Request{
-			Mode:      prewarm.ModeSessionStart,
-			AgentID:   a.AgentID,
-			Project:   project,
-			Goal:      a.Goal,
-			SessionID: sess.ID,
-		}); err == nil && block != nil && block.Text != "" {
-			out["prewarm"] = map[string]any{
-				"text":           block.Text,
-				"token_estimate": block.TokenEstimate,
-				"section_count":  len(block.Sections),
-				"safety_risk":    block.SafetyReport.MaxRisk.String(),
-			}
+	sess := out.Receipt.LegacySession
+	if sess == nil {
+		return nil, nil, fmt.Errorf("mcp: legacy session receipt unavailable")
+	}
+	legacyResponse := map[string]any{"session_id": sess.ID, "started_at": sess.StartedAt}
+	if block := out.LegacyBlock; block != nil && block.Text != "" {
+		legacyResponse["prewarm"] = map[string]any{
+			"text": block.Text, "token_estimate": block.TokenEstimate,
+			"section_count": len(block.Sections), "safety_risk": block.SafetyReport.MaxRisk.String(),
 		}
 	}
-	return jsonResult(out)
+	return jsonResult(legacyResponse)
 }
 
 type sessionEndArgs struct {
@@ -484,10 +517,16 @@ func (s *Server) handleSessionEnd(ctx context.Context, _ *mcpsdk.CallToolRequest
 	if status == "" {
 		status = session.StatusOK
 	}
-	if err := s.cfg.Sessions.Close(ctx, session.CloseInput{
+	closeInput := session.CloseInput{
 		ID: a.SessionID, Summary: a.Summary, Reflection: a.Reflection,
 		Status: status, OutcomeTags: a.OutcomeTags,
-	}); err != nil {
+	}
+	var err error
+	if s.cfg.Flow == nil {
+		return nil, nil, fmt.Errorf("mcp: task-session flow unavailable")
+	}
+	err = s.cfg.Flow.End(ctx, closeInput)
+	if err != nil {
 		return nil, nil, err
 	}
 	return textResult("session " + a.SessionID + " closed (" + string(status) + ")")
@@ -510,10 +549,10 @@ func (s *Server) handleContext(ctx context.Context, _ *mcpsdk.CallToolRequest, a
 		if a.SessionID == "" {
 			return nil, nil, fmt.Errorf("recovery mode requires session_id")
 		}
-		if s.cfg.Prewarm == nil {
+		if s.cfg.Flow == nil || s.cfg.Prewarm == nil {
 			return nil, nil, fmt.Errorf("recovery unavailable: prewarm service not wired")
 		}
-		block, err := s.cfg.Prewarm.Build(ctx, prewarm.Request{
+		block, err := s.cfg.Flow.Compose(ctx, prewarm.Request{
 			Mode:      prewarm.ModeCompactionRecovery,
 			AgentID:   a.AgentID,
 			Project:   a.Project,
@@ -523,6 +562,9 @@ func (s *Server) handleContext(ctx context.Context, _ *mcpsdk.CallToolRequest, a
 		})
 		if err != nil {
 			return nil, nil, err
+		}
+		if block == nil {
+			return nil, nil, fmt.Errorf("recovery unavailable: prewarm service not wired")
 		}
 		return jsonResult(map[string]any{
 			"mode":           "recovery",
@@ -563,7 +605,7 @@ func (s *Server) handlePremortem(ctx context.Context, _ *mcpsdk.CallToolRequest,
 	if strings.TrimSpace(a.Plan) == "" {
 		return nil, nil, fmt.Errorf("plan is required")
 	}
-	if s.cfg.Prewarm == nil {
+	if s.cfg.Flow == nil || s.cfg.Prewarm == nil {
 		return nil, nil, fmt.Errorf("premortem unavailable: prewarm service not wired")
 	}
 	maxTokens := a.MaxTokens
@@ -572,7 +614,7 @@ func (s *Server) handlePremortem(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		// than the ambient session-start block.
 		maxTokens = 800
 	}
-	block, err := s.cfg.Prewarm.Build(ctx, prewarm.Request{
+	block, err := s.cfg.Flow.Compose(ctx, prewarm.Request{
 		Mode:      prewarm.ModePremortem,
 		AgentID:   a.AgentID,
 		Project:   a.Project,
@@ -582,6 +624,9 @@ func (s *Server) handlePremortem(ctx context.Context, _ *mcpsdk.CallToolRequest,
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	if block == nil {
+		return nil, nil, fmt.Errorf("premortem unavailable: prewarm service not wired")
 	}
 	if block.Text == "" {
 		return jsonResult(map[string]any{
@@ -912,21 +957,7 @@ type ruminateResolveArgs struct {
 }
 
 func (s *Server) handleRuminateResolve(ctx context.Context, _ *mcpsdk.CallToolRequest, a ruminateResolveArgs) (*mcpsdk.CallToolResult, any, error) {
-	if a.ID == "" {
-		return nil, nil, fmt.Errorf("rumination: id required")
-	}
-	if a.ResolvedBy == "" {
-		return nil, nil, fmt.Errorf("rumination: resolved_by required — the revision must carry provenance")
-	}
-	// Minimum length on why_better rejects single-word filler like "yes"
-	// or "better" that would satisfy a naive non-empty check. 16 chars is
-	// long enough to require an actual sentence without punishing the
-	// agent on terseness.
-	if len([]rune(a.WhyBetter)) < 16 {
-		return nil, nil, fmt.Errorf("rumination: why_better must state a new prediction (min 16 chars), got %d", len([]rune(a.WhyBetter)))
-	}
-
-	if err := s.cfg.Rumination.Resolve(ctx, a.ID, a.ResolvedBy); err != nil {
+	if err := s.cfg.Rumination.ResolveDecision(ctx, a.ID, a.ResolvedBy, a.WhyBetter); err != nil {
 		if errors.Is(err, rumination.ErrNotFound) {
 			return nil, nil, fmt.Errorf("rumination candidate not found: %s", a.ID)
 		}
@@ -946,13 +977,7 @@ type ruminateDismissArgs struct {
 }
 
 func (s *Server) handleRuminateDismiss(ctx context.Context, _ *mcpsdk.CallToolRequest, a ruminateDismissArgs) (*mcpsdk.CallToolResult, any, error) {
-	if a.ID == "" {
-		return nil, nil, fmt.Errorf("rumination: id required")
-	}
-	if len([]rune(a.Reason)) < 8 {
-		return nil, nil, fmt.Errorf("rumination: reason must be at least 8 chars")
-	}
-	if err := s.cfg.Rumination.Dismiss(ctx, a.ID, a.Reason); err != nil {
+	if err := s.cfg.Rumination.DismissDecision(ctx, a.ID, a.Reason); err != nil {
 		if errors.Is(err, rumination.ErrNotFound) {
 			return nil, nil, fmt.Errorf("rumination candidate not found: %s", a.ID)
 		}

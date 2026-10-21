@@ -7,6 +7,21 @@ After a source update, refresh that copy and reload pi. `pi update` manages npm/
 sources; it does not refresh a local directory package. This document does not
 update an already installed copy or binary.
 
+In 0.17.0, `[mcp].profile` defaults to the startup-fixed `core` tool surface
+(exactly nine task tools). Set it to `maintenance` to restore the full advanced
+MCP surface, then restart pi so the adapter discovers the selected tool list.
+This default change is breaking for clients that relied on advanced MCP tools
+without selecting a profile. The profile controls discovery and responsibility;
+it is not an account authorization boundary.
+
+The adapter caches direct-tool metadata in the Pi agent directory. After changing
+only the TOML profile, refresh the live session with `mcp({ connect: "<Mnemos
+server name>" })` or `/mcp-adapter reconnect <server name>`; use the exact name
+shown by `/mcp-adapter` (the current package reports `kls-mnemos-pi__mnemos`).
+The adapter refreshes its cache and active tool surface from the server's new
+`tools/list`. Use `/reload` when changing the package or Pi adapter configuration
+files so Pi reloads those files and extensions.
+
 ## Shared session continuity
 
 Continuity is optional. Before enabling it, restart **every host process using

@@ -24,15 +24,27 @@ func newDream(t *testing.T) (*dream.Service, *memory.Service, *storage.DB) {
 	mem := memory.NewService(memory.Config{Store: db.Observations()})
 	ds := dream.NewService(dream.Config{
 		Memory:    mem,
-		Store:     db.Observations(),
+		Store:     db.FencedObservations(),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		StaleDays: 1,
 	})
 	return ds, mem, db
 }
 
+func runTestDream(t *testing.T, ctx context.Context, svc *dream.Service, db *storage.DB, writeJournal bool) (*dream.Journal, error) {
+	t.Helper()
+	coordinator, err := dream.NewCoordinator(dream.CoordinatorConfig{
+		Store: db.Maintenance(), Runner: svc, AutomaticEnabled: true,
+		Interval: time.Hour, MaxPassDuration: 5 * time.Second, LeaseDuration: 15 * time.Second, RenewInterval: 2 * time.Second,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return coordinator.Run(ctx, writeJournal)
+}
+
 func TestDreamPrunesExpired(t *testing.T) {
-	ds, mem, _ := newDream(t)
+	ds, mem, db := newDream(t)
 	ctx := context.Background()
 
 	past := time.Now().Add(-time.Hour)
@@ -43,7 +55,7 @@ func TestDreamPrunesExpired(t *testing.T) {
 	// Also save an expiring observation via the store directly to test Prune.
 	// (Simpler: set TTLDays to a negative value via direct insert.)
 
-	j, err := ds.Run(ctx, false)
+	j, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +63,7 @@ func TestDreamPrunesExpired(t *testing.T) {
 }
 
 func TestDreamWritesJournal(t *testing.T) {
-	ds, mem, _ := newDream(t)
+	ds, mem, db := newDream(t)
 	ctx := context.Background()
 
 	// Seed enough observations to guarantee some decay possibility.
@@ -63,7 +75,7 @@ func TestDreamWritesJournal(t *testing.T) {
 	}
 	// First pass: if nothing to decay, journal is still produced but not
 	// written. Force a run with no journal.
-	j, err := ds.Run(ctx, false)
+	j, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +154,7 @@ func TestDream_ProtectsPinnedObservations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	j, err := ds.Run(ctx, false)
+	j, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}

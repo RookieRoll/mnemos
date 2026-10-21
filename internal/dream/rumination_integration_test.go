@@ -60,7 +60,7 @@ func TestDreamPassPersistsRuminationCandidates(t *testing.T) {
 
 	ds := dream.NewService(dream.Config{
 		Memory:     mem,
-		Store:      db.Observations(),
+		Store:      db.FencedObservations(),
 		Reader:     db.Observations(),
 		Skills:     skl,
 		Rumination: rum,
@@ -68,7 +68,7 @@ func TestDreamPassPersistsRuminationCandidates(t *testing.T) {
 		StaleDays:  365, // keep decay out of this test's scope
 	})
 
-	j, err := ds.Run(ctx, false)
+	j, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestDreamPassPersistsRuminationCandidates(t *testing.T) {
 
 	// Second dream pass against the same failing skill: should update, not
 	// re-insert. Idempotency is the contract.
-	j2, err := ds.Run(ctx, false)
+	j2, err := runTestDream(t, ctx, ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,11 +129,11 @@ func TestDreamPassRuminationSkipsWhenNil(t *testing.T) {
 	mem := memory.NewService(memory.Config{Store: db.Observations()})
 	ds := dream.NewService(dream.Config{
 		Memory: mem,
-		Store:  db.Observations(),
+		Store:  db.FencedObservations(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
-	j, err := ds.Run(context.Background(), false)
+	j, err := runTestDream(t, context.Background(), ds, db, false)
 	if err != nil {
 		t.Fatal(err)
 	}

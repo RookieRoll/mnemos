@@ -19,6 +19,8 @@ type Config struct {
 	Storage     StorageConfig     `toml:"storage"`
 	Search      SearchConfig      `toml:"search"`
 	Server      ServerConfig      `toml:"server"`
+	MCP         MCPConfig         `toml:"mcp"`
+	Maintenance MaintenanceConfig `toml:"maintenance"`
 	Embedding   EmbeddingConfig   `toml:"embedding"`
 	Vault       VaultConfig       `toml:"vault"`
 	Dream       DreamConfig       `toml:"dream"`
@@ -72,6 +74,20 @@ type WorkspaceDiagnosticsConfig struct {
 	MaxRoots      int    `toml:"max_roots"`
 	MaxCandidates int    `toml:"max_candidates"`
 	Timeout       string `toml:"timeout"`
+}
+
+// MCPConfig selects the fixed MCP tool profile at server startup.
+type MCPConfig struct {
+	Profile string `toml:"profile"`
+}
+
+// MaintenanceConfig controls opportunity and explicit dream maintenance.
+type MaintenanceConfig struct {
+	Enabled         bool          `toml:"enabled"`
+	Interval        time.Duration `toml:"interval"`
+	MaxPassDuration time.Duration `toml:"max_pass_duration"`
+	LeaseDuration   time.Duration `toml:"lease_duration"`
+	RenewInterval   time.Duration `toml:"renew_interval"`
 }
 
 // ServerConfig controls transport selection.
@@ -133,6 +149,12 @@ func Default() Config {
 		Server: ServerConfig{
 			Transport: "stdio",
 			HTTPAddr:  ":8080",
+		},
+		MCP: MCPConfig{Profile: "core"},
+		Maintenance: MaintenanceConfig{
+			Enabled: true, Interval: 24 * time.Hour,
+			MaxPassDuration: 5 * time.Second, LeaseDuration: 15 * time.Second,
+			RenewInterval: 2 * time.Second,
 		},
 		Embedding: EmbeddingConfig{
 			Provider:  "auto",
@@ -383,6 +405,26 @@ func validate(cfg Config) error {
 	case "stdio", "http":
 	default:
 		return fmt.Errorf("config: server.transport must be 'stdio' or 'http', got %q", cfg.Server.Transport)
+	}
+	switch cfg.MCP.Profile {
+	case "core", "maintenance":
+	default:
+		return fmt.Errorf("config: mcp.profile must be 'core' or 'maintenance', got %q", cfg.MCP.Profile)
+	}
+	if cfg.Maintenance.Interval <= 0 || cfg.Maintenance.MaxPassDuration <= 0 || cfg.Maintenance.LeaseDuration <= 0 || cfg.Maintenance.RenewInterval <= 0 {
+		return errors.New("config: maintenance durations must be positive")
+	}
+	if cfg.Maintenance.MaxPassDuration >= cfg.Maintenance.LeaseDuration {
+		return errors.New("config: maintenance.max_pass_duration must be shorter than maintenance.lease_duration")
+	}
+	if cfg.Maintenance.RenewInterval >= cfg.Maintenance.LeaseDuration {
+		return errors.New("config: maintenance.renew_interval must be shorter than maintenance.lease_duration")
+	}
+	if cfg.Maintenance.MaxPassDuration > 5*time.Minute {
+		return errors.New("config: maintenance.max_pass_duration must be <= 5m")
+	}
+	if cfg.Maintenance.LeaseDuration > 10*time.Minute {
+		return errors.New("config: maintenance.lease_duration must be <= 10m")
 	}
 	if cfg.Search.DefaultLimit < 1 {
 		return errors.New("config: search.default_limit must be >= 1")

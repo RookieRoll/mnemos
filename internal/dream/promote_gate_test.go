@@ -11,6 +11,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 	"github.com/polyxmedia/mnemos/internal/injection"
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/session"
 	"github.com/polyxmedia/mnemos/internal/skills"
@@ -21,11 +22,12 @@ import (
 // dream service, unlike promoteFixture which exercises the legacy
 // frequency-only path.
 type gateFixture struct {
-	ds   *Service
-	mem  *memory.Service
-	sess *session.Service
-	sk   *skills.Service
-	db   *storage.DB
+	ds    *Service
+	mem   *memory.Service
+	sess  *session.Service
+	sk    *skills.Service
+	db    *storage.DB
+	fence maintenance.Fence
 }
 
 func newGateFixture(t *testing.T) *gateFixture {
@@ -40,7 +42,7 @@ func newGateFixture(t *testing.T) *gateFixture {
 	sk := skills.NewService(skills.Config{Store: db.Skills()})
 	ds := NewService(Config{
 		Memory:     mem,
-		Store:      db.Observations(),
+		Store:      db.FencedObservations(),
 		Reader:     db.Observations(),
 		Skills:     sk,
 		Sessions:   db.Sessions(),
@@ -48,7 +50,13 @@ func newGateFixture(t *testing.T) *gateFixture {
 		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		StaleDays:  1,
 	})
-	return &gateFixture{ds: ds, mem: mem, sess: sess, sk: sk, db: db}
+	claim, err := db.Maintenance().TryClaim(context.Background(), maintenance.ClaimRequest{
+		OwnerToken: "gate-test", Mode: maintenance.ClaimManual, LeaseDuration: 10 * time.Minute,
+	})
+	if err != nil || claim.Status != maintenance.ClaimAcquired {
+		t.Fatalf("claim test fence: %+v err=%v", claim, err)
+	}
+	return &gateFixture{ds: ds, mem: mem, sess: sess, sk: sk, db: db, fence: claim.Fence}
 }
 
 // openSession opens a session for the project and returns its ID.
@@ -99,7 +107,7 @@ func TestGateDefersSingleSessionBurst(t *testing.T) {
 		f.seedCorrection(t, "api", "oauth", title, sessID)
 	}
 
-	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx)
+	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx, f.fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +133,7 @@ func TestGateDefersWithoutOutcomeEvidence(t *testing.T) {
 		f.seedCorrection(t, "api", "oauth", title, sessID)
 	}
 
-	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx)
+	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx, f.fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +168,7 @@ func TestGateAdmitsRecurrenceAfterSurfacing(t *testing.T) {
 	// the cluster has earned a skill.
 	f.seedCorrection(t, "api", "oauth", "oauth retry c", s3)
 
-	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx)
+	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx, f.fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +196,7 @@ func TestGateAdmitsFailedSessionOrigin(t *testing.T) {
 		f.seedCorrection(t, "api", "oauth", title, sessID)
 	}
 
-	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx)
+	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx, f.fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +221,7 @@ func TestGateAdmitsOverwhelmingFrequency(t *testing.T) {
 		f.seedCorrection(t, "api", "oauth", title, sessID)
 	}
 
-	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx)
+	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx, f.fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +241,7 @@ func TestGateBypassedForExistingSkillUpdates(t *testing.T) {
 	for _, title := range []string{"oauth retry b", "oauth retry c"} {
 		f.seedCorrection(t, "api", "oauth", title, f.openSession(t, "api"))
 	}
-	promoted, _, err := f.ds.promoteSkillsFromCorrections(ctx)
+	promoted, _, err := f.ds.promoteSkillsFromCorrections(ctx, f.fence)
 	if err != nil || promoted != 1 {
 		t.Fatalf("setup promotion failed: promoted=%d err=%v", promoted, err)
 	}
@@ -242,7 +250,7 @@ func TestGateBypassedForExistingSkillUpdates(t *testing.T) {
 	// skill already exists, so this is maintenance: the version bumps
 	// without re-passing the gate.
 	f.seedCorrection(t, "api", "oauth", "oauth retry d", f.openSession(t, "api"))
-	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx)
+	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx, f.fence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +271,12 @@ func TestGateLegacyFallbackWithoutOutcomeStores(t *testing.T) {
 	// frequency-only behavior even for a single-session burst.
 	f := newPromoteFixture(t)
 	ctx := context.Background()
+	claim, err := f.db.Maintenance().TryClaim(ctx, maintenance.ClaimRequest{
+		OwnerToken: "legacy-fallback-test", Mode: maintenance.ClaimManual, LeaseDuration: 10 * time.Minute,
+	})
+	if err != nil || claim.Status != maintenance.ClaimAcquired {
+		t.Fatalf("claim test fence: %+v err=%v", claim, err)
+	}
 
 	// All three corrections share one session via direct saves.
 	sess, err := f.sess.Open(ctx, session.OpenInput{Project: "api"})
@@ -280,7 +294,7 @@ func TestGateLegacyFallbackWithoutOutcomeStores(t *testing.T) {
 		}
 	}
 
-	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx)
+	promoted, deferred, err := f.ds.promoteSkillsFromCorrections(ctx, claim.Fence)
 	if err != nil {
 		t.Fatal(err)
 	}

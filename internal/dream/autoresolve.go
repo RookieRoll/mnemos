@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/polyxmedia/mnemos/internal/maintenance"
 	"github.com/polyxmedia/mnemos/internal/rumination"
 )
 
@@ -37,7 +38,7 @@ const ruminatedFromPrefix = "ruminated-from:"
 // running it now would be second-guessing work that landed. This is the
 // AGM distinction between explicit belief revision (guarded) and inferred
 // closure from derived state (relaxed).
-func (s *Service) autoResolveRuminations(ctx context.Context) (int, error) {
+func (s *Service) autoResolveRuminations(ctx context.Context, fence maintenance.Fence) (int, error) {
 	if s.rumination == nil || s.skills == nil {
 		return 0, nil
 	}
@@ -48,29 +49,28 @@ func (s *Service) autoResolveRuminations(ctx context.Context) (int, error) {
 
 	closed := 0
 	for _, sk := range sks {
+		if err := ctx.Err(); err != nil {
+			return closed, err
+		}
 		for _, tag := range sk.Tags {
 			candID := candidateIDFromTag(tag)
 			if candID == "" {
 				continue
 			}
 			// Check state before resolving so repeat dream passes over the
-			// same (already-resolved) revision do not re-count. The Store's
-			// Resolve is idempotent for same-revision reconfirmations, but
-			// the dream journal should track *transitions*, not reaffirms.
+			// same (already-resolved) revision do not re-count.
 			cand, err := s.rumination.Get(ctx, candID)
 			if err != nil {
 				if errors.Is(err, rumination.ErrNotFound) {
 					continue
 				}
-				s.log.Debug("auto-resolve lookup", "candidate", candID, "err", err)
-				continue
+				return closed, fmt.Errorf("load candidate %s: %w", candID, err)
 			}
 			if cand.Status != rumination.StatusPending {
 				continue
 			}
-			if err := s.rumination.Resolve(ctx, candID, sk.ID); err != nil {
-				s.log.Debug("auto-resolve skip", "candidate", candID, "skill", sk.ID, "err", err)
-				continue
+			if err := s.rumination.ResolveFenced(ctx, fence, candID, sk.ID); err != nil {
+				return closed, fmt.Errorf("resolve candidate %s: %w", candID, err)
 			}
 			closed++
 		}
