@@ -230,7 +230,7 @@ Every pi-side push and side effect SHALL fail silently. An unreachable binary, a
 
 ### Requirement: pi continuity startup is opt-in and session isolated
 
-When MNEMOS_CONTINUITY is `1` and the existing disable switch is unset, pi SHALL attempt the versioned continuity startup path. Each real session_start event SHALL have a new invocation key and in-memory generation; retries of that invocation SHALL retain its key. Results from superseded generations SHALL NOT replace current session identity or context. Without the opt-in, existing startup SHALL remain unchanged.
+When file configuration sets continuity.enabled true and integration.disabled false, pi SHALL attempt the versioned continuity startup path. Each real session_start event SHALL have a new invocation key and in-memory generation; retries of that invocation SHALL retain its key. Results from superseded generations SHALL NOT replace current session identity or context. Without the opt-in, existing startup SHALL remain unchanged.
 
 #### Scenario: A new or resumed pi session replaces the old one
 - **WHEN** the old startup response arrives after the new session_start event
@@ -297,5 +297,16 @@ The shipped skill SHALL describe explicit checkpoint save, clear and source-read
 - **THEN** it closes the exact current session under the existing lifecycle contract without claiming to have generated or saved a final checkpoint
 
 #### Scenario: Automatic integration is disabled
-- **WHEN** MNEMOS_DISABLED is set even though continuity opt-in is present
+- **WHEN** file configuration disables automatic integration even though continuity opt-in is present
 - **THEN** no automatic continuity startup, offer or side effect occurs, while explicit MCP tool availability retains its existing policy
+
+### Requirement: Pi shares the installed file configuration route
+Pi SHALL obtain its executable and explicit config selector from its package MCP entry and validate a nonsecret configuration projection per session generation. Hooks and MCP SHALL use the same route. Invalid or ambiguous routes and stale responses SHALL not trigger guessed startup or store selection.
+
+#### Scenario: Route contains cwd-dependent relative paths
+- **WHEN** adapter and hook execution cannot guarantee identical interpretation
+- **THEN** pi reports the route problem and does not silently open another store
+
+#### Scenario: An earlier config response arrives after reload
+- **WHEN** a new session generation already exists
+- **THEN** the response cannot replace its route, switches or session identity

@@ -248,12 +248,15 @@ artifacts live in `openspec/changes/<change-id>/` (`proposal.md`, `design.md`,
 `openspec-archive-change`) when the user asks to work on a change; do not invent
 parallel planning documents.
 
-Run `openspec list --json` for the current queue. Key archived references include
-the following changes under `openspec/changes/archive/`:
+Run `openspec list --json` for the current queue. The active planned change is
+`simplify-agent-memory-workflow`. Key archived references include the following
+changes under `openspec/changes/archive/`:
 `2026-09-18-add-pi-hook-parity` (18 requirements → `harness-neutral-hooks`,
 `pi-integration`), `2026-10-12-retrieval-score-contract` (6 requirements →
 `memory-retrieval`), and `2026-10-12-lifecycle-and-graph-retrieval` (9 requirements
-→ `memory-lifecycle-retrieval`). Later archived changes cover context delivery,
+→ `memory-lifecycle-retrieval`), and `2026-10-21-file-based-runtime-configuration`
+(file configuration, pi route, workspace diagnostics and evaluation isolation). Later
+archived changes cover context delivery,
 scoped reading, traceable evolution and shared session continuity. The live
 contracts are in `openspec/specs/`; read the applicable ones before changing behavior.
 

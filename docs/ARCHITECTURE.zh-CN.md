@@ -1,6 +1,6 @@
 # Mnemos Memory 架构说明
 
-本文对应 **0.15.1** 的已实现架构，核验基线为 `main@f9de93a`，整理日期为 2026-10-20。
+本文记录 **0.16.0** 的已实现架构，源代码核验基线为 `main@79e68e8`（完整提交 `79e68e8308c5a1887c04092292d8b62e7507c408`），整理日期为 2026-10-20。
 英文主文档见 [ARCHITECTURE.md](ARCHITECTURE.md)，接口细节见 [MCP_TOOLS.md](MCP_TOOLS.md)。
 
 Mnemos 是运行在本机的 agent 持久记忆层：把值得长期保留的知识和明确发布的任务进度保存到 SQLite，在新会话开始或显式查询时提供受预算限制的上下文。模型负责理解、总结和判断；Mnemos 负责存储、检索、作用域校验和可靠提交。
@@ -371,7 +371,7 @@ flowchart TD
 
 `mnemos doctor --workspaces` 是单独的只读报告路径：在进入普通 doctor 的配置创建、可写数据库初始化和客户端检查前分流；只读取已登记 binding 与聚合计数，只 probe 记录的根。WAL 模式要求已经存在 `-wal` 与 `-shm`；诊断可能更新已有 SHM reader mark，但不会创建/删除 sidecar 或修改主 DB/WAL 字节。物理路径相等只说明当前文件系统等价，不证明历史绑定可安全合并。详见[工作区诊断](WORKSPACE_DIAGNOSTICS.md)。
 
-当前安装构建 `0.15.1+f9de93a` 已分别通过真实 Codex app-server 19 次直接 MCP 调用、pi SDK/adapter 12 次直接工具调用，以及隔离注册的 `pi update --extensions`。这些验证不调用模型，不能推导出模型实际采纳率或 TUI 行为效果。记录见 [本轮验收](../openspec/changes/archive/2026-10-20-harden-local-memory-runtime/verification.md)。
+当前安装构建为 `0.16.0+79e68e8`，与源提交 `79e68e8308c5a1887c04092292d8b62e7507c408` 对应；安装二进制 SHA-256 为 `c43ca3982d8e3e96e67145a4e36c702adc2be9f6488e1b6eab01df83498ebf89`。Pi 扩展测试 62/62 通过；真实 Pi 1.3.0 SDK 与 pi-mcp-adapter 5.3.2 门禁完成 12 次直接工具调用，Codex app-server 门禁完成 19 次直接 MCP 调用。两者均使用隔离数据库、未调用模型或认证凭据；另外在隔离 `PI_CODING_AGENT_DIR` 中运行了 package-only `pi update --extensions`，未设置 `PI_OFFLINE`。这些验证不推导模型采纳率或 TUI 行为效果。记录见 [0.16.0 部署与 Pi 验收](../openspec/changes/archive/2026-10-21-file-based-runtime-configuration/verification-delivery.md)。
 
 ## 11. 阅读入口
 

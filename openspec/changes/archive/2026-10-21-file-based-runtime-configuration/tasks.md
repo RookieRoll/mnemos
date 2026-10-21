@@ -34,9 +34,9 @@
 ## 6. Integration and acceptance
 
 - [x] 6.1 Run full Go regression, vet, formatting/manifest checks and independent cross-review; resolve findings and record local tooling/CI limits truthfully.
-- [ ] 6.2 Verify real Codex and pi MCP clients against the candidate using isolated stores, explicit config paths and conflicting old environment; verify installed-package update succeeds without network bypass.
+- [x] 6.2 Verify real Codex and pi MCP clients against the candidate using isolated stores, explicit config paths and conflicting old environment; verify installed-package update succeeds without network bypass.
 - [x] 6.3 Verify no-registry non-Git explicit root identity and diagnostic integrity end-to-end; preserve owner/revision/clear/retry behavior and report-only merge semantics.
-- [ ] 6.4 Synchronize live specifications and produce a versioned installation/offline handoff with configuration migration and per-file hashes; verify actual installed binary/package and extracted handoff.
+- [x] 6.4 Synchronize live specifications and produce a versioned installation/offline handoff with configuration migration and per-file hashes; verify actual installed binary/package and extracted handoff.
 
 ## Workflow follow-up
 
