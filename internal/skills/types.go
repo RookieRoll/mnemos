@@ -64,6 +64,54 @@ type FeedbackInput struct {
 	Success bool
 }
 
+// Scope narrows a skill maintenance selection. An empty AgentID matches every
+// agent and an empty Project matches every project. Project is matched against
+// the "project:<name>" tag the promotion path writes, because the skills table
+// has no project column: a skill that carries no project tag has no project
+// attribution, so a project filter never selects it.
+type Scope struct {
+	AgentID string
+	Project string
+}
+
+// DeleteInput selects the skills Delete removes. Name is matched exactly
+// (surrounding whitespace ignored); Scope narrows by agent and project. DryRun
+// runs the same selection and writes nothing, which is what --dry-run previews.
+type DeleteInput struct {
+	Name   string
+	Scope  Scope
+	DryRun bool
+}
+
+// DeleteResult carries the exact selection Delete worked on. Rows is the same
+// slice a DryRun preview returns, so the rows a caller prints are always the
+// rows a real run writes.
+type DeleteResult struct {
+	Rows   []Skill
+	DryRun bool
+}
+
+// MergeInput selects the skills Merge folds together. KeepVersion names the
+// version to keep (zero keeps the highest version); it is an error for no match
+// to carry that version. DryRun returns the same keeper and superseded rows and
+// writes nothing.
+type MergeInput struct {
+	Name        string
+	Scope       Scope
+	KeepVersion int
+	DryRun      bool
+}
+
+// MergeResult reports the keeper and the rows absorbed into it. Keeper is the
+// post-merge row (nil when the name matched nothing) and Superseded lists the
+// rows that were folded in and removed. Both are populated for a DryRun
+// preview as well, where nothing is written.
+type MergeResult struct {
+	Keeper     *Skill
+	Superseded []Skill
+	DryRun     bool
+}
+
 // ScoreReport bundles the components of a skill's measured quality. The
 // composite Score is a single 0-1 number callers can rank by; the
 // individual fields are exposed so callers building dashboards or
@@ -99,6 +147,11 @@ type Store interface {
 	Match(ctx context.Context, in MatchInput) ([]Match, error)
 	List(ctx context.Context, agentID string) ([]Skill, error)
 	RecordUse(ctx context.Context, in FeedbackInput) error
+	// Delete removes one skill by ID through the store, so the full-text mirror
+	// (a content table fed by the skills triggers) stays consistent. Callers must
+	// not issue their own DELETE: a raw SQL statement that skipped the trigger
+	// would leave an orphan index row that search still returns.
+	Delete(ctx context.Context, id string) error
 	Count(ctx context.Context) (int64, error)
 }
 

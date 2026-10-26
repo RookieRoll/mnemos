@@ -62,6 +62,7 @@ stale_skill_floor = 0.5
 correction_repeat_n = 3
 contradiction_threshold = 1
 stale_raw_days = 14
+raw_promote = "auto"
 
 [integration]
 disabled = false
@@ -120,6 +121,7 @@ Omitting a field uses the default shown above. Boolean `false`, empty strings an
 | `rumination.correction_repeat_n` | `3` | 同主题纠错重复触发阈值；当前加载器不单独验证此字段。 |
 | `rumination.contradiction_threshold` | `1` | 指向目标的 contradicts 关系最小数量；当前加载器不单独验证此字段。 |
 | `rumination.stale_raw_days` | `14` | 未晋升 raw observation 的闲置天数阈值；当前加载器不单独验证此字段。 |
+| `rumination.raw_promote` | `auto` | raw→promote 开关，只接受 `auto` 或 `never`。`auto` 保持现状：闲置超过 `stale_raw_days` 的 raw observation 会生成 stale-raw 候选并进入待 review 队列，可用 `mnemos_promote` 或 dismiss 处理。`never` 关闭该通路：raw 观测不再生成 stale-raw 候选，因此永远不会入队，但仍可在其产生处观测；其他 rumination monitor（effectiveness 下限、闲置技能、纠错重复、contradicts）不受影响。加载配置时其他取值直接报错并列出这两个值，不会静默回退默认值。 |
 | `integration.disabled` | `false` | 为 true 时关闭自动 hooks/prewarm 集成；显式调用的 MCP 工具仍可用。 |
 | `continuity.enabled` | `false` | 为 true 时启用支持该能力的自动 continuity 启动。Workspace root 仍需按现有 API/宿主规则显式提供，不是全局配置字段。 |
 | `clients.claude_config_dir` | home 下的 `.claude` | 覆盖 Claude Code 配置目录；留空使用 `~/.claude`。 |

@@ -289,6 +289,29 @@ func (s *skillStore) RecordUse(ctx context.Context, in skills.FeedbackInput) err
 	return nil
 }
 
+// Delete removes one skill row by ID. The statement is the store's own delete,
+// which is the only supported path: skills_fts is an external-content FTS5 table
+// whose AFTER DELETE trigger issues the matching 'delete' command, so a caller
+// that ran DELETE itself would leave an orphan index row that search keeps
+// returning. Returns skills.ErrNotFound when the ID is unknown.
+func (s *skillStore) Delete(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("skill delete: id required")
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM skills WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete skill: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return skills.ErrNotFound
+	}
+	return nil
+}
+
 func (s *skillStore) Count(ctx context.Context) (int64, error) {
 	var n int64
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM skills`).Scan(&n); err != nil {

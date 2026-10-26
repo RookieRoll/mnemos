@@ -108,6 +108,25 @@ func (s *Service) promoteSkillsFromCorrections(ctx context.Context, fence mainte
 			return promoted, deferred, fmt.Errorf("find promoted origin %s: %w", g.hash, err)
 		}
 		if existing == nil {
+			// No skill carries this group's origin tag yet. Before writing a new
+			// row, look for one that already owns the (project, label) identity:
+			// a skill promoted before the group had a tag, or a hand-written skill
+			// under the derived name. Merging into it keeps one skill per
+			// (project, label) instead of inserting a same-named second row.
+			existing, err = s.findSkillByProjectLabel(ctx, g.agentID, g.project, g.label)
+			if err != nil {
+				return promoted, deferred, fmt.Errorf("find promoted skill %s/%s: %w", g.project, g.label, err)
+			}
+			if existing != nil {
+				s.log.Info("skill promotion merging into existing skill",
+					"label", g.label, "project", g.project,
+					"skill", existing.Name, "version", existing.Version)
+			}
+		}
+		// The gate guards admission of the group, not of the row: a group with no
+		// origin tag anywhere has never been admitted, even when a same-named row
+		// exists to merge into.
+		if existing == nil || !hasTag(existing.Tags, originPrefix+g.hash) {
 			gate := s.promotionGate(ctx, g)
 			if !gate.promote {
 				deferred++
@@ -342,11 +361,21 @@ func defaultAgent(id string) string {
 	return id
 }
 
-// upsertPromotedSkill synthesises or version-bumps a skill for the given
-// group. existing is the prior skill for this group's origin hash (nil on
-// first promotion); the caller already fetched it for the admission gate.
-// Returns true when the skill was created or updated (version went up),
-// false when the existing skill already matched exactly.
+// upsertPromotedSkill synthesises the skill for the given group and writes it
+// in place. existing is the row the promotion owns: either the skill already
+// carrying this group's origin tag, or a skill that already owns the same
+// (project, label) identity (nil on first promotion). The caller already
+// resolved and gated it.
+//
+// Merging is the whole point: a promotion never inserts a second skill with the
+// same name. When a row exists its identity survives — name, tags (including the
+// promoted-origin tag that keys it), and source sessions are preserved and
+// unioned — while the synthesised procedure refreshes through the store's normal
+// Upsert, which bumps the version.
+//
+// Returns true when the skill was created or updated (version went up), false
+// when the existing skill already matched exactly, so a pass with no membership
+// change stays a no-op.
 func (s *Service) upsertPromotedSkill(ctx context.Context, fence maintenance.Fence, g correctionGroup, existing *skills.Skill) (bool, error) {
 	procedure, pitfalls := synthesisePromotion(g)
 
@@ -358,20 +387,30 @@ func (s *Service) upsertPromotedSkill(ctx context.Context, fence maintenance.Fen
 	tags := []string{
 		tagPromoted,
 		originPrefix + g.hash,
-		"project:" + g.project,
+		projectTag(g.project),
 	}
 
 	if existing != nil {
-		// A pass with no new corrections since last run is a no-op — skip
-		// the upsert so we don't bump the version needlessly.
+		// Preserve the original name even if the label has shifted — once a
+		// skill is out in the world, its identity is stable. Tags and provenance
+		// union into what the row already carries, so its promoted-origin tag and
+		// any hand-applied tag survive the merge.
+		name = existing.Name
+		tags = mergePromotedTags(existing.Tags, g)
+		sources = unionStrings(existing.SourceSessions, sources)
+		// The body is the deterministic synthesis of the live correction set, so
+		// it is rewritten rather than appended: the same set re-renders the same
+		// text, and a changed set replaces it instead of accumulating history.
+		//
+		// A pass with no new corrections since last run is a no-op — skip the
+		// upsert so we don't bump the version needlessly.
 		if sameSourceSet(existing.SourceSessions, sources) &&
 			existing.Procedure == procedure &&
-			existing.Pitfalls == pitfalls {
+			existing.Pitfalls == pitfalls &&
+			existing.Description == description &&
+			sameStringSet(existing.Tags, tags) {
 			return false, nil
 		}
-		// Preserve the original name even if the label has shifted — once
-		// a skill is out in the world, its identity is stable.
-		name = existing.Name
 	}
 
 	_, err := s.skills.SaveFenced(ctx, fence, skills.SaveInput{
@@ -392,7 +431,14 @@ func (s *Service) upsertPromotedSkill(ctx context.Context, fence maintenance.Fen
 // promotedSkillName is derived once, at first synthesis. Keeping it in one
 // place makes the naming convention discoverable.
 func promotedSkillName(g correctionGroup) string {
-	return fmt.Sprintf("auto: %s (%s)", g.label, g.project)
+	return promotedSkillNameFor(g.project, g.label)
+}
+
+// promotedSkillNameFor renders the name for one (project, label) pair. The name
+// is part of the (project, label) identity the dedup lookup matches on, so both
+// the writer and the lookup go through here.
+func promotedSkillNameFor(project, label string) string {
+	return fmt.Sprintf("auto: %s (%s)", label, project)
 }
 
 // synthesisePromotion renders the procedure and pitfalls text from a
@@ -493,10 +539,97 @@ func sessionIDs(obs []memory.Observation) []string {
 	return out
 }
 
+// findSkillByProjectLabel locates the row a promotion would otherwise duplicate:
+// an existing skill for the same (project, label) that carries no tag from this
+// group. Skills have no project or label column, so the identity is materialised
+// as the derived promoted name plus the "project:<name>" tag the pipeline writes,
+// and this lookup scans for exactly those two facts.
+func (s *Service) findSkillByProjectLabel(ctx context.Context, agentID, project, label string) (*skills.Skill, error) {
+	name := promotedSkillNameFor(project, label)
+	wantTag := projectTag(project)
+	list, err := s.skills.List(ctx, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("list skills: %w", err)
+	}
+	for i := range list {
+		if list[i].Name != name {
+			continue
+		}
+		if hasTag(list[i].Tags, wantTag) {
+			return &list[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// mergePromotedTags unions the promotion's structural tags into a row it merges
+// into. The row's own promoted-origin tag wins: re-running a group must never
+// rewrite the identity every already-promoted skill is keyed by. A row with no
+// origin tag adopts this group's, so later passes find it by hash. Any other tag
+// the row already carried (manual labels, project tags) survives.
+func mergePromotedTags(existing []string, g correctionGroup) []string {
+	tags := append([]string(nil), existing...)
+	if !hasTag(tags, tagPromoted) {
+		tags = append(tags, tagPromoted)
+	}
+	if !hasOriginTag(tags) {
+		tags = append(tags, originPrefix+g.hash)
+	}
+	if !hasTag(tags, projectTag(g.project)) {
+		tags = append(tags, projectTag(g.project))
+	}
+	return tags
+}
+
+// projectTag renders the project tag the promotion path stamps on a skill.
+func projectTag(project string) string { return "project:" + project }
+
+// hasTag reports whether tags contains want.
+func hasTag(tags []string, want string) bool {
+	for _, t := range tags {
+		if t == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOriginTag reports whether tags carries any promoted-origin identity.
+func hasOriginTag(tags []string) bool {
+	for _, t := range tags {
+		if strings.HasPrefix(t, originPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// unionStrings returns base followed by every extra value not already present,
+// preserving base order so a repeated merge rewrites identical content.
+func unionStrings(base, extra []string) []string {
+	seen := make(map[string]bool, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, list := range [][]string{base, extra} {
+		for _, v := range list {
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // sameSourceSet reports whether two source-session lists represent the
 // same set, ignoring order. Stringified skill source lists come out of
 // JSON so we compare by set membership not sequence.
 func sameSourceSet(a, b []string) bool {
+	return sameStringSet(a, b)
+}
+
+// sameStringSet reports whether two lists hold the same values, ignoring order.
+func sameStringSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}

@@ -15,18 +15,48 @@ import (
 // for weeks it is either (a) forgotten and rotting silently, or (b) not
 // worth keeping. Either outcome is a net positive to resolve.
 //
-// Defaults: StaleDays = 14, MaxPerRun = 50. Fourteen days is the
-// "probably not coming back to confirm it" threshold — aggressive enough
-// to keep quarantine from filling forever, conservative enough that a
-// busy week of tool-fetched context won't get swept up prematurely.
+// Defaults: StaleDays = 14, MaxPerRun = 50, RawPromote = auto. Fourteen
+// days is the "probably not coming back to confirm it" threshold —
+// aggressive enough to keep quarantine from filling forever, conservative
+// enough that a busy week of tool-fetched context won't get swept up
+// prematurely. Setting RawPromote to never suppresses this monitor only;
+// every other rumination monitor keeps detecting.
 type StaleRawObservationMonitor struct {
 	Observations RawObservationReader
 	AgentID      string
 	StaleDays    int
 	MaxPerRun    int
 
+	// RawPromote is the resolved [rumination].raw_promote policy. The zero
+	// value behaves as auto, so an unconfigured monitor keeps the historical
+	// behaviour; never turns the monitor off so raw observations never reach
+	// the stale-raw queue.
+	RawPromote RawPromotePolicy
+
 	now func() time.Time // test override
 }
+
+// RawPromotePolicy is the resolved [rumination].raw_promote setting. Config
+// loading owns the accepted TOML values and rejects everything else; this
+// type only has to answer "may raw candidates be enqueued".
+type RawPromotePolicy string
+
+const (
+	// RawPromoteAuto lets raw-tier observations age into stale-raw candidates
+	// that are enqueued for review. It is the default and matches the
+	// behaviour of builds that predate the switch.
+	RawPromoteAuto RawPromotePolicy = "auto"
+	// RawPromoteNever closes the raw→promote path: Detect reports no
+	// candidates, so no stale-raw entry is created for a raw observation.
+	RawPromoteNever RawPromotePolicy = "never"
+)
+
+// AllowsRawPromotion reports whether the policy permits raw candidates. The
+// zero value means "not configured" and behaves as auto — an unset field must
+// keep the historical behaviour rather than silently going quiet. Unrecognised
+// values also resolve to auto because config.Load rejects them before they
+// reach this layer; the fallback only covers direct construction.
+func (p RawPromotePolicy) AllowsRawPromotion() bool { return p != RawPromoteNever }
 
 // RawObservationReader is the narrow read surface the monitor depends on.
 // Declared at the consumer (Go idiom) so tests supply a tight fake and
@@ -41,8 +71,15 @@ func (m *StaleRawObservationMonitor) Name() string { return "stale-raw" }
 // Detect returns one Candidate per stale raw observation, ordered oldest
 // first by the underlying query. The severity scales with how far past
 // the threshold the observation has drifted — the same ratio pattern as
-// the stale-skill monitor so "severity high" has consistent meaning.
+// the stale-skill monitor so "severity high" has consistent meaning. When
+// RawPromote is never it returns no candidates and scans nothing.
 func (m *StaleRawObservationMonitor) Detect(ctx context.Context) ([]Candidate, error) {
+	if !m.RawPromote.AllowsRawPromotion() {
+		// raw_promote = "never": raw observations stay visible where they are
+		// produced, but they never enter the stale-raw queue. Returning early
+		// also skips the scan — there is nothing to report.
+		return nil, nil
+	}
 	staleDays := m.StaleDays
 	if staleDays <= 0 {
 		staleDays = 14

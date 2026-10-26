@@ -133,7 +133,22 @@ type RuminationConfig struct {
 	CorrectionRepeatN       int     `toml:"correction_repeat_n"`       // N corrections on a topic *after* a matching skill was promoted → candidate
 	ContradictionThreshold  int     `toml:"contradiction_threshold"`   // min contradicts-links against a target before it becomes a candidate (default 1)
 	StaleRawDays            int     `toml:"stale_raw_days"`            // raw-tier observations unpromoted this many days → candidate (default 14)
+	RawPromote              string  `toml:"raw_promote"`               // "auto" (default) lets stale raw observations become candidates; "never" closes that path
 }
+
+// Accepted values for RuminationConfig.RawPromote. Loading rejects every
+// other value instead of falling back to the default: a typo in a
+// noise-reduction switch must not be invisible.
+const (
+	// RawPromoteAuto lets raw-tier observations age into stale-raw rumination
+	// candidates that get enqueued into the stale-raw queue. It is the default
+	// and preserves the behaviour that predates the switch.
+	RawPromoteAuto = "auto"
+	// RawPromoteNever closes the raw→promote path: raw-tier observations never
+	// enter the stale-raw candidate queue. The other rumination monitors keep
+	// detecting exactly as before.
+	RawPromoteNever = "never"
+)
 
 // Default returns the baked-in defaults — what you get on first run.
 func Default() Config {
@@ -180,6 +195,7 @@ func Default() Config {
 			CorrectionRepeatN:       3,
 			ContradictionThreshold:  1,
 			StaleRawDays:            14,
+			RawPromote:              RawPromoteAuto,
 		},
 		Diagnostics: DiagnosticsConfig{Workspaces: WorkspaceDiagnosticsConfig{
 			MaxRoots: 1000, MaxCandidates: 200, Timeout: "10s",
@@ -386,6 +402,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Rumination.StaleRawDays == 0 {
 		cfg.Rumination.StaleRawDays = d.Rumination.StaleRawDays
 	}
+	// raw_promote is deliberately not defaulted here: Load starts from Default,
+	// so an absent key is already auto, while an explicit empty string is a
+	// typo that validate must reject rather than silently accept.
 	if cfg.Diagnostics.Workspaces.MaxRoots == 0 {
 		cfg.Diagnostics.Workspaces.MaxRoots = d.Diagnostics.Workspaces.MaxRoots
 	}
@@ -454,6 +473,11 @@ func validate(cfg Config) error {
 	}
 	if cfg.Rumination.SkillMinUses < 1 {
 		return errors.New("config: rumination.skill_min_uses must be >= 1")
+	}
+	switch cfg.Rumination.RawPromote {
+	case RawPromoteAuto, RawPromoteNever:
+	default:
+		return fmt.Errorf("config: rumination.raw_promote must be '%s' or '%s', got %q", RawPromoteNever, RawPromoteAuto, cfg.Rumination.RawPromote)
 	}
 	return nil
 }

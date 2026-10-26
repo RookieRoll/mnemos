@@ -154,9 +154,15 @@ skill's lifecycle is.
 by `--agent` / `--project`. Deleting uses the store's normal delete so any FTS
 or derived state is maintained by the store, never by a raw `DELETE`.
 `skill merge` picks a keeper — highest version by default, or the explicit
-`--keep-version` — and marks the others superseded through the same versioning
-path skills already use. Both print the affected rows first and support
-`--dry-run`.
+`--keep-version` — and absorbs the losers: their body sections, tags and
+source sessions are folded into the keeper (version bumped through the same
+versioning path skills already use), then the loser rows are removed through
+the store's normal delete so FTS stays consistent. The `skills` table has no
+status/superseded column (`0001_init.sql`, `UNIQUE(agent_id,name)`), and a
+migration was deliberately avoided — `0012` is reserved by the
+dedup-and-session-guard change — so "mark superseded" is materialised as
+absorb-then-remove rather than a flagged surviving row. Both commands print
+the affected rows first and support `--dry-run`.
 
 Promotion dedup keeps the keying contract intact: the promotion group id remains
 `promoted-origin:<12-char sha256>` over `(agent_id, project, label)`, and

@@ -15,9 +15,14 @@ import (
 type fakeRawReader struct {
 	items []memory.Observation
 	err   error
+
+	// calls counts ListByTrustTier invocations so a test can prove the monitor
+	// does not even scan raw observations under raw_promote = never.
+	calls int
 }
 
 func (f *fakeRawReader) ListByTrustTier(ctx context.Context, agentID string, tier memory.TrustTier, limit int) ([]memory.Observation, error) {
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -115,5 +120,122 @@ func TestStaleRawMonitorName(t *testing.T) {
 	m := &StaleRawObservationMonitor{}
 	if m.Name() != "stale-raw" {
 		t.Errorf("monitor name drift: got %q", m.Name())
+	}
+}
+
+// fixedMonitor is a Monitor that always reports the same candidates. Used to
+// prove one monitor's policy does not silence its peers.
+type fixedMonitor struct {
+	name       string
+	candidates []Candidate
+}
+
+func (m fixedMonitor) Name() string { return m.name }
+
+func (m fixedMonitor) Detect(context.Context) ([]Candidate, error) { return m.candidates, nil }
+
+func TestStaleRawMonitorRawPromoteNever_EmitsNoCandidates(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	reader := &fakeRawReader{items: []memory.Observation{
+		{ID: "old-raw", TrustTier: memory.TrustRaw, SourceKind: memory.SourceTool,
+			CreatedAt: now.AddDate(0, 0, -30)},
+		{ID: "ancient", TrustTier: memory.TrustRaw, SourceKind: memory.SourceAgentInference,
+			CreatedAt: now.AddDate(0, 0, -45)},
+	}}
+	m := &StaleRawObservationMonitor{
+		Observations: reader,
+		RawPromote:   RawPromoteNever,
+		now:          func() time.Time { return now },
+	}
+
+	got, err := m.Detect(context.Background())
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("raw_promote=never must produce zero candidates, got %d: %+v", len(got), got)
+	}
+	if reader.calls != 0 {
+		t.Fatalf("raw_promote=never must not scan raw observations, reader called %d time(s)", reader.calls)
+	}
+}
+
+func TestStaleRawMonitorRawPromoteAuto_PreservesBehaviour(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	newReader := func() *fakeRawReader {
+		return &fakeRawReader{items: []memory.Observation{
+			{ID: "old-raw", TrustTier: memory.TrustRaw, SourceKind: memory.SourceTool,
+				CreatedAt: now.AddDate(0, 0, -30)},
+			{ID: "fresh", TrustTier: memory.TrustRaw, SourceKind: memory.SourceTool,
+				CreatedAt: now.AddDate(0, 0, -3)},
+			{ID: "ancient", TrustTier: memory.TrustRaw, SourceKind: memory.SourceAgentInference,
+				CreatedAt: now.AddDate(0, 0, -45)},
+		}}
+	}
+
+	// Reference run: the monitor exactly as it was before the switch, with the
+	// policy field left unset.
+	reference, err := (&StaleRawObservationMonitor{Observations: newReader(), now: clock}).Detect(context.Background())
+	if err != nil {
+		t.Fatalf("reference detect: %v", err)
+	}
+	if len(reference) != 2 {
+		t.Fatalf("reference detection should fire on the two stale rows, got %d: %+v", len(reference), reference)
+	}
+
+	tests := []struct {
+		name   string
+		policy RawPromotePolicy
+	}{
+		{name: "unset field keeps historical behaviour", policy: ""},
+		{name: "explicit auto", policy: RawPromoteAuto},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (&StaleRawObservationMonitor{
+				Observations: newReader(),
+				RawPromote:   tt.policy,
+				now:          clock,
+			}).Detect(context.Background())
+			if err != nil {
+				t.Fatalf("detect: %v", err)
+			}
+			if len(got) != len(reference) {
+				t.Fatalf("candidates = %d, want %d (historical behaviour)", len(got), len(reference))
+			}
+			for i := range reference {
+				if got[i].ID != reference[i].ID || got[i].Severity != reference[i].Severity || got[i].Reason != reference[i].Reason {
+					t.Fatalf("candidate %d drifted: got %+v, want %+v", i, got[i], reference[i])
+				}
+			}
+		})
+	}
+}
+
+func TestStaleRawMonitorRawPromoteNever_LeavesOtherMonitorsUnaffected(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	reader := &fakeRawReader{items: []memory.Observation{
+		{ID: "old-raw", TrustTier: memory.TrustRaw, CreatedAt: now.AddDate(0, 0, -30)},
+	}}
+	peer := fixedMonitor{name: "peer", candidates: []Candidate{{
+		ID: "peer-1", MonitorName: "peer", Severity: SeverityHigh,
+		TargetKind: TargetObservation, TargetID: "obs-1", DetectedAt: now,
+	}}}
+	svc := NewService(Config{Monitors: []Monitor{
+		&StaleRawObservationMonitor{
+			Observations: reader,
+			RawPromote:   RawPromoteNever,
+			now:          func() time.Time { return now },
+		},
+		peer,
+	}})
+
+	got, err := svc.Detect(context.Background())
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "peer-1" {
+		t.Fatalf("silencing stale-raw must not silence peers, got %+v", got)
 	}
 }
