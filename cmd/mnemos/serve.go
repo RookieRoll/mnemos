@@ -29,15 +29,15 @@ import (
 // --http is passed. Logs go to stderr so they don't pollute the stdio
 // JSON-RPC stream on stdout.
 func runServe(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs := newCommandFlagSet("serve")
 	httpAddr := fs.String("http", "", "start HTTP server on ADDR instead of stdio (e.g. :8080)")
 	cfgPath := fs.String("config", "", "path to config file")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
 	if fs.NArg() != 0 {
-		return fmt.Errorf("serve: unexpected positional arguments")
+		return usageErrorf("unexpected positional arguments")
 	}
 	explicit := false
 	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "config" })
@@ -103,6 +103,9 @@ func runServe(ctx context.Context, args []string) error {
 			Prewarm:  pw,
 			APIKey:   cfg.Server.APIKey,
 			Logger:   logger,
+			// The HTTP transport still renders storage_bytes from this callback;
+			// the MCP surfaces no longer take one (they read memory.Stats.StorageBytes
+			// instead), and that dead field is gone from mcp.Config.
 			StorageSize: func() (int64, error) {
 				fi, err := os.Stat(cfg.Storage.Path)
 				if err != nil {
@@ -116,24 +119,17 @@ func runServe(ctx context.Context, args []string) error {
 	}
 
 	srv := mcp.NewServer(mcp.Config{
-		Flow:       continuitySvc,
-		Name:       "mnemos",
-		Version:    version.Version,
-		Profile:    cfg.MCP.Profile,
-		Memory:     mem,
-		Sessions:   sess,
-		Skills:     skl,
-		Touches:    db.Touches(),
-		Prewarm:    pw,
-		Rumination: rum,
-		Logger:     logger,
-		StorageSize: func() (int64, error) {
-			fi, err := os.Stat(cfg.Storage.Path)
-			if err != nil {
-				return 0, err
-			}
-			return fi.Size(), nil
-		},
+		Flow:           continuitySvc,
+		Name:           "mnemos",
+		Version:        version.Version,
+		Profile:        cfg.MCP.Profile,
+		Memory:         mem,
+		Sessions:       sess,
+		Skills:         skl,
+		Touches:        db.Touches(),
+		Prewarm:        pw,
+		Rumination:     rum,
+		Logger:         logger,
 		DefaultProject: serverProject(),
 	})
 

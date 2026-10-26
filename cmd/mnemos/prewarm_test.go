@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -79,13 +80,12 @@ func TestRunPrewarmTextOutput(t *testing.T) {
 	_ = home
 
 	out := captureStdout(t, func() {
-		if err := runPrewarm(context.Background(), []string{"--project", "mnemos"}); err != nil {
+		if err := runPrewarm(context.Background(), []string{"--project", "mnemos", "--open-session"}); err != nil {
 			t.Fatalf("prewarm: %v", err)
 		}
 	})
 	// A fresh DB has no observations, so the block text may be empty; but
-	// the session_id must always be printed because open-session defaults
-	// to true in session_start mode.
+	// the session_id must be printed when the session is forced open.
 	if !strings.Contains(out, "mnemos_session_id:") {
 		t.Errorf("expected session_id line in output, got: %q", out)
 	}
@@ -95,7 +95,7 @@ func TestRunPrewarmJSONOutput(t *testing.T) {
 	homeWithConfig(t, "")
 	out := captureStdout(t, func() {
 		if err := runPrewarm(context.Background(),
-			[]string{"--project", "mnemos", "--format", "json"}); err != nil {
+			[]string{"--project", "mnemos", "--format", "json", "--open-session"}); err != nil {
 			t.Fatalf("prewarm: %v", err)
 		}
 	})
@@ -169,12 +169,12 @@ func TestRunPrewarmAdoptsRecentOpenSession(t *testing.T) {
 	// within milliseconds. The second firing must adopt the session the
 	// first one opened, not create a twin that never gets closed.
 	first := captureStdout(t, func() {
-		if err := runPrewarm(ctx, []string{"--project", "mnemos"}); err != nil {
+		if err := runPrewarm(ctx, []string{"--project", "mnemos", "--open-session"}); err != nil {
 			t.Fatalf("first prewarm: %v", err)
 		}
 	})
 	second := captureStdout(t, func() {
-		if err := runPrewarm(ctx, []string{"--project", "mnemos"}); err != nil {
+		if err := runPrewarm(ctx, []string{"--project", "mnemos", "--open-session"}); err != nil {
 			t.Fatalf("second prewarm: %v", err)
 		}
 	})
@@ -204,12 +204,12 @@ func TestRunPrewarmDoesNotAdoptAcrossProjects(t *testing.T) {
 	ctx := context.Background()
 
 	captureStdout(t, func() {
-		if err := runPrewarm(ctx, []string{"--project", "alpha"}); err != nil {
+		if err := runPrewarm(ctx, []string{"--project", "alpha", "--open-session"}); err != nil {
 			t.Fatalf("prewarm alpha: %v", err)
 		}
 	})
 	captureStdout(t, func() {
-		if err := runPrewarm(ctx, []string{"--project", "beta"}); err != nil {
+		if err := runPrewarm(ctx, []string{"--project", "beta", "--open-session"}); err != nil {
 			t.Fatalf("prewarm beta: %v", err)
 		}
 	})
@@ -338,5 +338,149 @@ func TestRunPrewarmRecoveryRestoresTheHostsSession(t *testing.T) {
 	}
 	if got := sessionIDFromOutput(t, out); got != mine.ID {
 		t.Errorf("recovery must report session %s, got %s", mine.ID, got)
+	}
+}
+
+// sessionTotal is the store's session count, the observable form of "this
+// invocation opened a session".
+func sessionTotal(t *testing.T, ctx context.Context) int64 {
+	t.Helper()
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	defer d.close()
+	st, err := d.mem.Stats(ctx)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	return st.Sessions
+}
+
+func TestPrewarm_NoPayloadIsReadOnly(t *testing.T) {
+	homeWithConfig(t, "")
+	ctx := context.Background()
+	before := sessionTotal(t, ctx)
+
+	// The hand-run shape: stdin is a pipe, not a terminal, but it carries no
+	// hook payload. Prewarm must compose and print, and write nothing.
+	var out string
+	withStdin(t, "", func() {
+		out = captureStdout(t, func() {
+			if err := runPrewarm(ctx, []string{"--project", "mnemos"}); err != nil {
+				t.Fatalf("prewarm: %v", err)
+			}
+		})
+	})
+	if strings.Contains(out, "mnemos_session_id:") {
+		t.Errorf("a payload-less prewarm must not report a session: %q", out)
+	}
+	if after := sessionTotal(t, ctx); after != before {
+		t.Fatalf("payload-less prewarm changed the session count: %d -> %d", before, after)
+	}
+}
+
+func TestPrewarm_PayloadFromStdinOpensSession(t *testing.T) {
+	homeWithConfig(t, "")
+	ctx := context.Background()
+	payload := hookPayload(t, map[string]any{"hook_event_name": "SessionStart", "session_id": "claude-stdin"})
+	var out string
+	withStdin(t, payload, func() {
+		out = captureStdout(t, func() {
+			if err := runPrewarm(ctx, []string{"--project", "mnemos"}); err != nil {
+				t.Fatalf("prewarm: %v", err)
+			}
+		})
+	})
+	id := sessionIDFromOutput(t, out)
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	defer d.close()
+	got, err := d.sess.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.HostSessionID != "claude-stdin" {
+		t.Errorf("stdin payload must open a session for the host conversation, got %q", got.HostSessionID)
+	}
+}
+
+func TestPrewarm_PayloadArgOpensSession(t *testing.T) {
+	homeWithConfig(t, "")
+	ctx := context.Background()
+	payload := hookPayload(t, map[string]any{"hook_event_name": "SessionStart", "session_id": "pi-argv"})
+	var out string
+	withStdin(t, "", func() {
+		out = captureStdout(t, func() {
+			if err := runPrewarm(ctx, []string{"--project", "mnemos", "--payload", payload}); err != nil {
+				t.Fatalf("prewarm: %v", err)
+			}
+		})
+	})
+	id := sessionIDFromOutput(t, out)
+	d, err := loadDeps(ctx)
+	if err != nil {
+		t.Fatalf("loadDeps: %v", err)
+	}
+	defer d.close()
+	got, err := d.sess.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.HostSessionID != "pi-argv" {
+		t.Errorf("an argv payload must open a session for the host conversation, got %q", got.HostSessionID)
+	}
+}
+
+func TestPrewarm_OpenSessionFlagForces(t *testing.T) {
+	homeWithConfig(t, "")
+	ctx := context.Background()
+	before := sessionTotal(t, ctx)
+	var out string
+	withStdin(t, "", func() {
+		out = captureStdout(t, func() {
+			if err := runPrewarm(ctx, []string{"--project", "mnemos", "--open-session"}); err != nil {
+				t.Fatalf("prewarm: %v", err)
+			}
+		})
+	})
+	_ = sessionIDFromOutput(t, out)
+	if after := sessionTotal(t, ctx); after != before+1 {
+		t.Fatalf("--open-session must open exactly one session: %d -> %d", before, after)
+	}
+}
+
+func TestHookPayloadFrom(t *testing.T) {
+	cases := []struct {
+		name     string
+		explicit string
+		stdin    string
+		nilRead  bool
+		want     bool
+	}{
+		{"explicit payload", `{"hook_event_name":"SessionStart"}`, "", false, true},
+		{"explicit payload without hook fields", `{"cwd":"/tmp"}`, "", false, true},
+		{"stdin hook payload", "", `{"session_id":"s1"}`, false, true},
+		{"stdin unrelated json", "", `{"cwd":"/tmp"}`, false, false},
+		{"stdin not json", "", "hello", false, false},
+		{"empty stdin", "", "", false, false},
+		{"nil reader", "", "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdin io.Reader = strings.NewReader(tc.stdin)
+			if tc.nilRead {
+				stdin = nil
+			}
+			in, detected := hookPayloadFrom(tc.explicit, stdin)
+			if detected != tc.want {
+				t.Fatalf("detected = %v, want %v", detected, tc.want)
+			}
+			if !detected && (in.HookEventName != "" || in.SessionID != "" || in.CWD != "") {
+				t.Fatalf("an undetected payload must be zero, got %+v", in)
+			}
+		})
 	}
 }

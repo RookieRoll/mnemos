@@ -58,7 +58,7 @@ func TestDispatchHelp(t *testing.T) {
 		"serve", "search", "stats", "digest", "efficacy", "sessions", "export",
 		"import", "prune", "dream", "maintenance", "vault", "embed", "skill",
 		"replay", "prewarm", "continuity", "hook", "version", "config", "init",
-		"update", "doctor", "verify",
+		"update", "doctor", "verify", "backup", "retire",
 	} {
 		for _, help := range []string{"-h", "--help"} {
 			want := cmd
@@ -136,6 +136,25 @@ func TestDispatchUsageError(t *testing.T) {
 		{"config with unknown client", []string{"config", "--client", "bogus"}, []string{"expected --client pi"}},
 		{"prewarm with invalid mode", []string{"prewarm", "--mode", "wat"}, []string{"invalid mode"}},
 		{"prewarm with invalid format", []string{"prewarm", "--format", "xml"}, []string{"invalid format"}},
+		{"retire without selector", []string{"retire"}, []string{"at least one selector"}},
+		{"retire negative importance", []string{"retire", "--importance-max", "-1"}, []string{"must not be negative"}},
+		{"sessions close without stale", []string{"sessions", "close"}, []string{"--stale <duration> is required"}},
+		{"sessions close invalid status", []string{"sessions", "close", "--stale", "24h", "--status", "bogus"}, []string{"invalid --status"}},
+		{"backup without path", []string{"backup"}, []string{"usage: mnemos backup <path>"}},
+		{"skill delete without name", []string{"skill", "delete"}, []string{"usage: mnemos skill delete <name>"}},
+		{"skill merge without name", []string{"skill", "merge"}, []string{"usage: mnemos skill merge <name>"}},
+		{"verify without subcommand", []string{"verify"}, []string{"usage: mnemos verify"}},
+		{"verify unknown subcommand", []string{"verify", "teleport"}, []string{"unknown verify subcommand"}},
+		{"replay unknown flag", []string{"replay", "--nope"}, []string{"flag provided but not defined", "usage: mnemos replay [flags]"}},
+		{"replay without session", []string{"replay"}, []string{"usage: mnemos replay <session_id>"}},
+		{"digest non-positive since", []string{"digest", "--since", "0"}, []string{"--since must be positive"}},
+		{"efficacy invalid format", []string{"efficacy", "--format", "xml"}, []string{"invalid format"}},
+		{"serve positional", []string{"serve", "junk"}, []string{"unexpected positional arguments"}},
+		{"update unknown flag", []string{"update", "--nope"}, []string{"flag provided but not defined"}},
+		{"doctor json without workspaces", []string{"doctor", "--json"}, []string{"--json requires --workspaces"}},
+		{"continuity without command", []string{"continuity"}, nil},
+		{"hook without subcommand", []string{"hook"}, []string{"usage: mnemos hook"}},
+		{"hook unknown subcommand", []string{"hook", "nope"}, []string{"unknown hook"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

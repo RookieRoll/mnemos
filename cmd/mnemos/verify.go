@@ -21,7 +21,7 @@ import (
 //	mnemos verify all                   — retrieval + behavior + capture
 func runVerify(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mnemos verify <retrieval|behavior|capture|calibrate|all> [fixture]")
+		return usageErrorf("usage: mnemos verify <retrieval|behavior|capture|calibrate|all> [fixture]")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -45,14 +45,33 @@ func runVerify(ctx context.Context, args []string) error {
 		fmt.Println()
 		return runVerifyCapture(ctx, rest)
 	default:
-		return fmt.Errorf("unknown verify subcommand: %s", sub)
+		return usageErrorf("unknown verify subcommand: %s", sub)
 	}
+}
+
+// verifyFixtureArg parses a verify leaf's optional fixture path. The leaf takes
+// one positional path and no flags, so an unknown flag (or a second path) is a
+// usage error instead of being mistaken for a filename.
+func verifyFixtureArg(name string, args []string) (string, error) {
+	fs := newCommandFlagSet(name)
+	if err := parseFlags(fs, args); err != nil {
+		return "", err
+	}
+	if fs.NArg() > 1 {
+		return "", usageErrorf("expected at most one fixture path")
+	}
+	if fs.NArg() == 0 {
+		return "", nil
+	}
+	return fs.Arg(0), nil
 }
 
 func runVerifyRetrieval(ctx context.Context, args []string) error {
 	path := "verify/retrieval.yaml"
-	if len(args) > 0 {
-		path = args[0]
+	if arg, err := verifyFixtureArg("verify retrieval", args); err != nil {
+		return err
+	} else if arg != "" {
+		path = arg
 	}
 	fix, err := verify.LoadRetrievalFixture(path)
 	if err != nil {
@@ -93,8 +112,10 @@ func runVerifyRetrieval(ctx context.Context, args []string) error {
 // constants should carry; record the basis in docs/ARCHITECTURE.md.
 func runVerifyCalibrate(ctx context.Context, args []string) error {
 	path := "verify/retrieval.yaml"
-	if len(args) > 0 {
-		path = args[0]
+	if arg, err := verifyFixtureArg("verify calibrate", args); err != nil {
+		return err
+	} else if arg != "" {
+		path = arg
 	}
 	fix, err := verify.LoadRetrievalFixture(path)
 	if err != nil {
@@ -162,8 +183,10 @@ func printCalibrationReport(w io.Writer, rep memory.SweepReport) {
 
 func runVerifyBehavior(ctx context.Context, args []string) error {
 	path := "verify/behavior.yaml"
-	if len(args) > 0 {
-		path = args[0]
+	if arg, err := verifyFixtureArg("verify behavior", args); err != nil {
+		return err
+	} else if arg != "" {
+		path = arg
 	}
 	fix, err := verify.LoadBehaviorFixture(path)
 	if err != nil {
@@ -179,8 +202,10 @@ func runVerifyBehavior(ctx context.Context, args []string) error {
 
 func runVerifyCapture(ctx context.Context, args []string) error {
 	path := "verify/capture.yaml"
-	if len(args) > 0 {
-		path = args[0]
+	if arg, err := verifyFixtureArg("verify capture", args); err != nil {
+		return err
+	} else if arg != "" {
+		path = arg
 	}
 	fix, err := verify.LoadCaptureFixture(path)
 	if err != nil {

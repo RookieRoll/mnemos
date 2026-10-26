@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -17,17 +16,20 @@ import (
 // with outcomes — the closest read on "is mnemos earning its keep" the
 // store can produce from the surfaced-vs-outcome data it already logs.
 func runEfficacy(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("efficacy", flag.ContinueOnError)
+	fs := newCommandFlagSet("efficacy")
 	since := fs.Duration("since", 30*24*time.Hour, "look-back window (Go duration: 24h, 168h, 720h)")
 	format := fs.String("format", "text", "text | json")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
+	}
 	if *format != "text" && *format != "json" {
-		return fmt.Errorf("invalid format: %s", *format)
+		return usageErrorf("invalid format: %s (want text | json)", *format)
 	}
 	if *since <= 0 {
-		return fmt.Errorf("--since must be positive, got %s", *since)
+		return usageErrorf("--since must be positive, got %s", *since)
 	}
 
 	d, err := loadDeps(ctx)

@@ -582,3 +582,139 @@ func TestRetireRefusesUnsafeOrUnsupportedWrites(t *testing.T) {
 	}
 	assertRetireRowsUnchanged(t, before, snapshotRetireRows(t, f.store))
 }
+
+// backdate moves an observation's created_at into the past. Save stamps
+// created_at from the service clock, so an age fixture can only come from the
+// store itself; every other column stays as saved.
+func (f *retireFixture) backdate(t *testing.T, id string, createdAt time.Time) {
+	t.Helper()
+	if _, err := f.store.sql.Exec(
+		`UPDATE observations SET created_at = ? WHERE id = ?`,
+		createdAt.UTC(), id,
+	); err != nil {
+		t.Fatalf("backdate %s: %v", id, err)
+	}
+}
+
+// TestSelectRetireOlderThan pins the created_at selector: a row created
+// strictly before the cutoff is selected, a row created exactly at it is not,
+// the zero value disables the predicate (and is not a selector on its own), and
+// the cutoff ANDs with the other selectors. Every case also asserts the preview
+// wrote nothing.
+func TestSelectRetireOlderThan(t *testing.T) {
+	cases := []struct {
+		name    string
+		build   func(cutoff time.Time) memory.RetireInput
+		want    []string
+		wantErr bool
+	}{
+		{
+			name:  "row created exactly at the cutoff is excluded",
+			build: func(cutoff time.Time) memory.RetireInput { return memory.RetireInput{OlderThan: cutoff} },
+			want:  []string{"older-alpha", "older-beta"},
+		},
+		{
+			name: "cutoff further back selects nothing older",
+			build: func(cutoff time.Time) memory.RetireInput {
+				return memory.RetireInput{OlderThan: cutoff.Add(-6 * time.Hour)}
+			},
+			want: nil,
+		},
+		{
+			name: "cutoff past every row selects them all",
+			build: func(cutoff time.Time) memory.RetireInput {
+				return memory.RetireInput{OlderThan: cutoff.Add(100 * time.Hour)}
+			},
+			want: []string{"older-alpha", "boundary-alpha", "newer-alpha", "older-beta"},
+		},
+		{
+			name: "cutoff ANDs with project",
+			build: func(cutoff time.Time) memory.RetireInput {
+				return memory.RetireInput{OlderThan: cutoff, Project: "alpha"}
+			},
+			want: []string{"older-alpha"},
+		},
+		{
+			name: "cutoff ANDs with importance",
+			build: func(cutoff time.Time) memory.RetireInput {
+				return memory.RetireInput{OlderThan: cutoff, ImportanceMax: 1}
+			},
+			want: []string{"older-beta"},
+		},
+		{
+			name: "cutoff ANDs with no-access",
+			build: func(cutoff time.Time) memory.RetireInput {
+				return memory.RetireInput{OlderThan: cutoff, NoAccess: true}
+			},
+			want: []string{"older-alpha", "older-beta"},
+		},
+		{
+			name:  "zero cutoff disables the predicate",
+			build: func(time.Time) memory.RetireInput { return memory.RetireInput{Project: "alpha"} },
+			want:  []string{"older-alpha", "boundary-alpha", "newer-alpha"},
+		},
+		{
+			name:    "zero cutoff alone is not a selector",
+			build:   func(time.Time) memory.RetireInput { return memory.RetireInput{OlderThan: time.Time{}} },
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRetireFixture(t)
+			cutoff := f.now.Add(-24 * time.Hour)
+			rows := []struct {
+				key        string
+				project    string
+				importance int
+				access     int
+				created    time.Time
+			}{
+				{key: "older-alpha", project: "alpha", importance: 2, created: cutoff.Add(-time.Hour)},
+				{key: "boundary-alpha", project: "alpha", importance: 2, created: cutoff},
+				{key: "newer-alpha", project: "alpha", importance: 2, created: cutoff.Add(time.Hour)},
+				{key: "older-beta", project: "beta", importance: 1, created: cutoff.Add(-90 * time.Minute)},
+			}
+			ids := make(map[string]string, len(rows))
+			for _, row := range rows {
+				ids[row.key] = f.seed(t, retireRow{
+					key: row.key, project: row.project, importance: row.importance, access: row.access,
+				})
+				f.backdate(t, ids[row.key], row.created)
+			}
+			before := snapshotRetireRows(t, f.store)
+			in := tc.build(cutoff)
+
+			report, err := f.svc.SelectRetire(context.Background(), in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("an input without a real selector must be refused")
+				}
+				if report.Count != 0 || len(report.Sample) != 0 {
+					t.Errorf("refused selection must report nothing, got %+v", report)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("SelectRetire: %v", err)
+				}
+				wantIDs := make([]string, 0, len(tc.want))
+				for _, key := range tc.want {
+					wantIDs = append(wantIDs, ids[key])
+				}
+				sort.Strings(wantIDs)
+				gotIDs := retireSampleIDs(report.Sample)
+				sort.Strings(gotIDs)
+				if report.Count != len(wantIDs) {
+					t.Errorf("count = %d, want %d", report.Count, len(wantIDs))
+				}
+				if !sameRetireStrings(gotIDs, wantIDs) {
+					t.Errorf("sample ids = %v, want %v", gotIDs, wantIDs)
+				}
+			}
+			if f.store.calls != 0 {
+				t.Errorf("selection must never write, store saw %d batch calls", f.store.calls)
+			}
+			assertRetireRowsUnchanged(t, before, snapshotRetireRows(t, f.store))
+		})
+	}
+}

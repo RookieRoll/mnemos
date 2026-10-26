@@ -156,14 +156,19 @@ func runStats(ctx context.Context, args []string) error {
 			}
 		}
 	}
-	fi, _ := os.Stat(d.cfg.Storage.Path)
-	var size int64
-	if fi != nil {
-		size = fi.Size()
-	}
-	fmt.Printf("database:          %s (%d bytes)\n", d.cfg.Storage.Path, size)
+	// storage_bytes comes from the typed stats value, the same number the MCP
+	// stats surfaces render, so the CLI cannot disagree with them by stat'ing
+	// a different file set.
+	fmt.Printf("database:          %s (%d bytes)\n", d.cfg.Storage.Path, st.StorageBytes)
 	fmt.Printf("observations:      %d (%d live)\n", st.Observations, st.LiveObservations)
 	fmt.Printf("sessions:          %d\n", st.Sessions)
+	// The backlog line is one session-service read (session.Service.OpenBacklog)
+	// so mnemos stats and the MCP stats surfaces describe the same backlog.
+	backlog, err := d.sess.OpenBacklog(ctx)
+	if err != nil {
+		return fmt.Errorf("stats: %w", err)
+	}
+	fmt.Printf("open sessions: %d%s\n", backlog.Count, openBacklogSuffix(backlog))
 	fmt.Printf("skills:            %d (%d auto-promoted from corrections)\n",
 		len(skillList), promotedCount)
 	if d.rum != nil {
@@ -177,39 +182,6 @@ func runStats(ctx context.Context, args []string) error {
 		for _, t := range st.TopTags {
 			fmt.Printf("  %-16s %d\n", t.Tag, t.Count)
 		}
-	}
-	return nil
-}
-
-func runSessions(ctx context.Context, args []string) error {
-	fs := newCommandFlagSet("sessions")
-	if err := parseFlags(fs, args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return usageErrorf("unexpected positional arguments")
-	}
-	d, err := loadDeps(ctx)
-	if err != nil {
-		return err
-	}
-	defer d.close()
-
-	list, err := d.sess.Recent(ctx, "", 20)
-	if err != nil {
-		return fmt.Errorf("list sessions: %w", err)
-	}
-	if len(list) == 0 {
-		fmt.Println("no sessions yet")
-		return nil
-	}
-	for _, s := range list {
-		end := "open"
-		if s.EndedAt != nil {
-			end = s.EndedAt.Format("2006-01-02 15:04")
-		}
-		fmt.Printf("  %s  %s..%s  %s  %s\n",
-			s.ID, s.StartedAt.Format("2006-01-02 15:04"), end, s.Project, s.Goal)
 	}
 	return nil
 }
@@ -255,9 +227,9 @@ func runExport(ctx context.Context, args []string) error {
 func warnContinuityOmission(ctx context.Context, db *storage.DB, w io.Writer) {
 	present, err := db.HasContinuity(ctx)
 	if err != nil {
-		fmt.Fprintln(w, "warning: continuity backup scope unknown (state detection failed); logical JSON export excludes continuity bindings/checkpoints; use a consistent same-machine SQLite backup")
+		fmt.Fprintln(w, "warning: continuity backup scope unknown (state detection failed); logical JSON export excludes continuity bindings/checkpoints; use a consistent same-machine SQLite backup — run `mnemos backup <path>` — to preserve them")
 	} else if present {
-		fmt.Fprintln(w, "warning: logical JSON export omits continuity bindings/checkpoints, revisions and retry identities; use a consistent same-machine SQLite backup to preserve them")
+		fmt.Fprintln(w, "warning: logical JSON export omits continuity bindings/checkpoints, revisions and retry identities; use a consistent same-machine SQLite backup — run `mnemos backup <path>` — to preserve them")
 	}
 }
 
@@ -549,17 +521,17 @@ func runInit(ctx context.Context, args []string) error {
 	// list first so trailing garbage never hides behind a help request.
 	for _, arg := range args {
 		if arg != "-h" && arg != "--help" {
-			return fmt.Errorf("init: unexpected argument %q", arg)
+			return usageErrorf("init: unexpected argument %q", arg)
 		}
 	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return fmt.Errorf("init: %w", err)
+		return usageErrorf("init: %v", err)
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("init: unexpected positional arguments")
+		return usageErrorf("init: unexpected positional arguments")
 	}
 	// Resolve every route before the first install writes user configuration.
 	cfg, err := readOperationConfig(ctx)

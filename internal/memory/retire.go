@@ -29,11 +29,21 @@ type RetireInput struct {
 	// NoAccess restricts retirement to observations that were never accessed
 	// (access_count == 0).
 	NoAccess bool
+	// OlderThan retires only observations created strictly before this
+	// instant. The zero value disables the predicate, which is what lets the
+	// other selectors stand alone. Strictness is deliberate: a row created
+	// exactly at the threshold is not selected, so a duration converted at T
+	// cannot catch a row saved at T. The CLI accepts a relative duration and
+	// converts it to this absolute instant.
+	OlderThan time.Time
 }
 
 // hasSelector reports whether the input carries at least one usable selector.
+// OlderThan counts only when set: the zero time means "no created_at
+// predicate", not "everything created before year one" (which would silently
+// retire the whole live table).
 func (in RetireInput) hasSelector() bool {
-	return in.Project != "" || in.ImportanceMax > 0 || in.NoAccess
+	return in.Project != "" || in.ImportanceMax > 0 || in.NoAccess || !in.OlderThan.IsZero()
 }
 
 // RetireSample is one preview line of a retirement report: the observation ID
@@ -71,11 +81,13 @@ type RetirementStore interface {
 // counts, so a preview and the run that follows it select the same ids.
 //
 // Selection is fact-time retirement eligibility: the observation must not be
-// system-invalidated (invalidated_at IS NULL) and its valid_until must be unset
-// or in the future at the service clock. TTL expiry (expires_at) is prune's
-// concern, not retirement's. Selection reads the full export because Reader
-// exposes no predicate scan; retirement is an offline maintenance command, and
-// the same read is what makes preview and execution share one code path.
+// system-invalidated (invalidated_at IS NULL), its valid_until must be unset or
+// in the future at the service clock, and, when RetireInput.OlderThan is set,
+// its created_at must be strictly before that instant. TTL expiry (expires_at)
+// is prune's concern, not retirement's. Selection reads the full export because
+// Reader exposes no predicate scan; retirement is an offline maintenance
+// command, and the same read is what makes preview and execution share one code
+// path.
 func (s *Service) SelectRetire(ctx context.Context, in RetireInput) (RetireReport, error) {
 	selected, err := s.selectRetire(ctx, in, s.clock().UTC())
 	if err != nil {
@@ -125,10 +137,12 @@ func (s *Service) Retire(ctx context.Context, in RetireInput) (RetireReport, err
 
 // selectRetire is the single selection path shared by preview and write. The
 // returned rows are ordered by CreatedAt then ID so the bounded sample is
-// stable across stores with different scan orders.
+// stable across stores with different scan orders. The selector guard lives
+// here rather than in the two entry points so preview and execution refuse the
+// same empty selection, including an OlderThan that is only a zero time.
 func (s *Service) selectRetire(ctx context.Context, in RetireInput, now time.Time) ([]Observation, error) {
 	if !in.hasSelector() {
-		return nil, fmt.Errorf("retire: at least one of project, importance_max, or no_access is required")
+		return nil, fmt.Errorf("retire: at least one of project, importance_max, no_access, or older_than is required")
 	}
 	all, err := s.store.Export(ctx)
 	if err != nil {
@@ -152,7 +166,7 @@ func (s *Service) selectRetire(ctx context.Context, in RetireInput, now time.Tim
 // retireEligible is the single predicate behind preview and write: a live
 // observation (not system-invalidated, fact-time validity unset or in the
 // future) inside the requested project and below the importance and access
-// thresholds.
+// thresholds, created before the optional age cutoff.
 func retireEligible(o Observation, in RetireInput, now time.Time) bool {
 	if o.InvalidatedAt != nil {
 		return false
@@ -167,6 +181,9 @@ func retireEligible(o Observation, in RetireInput, now time.Time) bool {
 		return false
 	}
 	if in.NoAccess && o.AccessCount != 0 {
+		return false
+	}
+	if !in.OlderThan.IsZero() && !o.CreatedAt.Before(in.OlderThan) {
 		return false
 	}
 	return true

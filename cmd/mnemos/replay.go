@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"flag"
 	"fmt"
 	"os"
 
@@ -14,15 +12,15 @@ import (
 // block combining the session's original work with everything learned
 // since — designed to be pasted back into an agent's context.
 func runReplay(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
+	fs := newCommandFlagSet("replay")
 	out := fs.String("out", "", "write replay to file (default: stdout)")
 	maxTokens := fs.Int("max-tokens", 0, "override the token budget (default 3000)")
 	project := fs.String("project", "", "override project (default: session's project)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() == 0 {
-		return errors.New("usage: mnemos replay <session_id>")
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: mnemos replay <session_id>")
 	}
 	sessionID := fs.Arg(0)
 

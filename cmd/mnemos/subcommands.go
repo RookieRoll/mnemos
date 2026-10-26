@@ -237,9 +237,26 @@ func runEmbedStatus(ctx context.Context) error {
 		return err
 	}
 	defer d.close()
+	observations, err := d.db.Observations().Export(ctx)
+	if err != nil {
+		return fmt.Errorf("embed status: %w", err)
+	}
+	coverage := measureEmbeddingCoverage(observations, d.embedder.Model(), d.embedder.Dimension(), time.Now().UTC())
 	fmt.Printf("provider: %s\n", d.cfg.Embedding.Provider)
 	fmt.Printf("model:    %s\n", d.cfg.Embedding.Model)
 	fmt.Printf("enabled:  %v\n", d.mem.HybridEnabled())
+	fmt.Printf("embedded %d/%d\n", coverage.Embedded, coverage.Eligible)
+	if len(coverage.Models) > 0 {
+		fmt.Println("embedding models:")
+		for _, usage := range coverage.Models {
+			if usage.Mismatch {
+				fmt.Printf("  %-24s %d  (dimension %d != active %d)\n",
+					usage.Model, usage.Count, usage.Dimension, d.embedder.Dimension())
+				continue
+			}
+			fmt.Printf("  %-24s %d\n", usage.Model, usage.Count)
+		}
+	}
 	return nil
 }
 
@@ -259,10 +276,20 @@ func runEmbedBackfillOptions(ctx context.Context, options embeddingBackfillOptio
 		return fmt.Errorf("embedding backfill: store does not support bounded maintenance")
 	}
 	report, err := runEmbeddingBackfill(ctx, store, d.embedder, options)
+	// The skip breakdown and the remainder come from one post-run snapshot.
+	// They are best-effort: a cancelled context or a store that cannot be
+	// re-read leaves the work counts intact rather than failing the run.
+	if observations, exportErr := d.db.Observations().Export(ctx); exportErr == nil {
+		report.Skipped, report.Remaining = embeddingBackfillGap(
+			observations, d.embedder.Model(), d.embedder.Dimension(),
+			options.RebuildIncompatible, time.Now().UTC())
+	}
 	if ctx.Err() != nil {
-		fmt.Printf("embedding backfill interrupted: attempted=%d succeeded=%d failed=%d\n", report.Attempted, report.Succeeded, report.Failed)
+		fmt.Printf("embedding backfill interrupted: attempted=%d succeeded=%d failed=%d skipped=%s remaining=%d\n",
+			report.Attempted, report.Succeeded, report.Failed, report.Skipped, report.Remaining)
 		return fmt.Errorf("embedding backfill: %w", ctx.Err())
 	}
-	fmt.Printf("backfilled %d embeddings (attempted=%d succeeded=%d failed=%d)\n", report.Succeeded, report.Attempted, report.Succeeded, report.Failed)
+	fmt.Printf("backfilled %d embeddings (attempted=%d succeeded=%d failed=%d skipped=%s remaining=%d)\n",
+		report.Succeeded, report.Attempted, report.Succeeded, report.Failed, report.Skipped, report.Remaining)
 	return err
 }

@@ -78,7 +78,7 @@ func runHook(ctx context.Context, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return errors.New("usage: mnemos hook <user-prompt|post-tool|session-end|pre-tool|pre-compact|post-compact> [--payload JSON] [--format json]")
+		return usageErrorf("usage: mnemos hook <user-prompt|post-tool|session-end|pre-tool|pre-compact|post-compact> [--payload JSON] [--format json]")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -96,7 +96,7 @@ func runHook(ctx context.Context, args []string) error {
 	case "post-compact":
 		return runHookPostCompact(ctx, rest)
 	default:
-		return fmt.Errorf("unknown hook: %s", sub)
+		return usageErrorf("unknown hook: %s", sub)
 	}
 }
 

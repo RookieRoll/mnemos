@@ -40,11 +40,6 @@ type Config struct {
 	Prewarm    *prewarm.Service
 	Rumination *rumination.Service // optional; enables the mnemos_ruminate_* tools
 	Logger     *slog.Logger
-	// StorageSize is unused by the stats surfaces: they read
-	// memory.Stats.StorageBytes instead, so the resource, the tool, and
-	// mnemos stats all report one number. Retained while cmd/mnemos still
-	// supplies it.
-	StorageSize func() (int64, error)
 	// DefaultProject is the project a write lands in when the tool call
 	// names none. serve sets it to the basename of the directory it was
 	// started in, which Claude Code and Codex both set to the project

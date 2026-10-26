@@ -17,8 +17,10 @@ import (
 //	mnemos skill export [names...]          → writes a pack to stdout or --out
 //	mnemos skill import <file-or-url>       → imports a pack from disk or HTTP(S)
 //	mnemos skill list                       → shows installed skills
+//	mnemos skill delete <name>              → removes matching skills
+//	mnemos skill merge <name>               → folds duplicate matches into one keeper
 func runSkill(ctx context.Context, args []string) error {
-	const usage = "usage: mnemos skill <export|import|list>"
+	const usage = "usage: mnemos skill <export|import|list|delete|merge>"
 	if err := treeHelp(args, usage); err != nil {
 		return err
 	}
@@ -34,6 +36,10 @@ func runSkill(ctx context.Context, args []string) error {
 		return runSkillImport(ctx, rest)
 	case "list":
 		return runSkillList(ctx, rest)
+	case "delete":
+		return runSkillDelete(ctx, rest)
+	case "merge":
+		return runSkillMerge(ctx, rest)
 	default:
 		return usageErrorf("unknown skill subcommand: %s", sub)
 	}
@@ -183,4 +189,102 @@ func runSkillList(ctx context.Context, args []string) error {
 			sk.Name, sk.Version, marker, effMark, sk.Description)
 	}
 	return nil
+}
+
+// runSkillDelete removes every skill matching a name, narrowed by --agent and
+// --project. Deletion goes through the skill service so the store's normal
+// delete keeps the full-text mirror consistent; the rows printed are the rows
+// the service removed, and --dry-run prints the same set while writing
+// nothing.
+func runSkillDelete(ctx context.Context, args []string) error {
+	fs := newCommandFlagSet("skill delete")
+	agent := fs.String("agent", "", "only delete skills owned by this agent")
+	project := fs.String("project", "", "only delete skills tagged project:<name>")
+	dryRun := fs.Bool("dry-run", false, "print the rows that would be removed without writing")
+	flagArgs, positionals := splitFlagArgs(fs, args)
+	if err := parseFlags(fs, flagArgs); err != nil {
+		return err
+	}
+	if len(positionals) != 1 {
+		return usageErrorf("usage: mnemos skill delete <name> [--agent ID] [--project NAME] [--dry-run]")
+	}
+	d, err := loadDeps(ctx)
+	if err != nil {
+		return err
+	}
+	defer d.close()
+
+	result, err := d.skl.Delete(ctx, skills.DeleteInput{
+		Name: positionals[0], Scope: skills.Scope{AgentID: *agent, Project: *project}, DryRun: *dryRun,
+	})
+	if err != nil {
+		return fmt.Errorf("skill delete: %w", err)
+	}
+	verb := "deleted"
+	if *dryRun {
+		verb = "would delete"
+	}
+	fmt.Printf("%s %d skill(s)\n", verb, len(result.Rows))
+	printSkillRows(result.Rows)
+	return nil
+}
+
+// runSkillMerge folds every skill matching a name into one keeper. The keeper
+// is the highest version unless --keep-version names one; the rest are absorbed
+// into it and removed through the same store delete, so the index follows.
+// --dry-run prints the keeper and the rows that would be absorbed.
+func runSkillMerge(ctx context.Context, args []string) error {
+	fs := newCommandFlagSet("skill merge")
+	agent := fs.String("agent", "", "only merge skills owned by this agent")
+	project := fs.String("project", "", "only merge skills tagged project:<name>")
+	keepVersion := fs.Int("keep-version", 0, "version to keep (default: the highest version)")
+	dryRun := fs.Bool("dry-run", false, "print the keeper and the rows that would be absorbed without writing")
+	flagArgs, positionals := splitFlagArgs(fs, args)
+	if err := parseFlags(fs, flagArgs); err != nil {
+		return err
+	}
+	if len(positionals) != 1 {
+		return usageErrorf("usage: mnemos skill merge <name> [--agent ID] [--project NAME] [--keep-version N] [--dry-run]")
+	}
+	if *keepVersion < 0 {
+		return usageErrorf("--keep-version must not be negative, got %d", *keepVersion)
+	}
+	d, err := loadDeps(ctx)
+	if err != nil {
+		return err
+	}
+	defer d.close()
+
+	result, err := d.skl.Merge(ctx, skills.MergeInput{
+		Name: positionals[0], Scope: skills.Scope{AgentID: *agent, Project: *project},
+		KeepVersion: *keepVersion, DryRun: *dryRun,
+	})
+	if err != nil {
+		return fmt.Errorf("skill merge: %w", err)
+	}
+	if result.Keeper == nil {
+		fmt.Println("merged 0 skill(s): no match")
+		return nil
+	}
+	verb := "merged"
+	if *dryRun {
+		verb = "would merge"
+	}
+	fmt.Printf("%s %d skill(s) into keeper %s (v%d)\n",
+		verb, len(result.Superseded), result.Keeper.ID, result.Keeper.Version)
+	fmt.Println("  keeper:")
+	printSkillRows([]skills.Skill{*result.Keeper})
+	if len(result.Superseded) > 0 {
+		fmt.Println("  absorbed:")
+		printSkillRows(result.Superseded)
+	}
+	return nil
+}
+
+// printSkillRows renders one line per affected skill row. The same renderer
+// serves a --dry-run preview and the real run, so their reports cannot drift.
+func printSkillRows(rows []skills.Skill) {
+	for _, sk := range rows {
+		fmt.Printf("  %s  %-24s v%d  agent=%s\n", sk.ID, sk.Name, sk.Version, sk.AgentID)
+	}
 }

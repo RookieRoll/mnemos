@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,14 +53,17 @@ func defaultSelfPath() (string, error) {
 }
 
 func runUpdate(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	fs := newCommandFlagSet("update")
 	var (
 		yes   = fs.Bool("yes", false, "skip the confirmation prompt")
 		pin   = fs.String("version", "", "install this version instead of latest (e.g. v0.2.0)")
 		force = fs.Bool("force", false, "reinstall even if already on the target version")
 	)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
 	}
 
 	exe, err := updateSelfPath()

@@ -27,19 +27,22 @@ func runContinuity(ctx context.Context, args []string) error {
 		return writeContinuityJSON(map[string]any{"protocol_version": 1, "supported": true})
 	}
 	if len(args) == 0 {
-		return continuityCLIError(fmt.Errorf("%w: expected capabilities, open, checkpoint or context", continuity.ErrValidation))
+		return continuityUsage(fmt.Errorf("%w: expected capabilities, open, checkpoint or context", continuity.ErrValidation))
 	}
 	if args[0] != "open" && args[0] != "checkpoint" && args[0] != "context" {
-		return continuityCLIError(fmt.Errorf("%w: unknown continuity command", continuity.ErrUnsupported))
+		return continuityUsage(fmt.Errorf("%w: unknown continuity command", continuity.ErrUnsupported))
 	}
-	fs := flag.NewFlagSet("continuity "+args[0], flag.ContinueOnError)
+	fs := newCommandFlagSet("continuity " + args[0])
 	payload := fs.String("payload", "", "explicit continuity v1 JSON request (maximum 32 KiB)")
 	configPath := fs.String("config", "", "path to config file")
-	if err := fs.Parse(args[1:]); err != nil {
-		return continuityCLIError(fmt.Errorf("%w: invalid flags", continuity.ErrValidation))
+	if err := parseFlags(fs, args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return continuityUsage(fmt.Errorf("%w: invalid flags: %v", continuity.ErrValidation, err))
 	}
 	if fs.NArg() != 0 {
-		return continuityCLIError(fmt.Errorf("%w: unexpected arguments", continuity.ErrValidation))
+		return continuityUsage(fmt.Errorf("%w: unexpected arguments", continuity.ErrValidation))
 	}
 	var open continuity.OpenInput
 	var checkpoint continuity.CheckpointInput
@@ -54,7 +57,9 @@ func runContinuity(ctx context.Context, args []string) error {
 		target = &read
 	}
 	if err := continuity.DecodeJSON([]byte(*payload), target); err != nil {
-		return continuityCLIError(err)
+		// A payload the v1 decoder rejects is the caller's mistake, not a store
+		// failure: answer in the envelope and exit with the usage status.
+		return continuityUsage(err)
 	}
 	explicit := false
 	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "config" })
@@ -120,6 +125,14 @@ func writeContinuityJSON(out any) error {
 		return fmt.Errorf("continuity: write result: %w", err)
 	}
 	return nil
+}
+
+// continuityUsage writes the continuity v1 error envelope and classifies the
+// outcome as a usage error. dispatch then exits 2 without printing prose on
+// top of the machine-readable body, the same way maintenanceJSONError keeps a
+// written response clean for exit 1.
+func continuityUsage(err error) error {
+	return quietUsageError(continuityCLIError(err))
 }
 
 func continuityCLIError(err error) error {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/polyxmedia/mnemos/internal/version"
@@ -82,9 +83,11 @@ func commandFailure(cmd string, err error, stderr io.Writer) int {
 	}
 	var usageErr *usageError
 	if errors.As(err, &usageErr) {
-		fmt.Fprintf(stderr, "mnemos: %s: %v\n", cmd, err)
-		if usageErr.usage != "" {
-			fmt.Fprint(stderr, usageErr.usage)
+		if !usageErr.quiet {
+			fmt.Fprintf(stderr, "mnemos: %s: %v\n", cmd, err)
+			if usageErr.usage != "" {
+				fmt.Fprint(stderr, usageErr.usage)
+			}
 		}
 		return exitUsage
 	}
@@ -99,6 +102,11 @@ func commandFailure(cmd string, err error, stderr io.Writer) int {
 type usageError struct {
 	cause error
 	usage string // usage text to print after the message, when the source has one
+	// quiet suppresses dispatch's stderr message because the handler already
+	// wrote a machine-readable payload. continuity's v1 error envelope is the
+	// one such surface: it answers in JSON and still classifies the malformed
+	// request as a usage error.
+	quiet bool
 }
 
 func (e *usageError) Error() string { return e.cause.Error() }
@@ -109,6 +117,13 @@ func (e *usageError) Unwrap() error { return e.cause }
 // caller's mistake rather than the store's.
 func usageErrorf(format string, args ...any) error {
 	return &usageError{cause: fmt.Errorf(format, args...)}
+}
+
+// quietUsageError marks a usage error whose machine-readable payload the
+// handler already wrote. dispatch still exits 2, but adds no prose to stderr,
+// mirroring how maintenanceJSONError keeps a written JSON response clean.
+func quietUsageError(err error) error {
+	return &usageError{cause: err, quiet: true}
 }
 
 // newCommandFlagSet builds the flag set every handler parses through.
@@ -137,6 +152,44 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 	default:
 		return &usageError{cause: err, usage: rendered.String()}
 	}
+}
+
+// splitFlagArgs separates positional arguments from flags so a command whose
+// grammar is `name [flags]` can still parse its flags. flag.Parse stops at the
+// first positional argument, which would otherwise turn
+// `skill delete NAME --dry-run` into a usage error. A flag that takes a value
+// keeps its value attached, whether it arrived as `--flag value` or
+// `--flag=value`; boolean flags never consume the next argument.
+func splitFlagArgs(fs *flag.FlagSet, args []string) (flagArgs, positionals []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if len(arg) < 2 || arg[0] != '-' {
+			positionals = append(positionals, arg)
+			continue
+		}
+		flagArgs = append(flagArgs, arg)
+		name := strings.TrimLeft(arg, "-")
+		if strings.Contains(name, "=") {
+			continue
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			// An unknown flag stays in flagArgs so parseFlags reports it.
+			continue
+		}
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			i++
+			flagArgs = append(flagArgs, args[i])
+		}
+	}
+	return flagArgs, positionals
 }
 
 // writeFlagUsage renders "usage: mnemos <command> [flags]" plus the flag
@@ -172,6 +225,8 @@ var commands = map[string]handler{
 	"export":      runExport,
 	"import":      runImport,
 	"prune":       runPrune,
+	"retire":      runRetire,
+	"backup":      runBackup,
 	"dream":       runDream,
 	"maintenance": runMaintenance,
 	"vault":       runVault,
@@ -220,10 +275,16 @@ Commands:
   stats                  Show memory statistics
   digest [--since 24h]   Activity summary: saves, surfacing, sessions, dreams
   efficacy [--since]     Surfaced-vs-outcome: does surfacing memory go with sessions that end ok
-  sessions               List recent sessions
-  export [file]          Export all data as JSON
+  sessions [--status S] [--limit N] [--offset N] [--json]
+                         List recent sessions
+  sessions close --stale 24h [--project P] [--status abandoned] [--summary S] [--dry-run]
+                         Close open sessions older than a duration
+  export [file]          Export all data as JSON (see also: backup)
   import <file>          Import data from JSON
+  backup <path>          Snapshot the whole database to a new file (never overwrites)
   prune                  Remove expired observations
+  retire [flags]         Set valid_until on observations matching --project,
+                         --importance-max and/or --no-access (--dry-run to preview)
   dream [--watch]        Run a consolidation pass (or daemon with --watch)
   maintenance list      List pending semantic maintenance candidates as JSON
   maintenance evidence --id ID
@@ -235,12 +296,14 @@ Commands:
   vault export           Export memory to an Obsidian-compatible vault
   vault watch            Daemon: keep the vault in sync on a timer
   vault status           Show vault sync status
-  embed status           Show embedding provider status
+  embed status           Show provider status, embedded N/M coverage and model mix
   embed backfill [--rebuild-incompatible]
-                         Fill missing vectors; optionally rebuild other models/dimensions
+                         Fill missing vectors; reports skipped reasons and remaining
   skill list             Show installed skills
   skill export [names]   Build a shareable pack (stdout or --out file)
   skill import <src>     Import a pack from a file path or https URL
+  skill delete <name>    Remove matching skills (--agent/--project/--dry-run)
+  skill merge <name>     Fold duplicate skills into one keeper (--keep-version/--dry-run)
   replay <session_id>    Markdown recap of a prior session + what you've learned since
   prewarm [flags]        Print the session_start prewarm block (used by the Claude Code hook)
   continuity capabilities  Query continuity v1 support without opening storage

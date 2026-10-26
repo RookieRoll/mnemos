@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -19,19 +18,18 @@ import (
 // Parse and route before general doctor's configuration creation, writable
 // storage initialization or client checks. Even malformed flags have no effects.
 func doctorWorkspaceMode(ctx context.Context, args []string, output io.Writer) (bool, error) {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	fs := newCommandFlagSet("doctor")
 	workspaces := fs.Bool("workspaces", false, "diagnose recorded workspace identities without changing state")
 	jsonOutput := fs.Bool("json", false, "render workspace diagnosis as JSON")
-	if err := fs.Parse(args); err != nil {
-		return true, fmt.Errorf("doctor: parse flags: %w", err)
+	if err := parseFlags(fs, args); err != nil {
+		return true, err
 	}
 	if fs.NArg() != 0 {
-		return true, fmt.Errorf("doctor: unexpected positional arguments")
+		return true, usageErrorf("doctor: unexpected positional arguments")
 	}
 	if !*workspaces {
 		if *jsonOutput {
-			return true, fmt.Errorf("doctor: --json requires --workspaces")
+			return true, usageErrorf("doctor: --json requires --workspaces")
 		}
 		return false, nil
 	}

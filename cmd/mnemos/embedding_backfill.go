@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/polyxmedia/mnemos/internal/memory"
 )
@@ -13,7 +14,21 @@ type embeddingBackfillStore interface {
 	UpdateEmbedding(context.Context, string, string, []float32) error
 }
 type embeddingBackfillOptions struct{ RebuildIncompatible bool }
-type embeddingBackfillReport struct{ Attempted, Succeeded, Failed int }
+
+// embeddingBackfillReport is the outcome of one offline backfill run.
+//
+// Attempted, Succeeded and Failed describe the provider work. Skipped and
+// Remaining describe the rows the work deliberately left alone: a permanent
+// skip (superseded, incompatible model, blank text) is counted by reason so it
+// cannot be mistaken for a stalled backfill, and Remaining is the number of
+// eligible observations that still carry no usable vector.
+type embeddingBackfillReport struct {
+	Attempted int
+	Succeeded int
+	Failed    int
+	Skipped   embeddingSkipCounts
+	Remaining int
+}
 
 // runEmbeddingBackfill performs no retry: success and failure both advance the
 // ID cursor, while a later invocation can revisit still-missing vectors.
@@ -56,9 +71,12 @@ func runEmbeddingBackfill(ctx context.Context, store embeddingBackfillStore, emb
 				return report, fmt.Errorf("backfill page did not advance within its horizon")
 			}
 			cursor = o.ID
-			text := o.Title + "\n" + o.Content
-			if o.Rationale != "" {
-				text += "\n" + o.Rationale
+			text := embeddingDocument(o)
+			if strings.TrimSpace(text) == "" {
+				// Nothing to embed. The post-run coverage scan counts this row
+				// as Skipped(empty_content); attempting it would only store a
+				// meaningless vector or burn a provider call.
+				continue
 			}
 			report.Attempted++
 			vec, err := embedder.Embed(ctx, text)

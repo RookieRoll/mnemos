@@ -182,6 +182,86 @@ func (s *obsStore) Invalidate(ctx context.Context, id string, validUntil time.Ti
 	return nil
 }
 
+// retireIDsPerStatement bounds one retirement IN list. SQLite's host-parameter
+// ceiling is 32766 on current builds and was 999 on older ones, and a wholesale
+// retirement selects every matching live row, so a large store could otherwise
+// fail the command with "too many SQL variables". 900 ids plus the two
+// timestamp parameters stay under the historical 999 limit, and the chunks are
+// statements inside one transaction, so atomicity and the reported count are
+// unaffected.
+const retireIDsPerStatement = 900
+
+// RetireObservations sets valid_until on every listed observation in one
+// transaction and returns how many rows it actually changed. It is the storage
+// half of memory.RetirementStore, the bulk fact-time retirement behind
+// 'mnemos retire'.
+//
+// Retirement writes only valid_until: created_at, invalidated_at, content_hash
+// and the indexed text stay as they were, and no row is deleted, so a query
+// with AsOf before the retirement instant still returns the observation. The
+// statement touches no FTS-indexed column, so the selective AFTER UPDATE
+// trigger in migration 0010 never retokenizes the row.
+//
+// The predicate is the live shape, so an id that stopped being live between
+// the service's read-only selection and this write is skipped rather than
+// re-stamped: an already invalidated row is left alone, and a row whose
+// valid_until is already at or before the retirement instant is left alone
+// too. That is what keeps a concurrent supersession or a re-run from
+// overwriting an earlier fact-time boundary. The returned count is the number
+// of rows actually retired, never the number of ids passed in.
+func (s *obsStore) RetireObservations(ctx context.Context, ids []string, validUntil time.Time) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	at := validUntil.UTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("storage: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var retired int64
+	for start := 0; start < len(ids); start += retireIDsPerStatement {
+		end := start + retireIDsPerStatement
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, at)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		args = append(args, at)
+
+		res, err := tx.ExecContext(ctx, `
+			UPDATE observations
+			   SET valid_until = ?
+			 WHERE id IN (`+placeholders(len(chunk))+`)
+			   AND invalidated_at IS NULL
+			   AND (valid_until IS NULL OR valid_until > ?)`, args...)
+		if err != nil {
+			return 0, fmt.Errorf("storage: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("storage: %w", err)
+		}
+		retired += n
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("storage: %w", err)
+	}
+	return retired, nil
+}
+
+// RetireObservations is the bulk fact-time retirement capability the
+// maintenance CLI depends on. The assertion keeps a future refactor of
+// obsStore from silently dropping it: memory.Service.Retire refuses a store
+// without it rather than falling back to per-row invalidation.
+var _ memory.RetirementStore = (*obsStore)(nil)
+
 func (s *obsStore) Search(ctx context.Context, in memory.SearchInput) ([]memory.SearchResult, error) {
 	limit := in.Limit
 	if limit <= 0 {

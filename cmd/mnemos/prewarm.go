@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/polyxmedia/mnemos/internal/continuityflow"
 	"github.com/polyxmedia/mnemos/internal/injection"
@@ -42,11 +43,14 @@ type hookInput struct {
 func runPrewarm(ctx context.Context, args []string) error {
 	fs := newCommandFlagSet("prewarm")
 	var (
-		project     = fs.String("project", "", "project name (default: basename of cwd)")
-		goal        = fs.String("goal", "", "optional goal")
-		mode        = fs.String("mode", "session_start", "session_start | compaction_recovery")
-		format      = fs.String("format", "text", "text | json")
-		openSession = fs.Bool("open-session", true, "open a mnemos session (session_start mode only)")
+		project = fs.String("project", "", "project name (default: basename of cwd)")
+		goal    = fs.String("goal", "", "optional goal")
+		mode    = fs.String("mode", "session_start", "session_start | compaction_recovery")
+		format  = fs.String("format", "text", "text | json")
+		// --open-session forces the session open. It is no longer the default:
+		// only a hook invocation opens a session automatically (design D3), so
+		// a hand-run prewarm stays read-only unless this flag says otherwise.
+		forceSession = fs.Bool("open-session", false, "force a mnemos session open even without a hook payload (session_start mode only)")
 		// payload mirrors the hook subcommands' flag so a harness that
 		// cannot pipe stdin can still supply cwd and source.
 		payload = fs.String("payload", "", "hook payload as JSON (overrides stdin)")
@@ -76,7 +80,13 @@ func runPrewarm(ctx context.Context, args []string) error {
 		return usageErrorf("invalid format: %s (want text | json)", *format)
 	}
 
-	in := resolveHookPayload(*payload)
+	// A payload is what marks an invocation as hook-driven: argv on pi, stdin
+	// on Claude Code. Without one, prewarm composes and prints and writes
+	// nothing, so a human running it cannot leak a never-ended session into the
+	// store. stdin is never read from a terminal, so an interactive run cannot
+	// block (design D3).
+	in, hasPayload := hookPayloadFrom(*payload, os.Stdin)
+	openSession := *forceSession || hasPayload
 	cwd := in.CWD
 	if cwd == "" {
 		if wd, err := os.Getwd(); err == nil {
@@ -109,7 +119,7 @@ func runPrewarm(ctx context.Context, args []string) error {
 	flowConfig := continuityflow.Config{
 		LegacySessions: d.sess, Composer: pw, PrewarmMaxTokens: d.cfg.Search.PrewarmMaxTokens,
 	}
-	if *openSession && pwMode == prewarm.ModeSessionStart {
+	if openSession && pwMode == prewarm.ModeSessionStart {
 		if maintenance, buildErr := newMaintenanceRuntime(d.cfg, d.db, d.mem, d.skl, d.rum, d.db.Sessions(), d.db.Injections(), slog.Default()); buildErr == nil {
 			flowConfig.Maintenance = maintenance
 		}
@@ -118,7 +128,7 @@ func runPrewarm(ctx context.Context, args []string) error {
 	var sessID string
 	var block *prewarm.Block
 	startedSession := false
-	if *openSession && pwMode == prewarm.ModeSessionStart {
+	if openSession && pwMode == prewarm.ModeSessionStart {
 		started, startErr := flow.Start(ctx, continuityflow.TaskSessionInput{
 			Project: proj, Goal: *goal, HostSessionID: in.SessionID, AdoptLegacy: true,
 		})
@@ -180,24 +190,69 @@ func parsePrewarmMode(s string) (prewarm.Mode, error) {
 	}
 }
 
+// hookPayloadFrom reports the hook payload an invocation carries and whether it
+// carried one at all.
+//
+// An explicit --payload always counts: a harness without stdin still supplies
+// cwd and source that way. Otherwise stdin is read only when it is not a
+// character device, and only a JSON object carrying hook_event_name or
+// session_id counts as a payload. A terminal is never read, so an interactive
+// `mnemos prewarm` cannot block (design D3).
+func hookPayloadFrom(explicit string, stdin io.Reader) (hookInput, bool) {
+	if s := strings.TrimSpace(explicit); s != "" {
+		return parseHookPayload(s), true
+	}
+	data, ok := readNonTerminalStdin(stdin)
+	if !ok {
+		return hookInput{}, false
+	}
+	var probe struct {
+		HookEventName string `json:"hook_event_name"`
+		SessionID     string `json:"session_id"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return hookInput{}, false
+	}
+	if probe.HookEventName == "" && probe.SessionID == "" {
+		// A pipe carrying something that is not a hook payload (a script
+		// redirecting a file, say) is still a read-only invocation.
+		return hookInput{}, false
+	}
+	var in hookInput
+	_ = json.Unmarshal(data, &in)
+	return in, true
+}
+
+// readNonTerminalStdin reads r unless it is a character device. A nil reader
+// carries nothing and is never read.
+func readNonTerminalStdin(r io.Reader) ([]byte, bool) {
+	if r == nil {
+		return nil, false
+	}
+	if f, ok := r.(*os.File); ok {
+		fi, err := f.Stat()
+		if err != nil {
+			return nil, false
+		}
+		if (fi.Mode() & os.ModeCharDevice) != 0 {
+			// Interactive TTY — nothing to read.
+			return nil, false
+		}
+	}
+	data, err := io.ReadAll(r)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
 // readHookStdin best-effort parses a Claude Code hook payload from stdin.
 // Returns a zero value if stdin is a TTY, empty, or not valid JSON. Errors
 // are swallowed on purpose: the CLI also runs interactively.
 func readHookStdin(r io.Reader) hookInput {
 	var in hookInput
-	f, ok := r.(*os.File)
-	if ok {
-		fi, err := f.Stat()
-		if err != nil {
-			return in
-		}
-		if (fi.Mode() & os.ModeCharDevice) != 0 {
-			// Interactive TTY — nothing to read.
-			return in
-		}
-	}
-	data, err := io.ReadAll(r)
-	if err != nil || len(data) == 0 {
+	data, ok := readNonTerminalStdin(r)
+	if !ok {
 		return in
 	}
 	// Ignore unmarshal errors: a non-JSON stdin is a legitimate shell use, and

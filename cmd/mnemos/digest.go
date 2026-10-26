@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -17,17 +16,20 @@ import (
 // saved, what was surfaced, which sessions ran, whether the dream pass
 // fired. The "numbers on the screen" view of the store earning its keep.
 func runDigest(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("digest", flag.ContinueOnError)
+	fs := newCommandFlagSet("digest")
 	since := fs.Duration("since", 24*time.Hour, "look-back window (Go duration: 24h, 168h, 30m)")
 	format := fs.String("format", "text", "text | json")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
+	}
 	if *format != "text" && *format != "json" {
-		return fmt.Errorf("invalid format: %s", *format)
+		return usageErrorf("invalid format: %s (want text | json)", *format)
 	}
 	if *since <= 0 {
-		return fmt.Errorf("--since must be positive, got %s", *since)
+		return usageErrorf("--since must be positive, got %s", *since)
 	}
 
 	d, err := loadDeps(ctx)
