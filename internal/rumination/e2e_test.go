@@ -123,7 +123,7 @@ func TestRumination_EndToEnd(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		if _, err := mem.Save(ctx, memory.SaveInput{
 			Title:      "oauth failed again " + string(rune('a'+i)),
-			Content:    "the skill procedure isn't covering this case",
+			Content:    "the skill procedure isn't covering this case " + string(rune('a'+i)),
 			Type:       memory.TypeCorrection,
 			Tags:       []string{"oauth"},
 			Project:    "proj",

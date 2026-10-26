@@ -109,7 +109,7 @@ func TestLinkEndpoint(t *testing.T) {
 	ids := make([]string, 2)
 	for i := range ids {
 		_, out := request(t, ts, "POST", "/v1/observations", "", map[string]any{
-			"Title": fmt.Sprintf("obs %d", i), "Content": "body", "Type": "decision",
+			"Title": fmt.Sprintf("obs %d", i), "Content": fmt.Sprintf("body %d", i), "Type": "decision",
 		})
 		ids[i] = out["Observation"].(map[string]any)["ID"].(string)
 	}

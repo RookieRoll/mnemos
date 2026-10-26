@@ -132,16 +132,21 @@ func TestRankingPrefersImportantAndRecent(t *testing.T) {
 	svc := newService(t, nil)
 	ctx := context.Background()
 
-	// Same text, different importance/recency.
+	// Same query terms, different importance/recency.
 	old := time.Now().Add(-60 * 24 * time.Hour).UTC()
 	// Trick: we can't backdate via SaveInput, but the ranker uses CreatedAt
 	// pulled from the store. For this test we only vary importance.
+	//
+	// The bodies differ by one letter on purpose: identical bodies in the same
+	// project are now deliberately folded into one observation by the
+	// near-duplicate save layer, so a ranking test needs two distinct rows that
+	// still carry exactly the same query terms.
 	lowRes, _ := svc.Save(ctx, memory.SaveInput{
 		Title: "Pattern A", Content: "pattern about sqlite indexing",
 		Type: memory.TypePattern, Importance: 3,
 	})
 	highRes, _ := svc.Save(ctx, memory.SaveInput{
-		Title: "Pattern B", Content: "pattern about sqlite indexing",
+		Title: "Pattern B", Content: "patterns about sqlite indexing",
 		Type: memory.TypePattern, Importance: 10,
 	})
 	_ = old

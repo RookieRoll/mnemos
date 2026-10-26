@@ -138,7 +138,7 @@ func TestConcurrentStorageOpenFresh(t *testing.T) {
 		return
 	}
 	var count, latest int
-	if err := handles[0].SQL().QueryRow(`SELECT count(*),max(version) FROM schema_migrations`).Scan(&count, &latest); err != nil || count != 11 || latest != 11 {
+	if err := handles[0].SQL().QueryRow(`SELECT count(*),max(version) FROM schema_migrations`).Scan(&count, &latest); err != nil || count != 12 || latest != 12 {
 		t.Fatalf("fresh opens diverged: count=%d latest=%d %v", count, latest, err)
 	}
 }

@@ -111,7 +111,7 @@ mnemos_session_start(
 
 Without a goal, the UserPromptSubmit hook backfills the first real prompt when available. With a goal, the session becomes a durable record that `mnemos replay` and future prewarms can use.
 
-**End.** At the end of completed work or the current session (or when the user explicitly asks to end it), close the exact current session:
+**End.** At the end of completed work or the current session (or when the user explicitly asks to end it), close the exact current session. The server enforces ownership: it accepts only that session, or a continuity-bound session whose receipt workspace matches, and rejects any other id with `session_not_owned`. Orphaned or batch closures belong to the local `mnemos sessions close` command.
 
 ```
 mnemos_session_end(
@@ -148,7 +148,7 @@ Start with `mnemos_search` and select relevant IDs with `mnemos_get_many`. Keep 
 - Don't call `mnemos_correct` for trivial typos or one-off slips. Corrections are for conceptual mistakes that would repeat.
 - Don't fabricate tool arguments. Derive `project` from the git remote or the working directory; if unclear, ask.
 - Don't spam `mnemos_search` before every edit. It is fast but the goal is a richer memory, not a pre-check ritual.
-- Use `mnemos_session_end` only for the exact current session ID; do not infer or adopt an older session.
+- Use `mnemos_session_end` only for the exact current session ID; the server rejects any other id with `session_not_owned` and directs orphaned or batch closures to the local `mnemos sessions close` command. Do not infer or adopt an older session.
 
 ### Rumination: when a stored rule looks wrong
 

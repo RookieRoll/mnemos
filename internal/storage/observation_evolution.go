@@ -30,9 +30,13 @@ func writeObservationTx(ctx context.Context, tx *sql.Tx, o *memory.Observation) 
 	if err != nil {
 		return fmt.Errorf("storage: encode parents: %w", err)
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO observations (`+obsColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	// content_hash_normalized is the derived near-duplicate key. It is written
+	// exactly as the memory layer computed it and never inferred here: an empty
+	// value stays NULL, which is also what every pre-0012 row carries, so a
+	// NULL never matches a near-duplicate probe.
+	_, err = tx.ExecContext(ctx, `INSERT INTO observations (`+obsColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		o.ID, nullableStr(o.SessionID), o.AgentID, nullableStr(o.Project), o.Title, o.Content, string(o.Type), string(tags), o.Importance,
-		o.AccessCount, nullableTime(o.LastAccessedAt), o.CreatedAt.UTC(), o.ValidFrom.UTC(), nullableTime(o.ValidUntil), nullableTime(o.InvalidatedAt), nullableTime(o.ExpiresAt), nullableStr(o.ContentHash), nullableStr(o.Structured), nullableStr(o.Rationale), encodeVector(o.Embedding), nullableStr(o.EmbeddingModel), nullableTime(o.LastExportedAt), string(o.SourceKind), string(o.TrustTier), string(parents), pinnedInt(o.Pinned), nullableStr(o.TopicKey))
+		o.AccessCount, nullableTime(o.LastAccessedAt), o.CreatedAt.UTC(), o.ValidFrom.UTC(), nullableTime(o.ValidUntil), nullableTime(o.InvalidatedAt), nullableTime(o.ExpiresAt), nullableStr(o.ContentHash), nullableStr(o.Structured), nullableStr(o.Rationale), encodeVector(o.Embedding), nullableStr(o.EmbeddingModel), nullableTime(o.LastExportedAt), string(o.SourceKind), string(o.TrustTier), string(parents), pinnedInt(o.Pinned), nullableStr(o.TopicKey), nullableStr(o.ContentHashNormalized))
 	if err != nil {
 		return fmt.Errorf("storage: insert observation version: %w", err)
 	}
@@ -93,6 +97,11 @@ func normalizeRestoreOwner(o memory.Observation) (memory.Observation, error) {
 	return memory.NormalizeRestoreObservation(o)
 }
 
+// sameOwnerIdentity is the restore identity check. It deliberately ignores
+// content_hash_normalized: an older dump has no such field, and comparing it
+// would make a faithful restore of pre-0012 data conflict with nothing. The
+// derived key is carried through verbatim when present and never used to decide
+// identity.
 func sameOwnerIdentity(a, b memory.Observation) bool {
 	// Old snapshots have no new metadata; skipping must not erase a later topic.
 	if b.TopicKey == "" && len(b.Evidence) == 0 {
@@ -152,6 +161,14 @@ func sameEvidenceIdentity(a, b []memory.EvidenceReference) bool {
 
 // SaveEvolution atomically resolves scoped deduplication, replacement replay,
 // evidence ownership, and lifecycle writes under a single SQLite reservation.
+//
+// Dedup runs in the order the design fixes: the exact content hash first, then
+// the near-duplicate layers bounded by in.NearDupWindow (normalized content
+// hash, then session and title). A near-duplicate hit bumps the survivor's
+// access signal, retains the merged-away body verbatim in
+// observation_near_dups, and returns the survivor — no second live row. A
+// normalized-identical row outside the window is reported as a hint and the
+// save inserts.
 func (s *obsStore) SaveEvolution(ctx context.Context, in memory.EvolutionSave) (*memory.SaveResult, error) {
 	tx, err := startEvolutionWrite(ctx, s.db)
 	if err != nil {
@@ -159,6 +176,10 @@ func (s *obsStore) SaveEvolution(ctx context.Context, in memory.EvolutionSave) (
 	}
 	defer func() { _ = tx.Rollback() }()
 	o := in.Observation
+	// nearDupHint is set when a normalized-identical observation exists outside
+	// the merge window: the save still inserts, and the result names the
+	// candidate without touching it.
+	var nearDupHint string
 	if in.ReplacesID != "" {
 		rows, err := tx.QueryContext(ctx, "SELECT source_id,COALESCE(replacement_hash,'') FROM observation_links WHERE target_id=? AND link_type='supersedes'", in.ReplacesID)
 		if err != nil {
@@ -222,6 +243,30 @@ func (s *obsStore) SaveEvolution(ctx context.Context, in memory.EvolutionSave) (
 				return &memory.SaveResult{Observation: &existing, Deduped: true}, nil
 			}
 		}
+		// Near-duplicate layers, in design order and only after the exact hash
+		// missed. Lookup, merge, and commit stay in this transaction: a fold is
+		// one write decision, never a read here and an insert there.
+		if hit, err := resolveNearDupTx(ctx, tx, o, in.NearDupWindow, in.Now); err != nil {
+			return nil, err
+		} else if hit != nil {
+			merge, err := foldNearDupTx(ctx, tx, hit.survivor.ID, o, hit.reason, in.Now)
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("storage: commit near-duplicate merge: %w", err)
+			}
+			return &memory.SaveResult{Observation: hit.survivor, Deduped: true, NearDup: merge}, nil
+		}
+		// Miss path only: report a normalized-identical row outside the window
+		// as a hint. The save below still inserts; nothing is merged.
+		hint, err := nearDupOutsideWindowTx(ctx, tx, o, in.NearDupWindow, in.Now)
+		if err != nil {
+			return nil, err
+		}
+		if hint != nil {
+			nearDupHint = hint.ID
+		}
 	}
 	if err := writeObservationTx(ctx, tx, o); err != nil {
 		return nil, err
@@ -234,7 +279,7 @@ func (s *obsStore) SaveEvolution(ctx context.Context, in memory.EvolutionSave) (
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("storage: commit evolution save: %w", err)
 	}
-	return &memory.SaveResult{Observation: o}, nil
+	return &memory.SaveResult{Observation: o, NearDupHint: nearDupHint}, nil
 }
 
 func linkAndInvalidateTx(ctx context.Context, tx *sql.Tx, newID, oldID string, now, effective time.Time, hash string) error {

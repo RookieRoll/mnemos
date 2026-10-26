@@ -47,6 +47,10 @@ type Service struct {
 	clock            func() time.Time
 	defaultLimit     int
 	maxContextTokens int
+	// nearDupWindow is the resolved near-duplicate merge window (see
+	// Config.NearDupWindow). Zero means near-duplicate merging is disabled and
+	// only exact content-hash dedup runs.
+	nearDupWindow time.Duration
 }
 
 // Config bundles injected dependencies for the memory service.
@@ -63,6 +67,15 @@ type Config struct {
 	// DefaultLimit and MaxContextTokens apply only when callers omit limits.
 	DefaultLimit     int
 	MaxContextTokens int
+	// NearDupWindow bounds near-duplicate merging on save: a save folds into a
+	// live observation in the same (agent, project) whose content normalizes
+	// identically, or that shares the save's session id and non-empty title,
+	// only while that observation was last touched inside this window.
+	// nil selects DefaultNearDupWindow (24h), which is the shipped default. A
+	// pointer to a zero duration is the operator's explicit "0s": near-duplicate
+	// merging is disabled and only exact content-hash dedup remains. The knob is
+	// the [search].near_dup_window setting.
+	NearDupWindow *time.Duration
 }
 
 // NewService builds a Service from a Store and ranking params.
@@ -94,6 +107,7 @@ func NewService(cfg Config) *Service {
 		clock:            cfg.Clock,
 		defaultLimit:     cfg.DefaultLimit,
 		maxContextTokens: cfg.MaxContextTokens,
+		nearDupWindow:    resolveNearDupWindow(cfg.NearDupWindow),
 	}
 }
 
@@ -103,8 +117,26 @@ func (s *Service) HybridEnabled() bool {
 }
 
 // Save creates a new observation from agent-provided input, or bumps the
-// access counter on an existing identical one (dedup-on-save). Returns
-// SaveResult so callers can distinguish a fresh insert from a dedup hit.
+// access counter on an existing one instead of duplicating it. Dedup runs in
+// two layers, in this order:
+//
+//  1. Exact content hash, unconditional: the same (agent, project, content
+//     hash, topic, evidence identity) already live bumps that row.
+//  2. Near-duplicate fold, bounded by the configured window: a live row in the
+//     same (agent, project) whose content normalizes identically — differing
+//     only in case, whitespace or punctuation — or a live row sharing the
+//     save's session id and non-empty title is folded in. The survivor's access
+//     count is bumped, the merged-away body is retained verbatim in a
+//     provenance record, and no second live row is created.
+//
+// A normalized-identical row outside the window is never merged: the save
+// inserts and SaveResult.NearDupHint names the candidate. Returns SaveResult so
+// callers can tell a fresh insert from a fold.
+//
+// The layers resolve inside the store's write transaction when it offers one
+// (the SQLite store does, so a concurrent duplicate cannot slip between lookup
+// and insert). A plain store without that transaction boundary keeps exact-hash
+// dedup only: near-duplicate folding requires the transactional surface.
 func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 	if strings.TrimSpace(in.Title) == "" {
 		return nil, fmt.Errorf("save: title is required")
@@ -170,9 +202,11 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 		if topic != "" || len(evidence) > 0 || in.ReplacesID != "" {
 			return nil, fmt.Errorf("memory: store does not support transactional metadata")
 		}
-		// Dedup: if the same (agent, project, content_hash) already lives, bump
-		// access and return without writing. Invalidated rows don't count — a
-		// re-save can legitimately resurrect a superseded fact.
+		// Exact dedup: if the same (agent, project, content_hash) already lives,
+		// bump access and return without writing. Invalidated rows don't count —
+		// a re-save can legitimately resurrect a superseded fact. The
+		// near-duplicate layers below this one need the store's write
+		// transaction, so a plain store stops here.
 		if existing, err := s.store.FindByContentHash(ctx, agent, in.Project, hash); err != nil {
 			return nil, fmt.Errorf("dedup lookup: %w", err)
 		} else if existing != nil {
@@ -198,13 +232,15 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 		ValidFrom:   validFrom,
 		ValidUntil:  in.ValidUntil,
 		ContentHash: hash,
-		Structured:  in.Structured,
-		Rationale:   in.Rationale,
-		SourceKind:  sourceKind,
-		TrustTier:   trustTier,
-		DerivedFrom: in.DerivedFrom,
-		Pinned:      in.Pinned,
-		TopicKey:    topic, Evidence: evidence,
+		// Derived second key; hashContent's definition and value are untouched.
+		ContentHashNormalized: hashNormalized(in.Content),
+		Structured:            in.Structured,
+		Rationale:             in.Rationale,
+		SourceKind:            sourceKind,
+		TrustTier:             trustTier,
+		DerivedFrom:           in.DerivedFrom,
+		Pinned:                in.Pinned,
+		TopicKey:              topic, Evidence: evidence,
 	}
 	// Pinning wins over TTL: core memory cannot silently expire.
 	if in.TTLDays > 0 && !in.Pinned {
@@ -229,7 +265,7 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 				return nil, err
 			}
 		}
-		return evolution.SaveEvolution(ctx, EvolutionSave{Observation: o, ReplacesID: in.ReplacesID, UnpinReplacement: in.UnpinReplacement, TopicExplicit: topic != "", RequestHash: requestHash, Now: now})
+		return evolution.SaveEvolution(ctx, EvolutionSave{Observation: o, ReplacesID: in.ReplacesID, UnpinReplacement: in.UnpinReplacement, TopicExplicit: topic != "", RequestHash: requestHash, Now: now, NearDupWindow: s.nearDupWindow})
 	}
 	if err := s.store.Insert(ctx, o); err != nil {
 		return nil, err

@@ -34,6 +34,19 @@ type Capabilities struct {
 	TypedLinks         bool `json:"typed_links"`
 	DeterministicDedup bool `json:"deterministic_dedup"`
 
+	// DeterministicDedupSemantics states, in words, what DeterministicDedup
+	// actually enforces: the two layers, their bounds, and the fact that
+	// neither is probabilistic or model-derived. A bare flag invites the
+	// reader to imagine more matching than exists, so the flag ships with the
+	// sentence that limits it.
+	DeterministicDedupSemantics string `json:"deterministic_dedup_semantics"`
+
+	// NearDupWindow is the effective near-duplicate merge window as a duration
+	// string, or "disabled" when the operator set it to zero. It is the bound
+	// the dedup sentence refers to, reported from live service state rather
+	// than from a constant.
+	NearDupWindow string `json:"near_dup_window"`
+
 	// HybridRetrieval is runtime-bound: true only when an embedder is
 	// configured and dimensioned, so it tracks what search can actually do.
 	HybridRetrieval bool `json:"hybrid_retrieval"`
@@ -71,8 +84,32 @@ func (s *Service) Capabilities() Capabilities {
 		PinnedMemory:   true,
 		GraphRetrieval: true,
 	}
+	c.NearDupWindow, c.DeterministicDedupSemantics = s.dedupSemantics()
 	c.Tiers = c.tiers()
 	return c
+}
+
+// dedupSemantics renders the dedup sentence and the effective window it refers
+// to. Both come from live service state: a store with near-duplicate merging
+// switched off (near_dup_window = 0s) must not advertise a window it does not
+// enforce, and one with the default must not describe a rule the operator
+// turned off. The sentence names both layers, their bounds, and the fact that
+// neither is probabilistic or model-derived.
+func (s *Service) dedupSemantics() (window, sentence string) {
+	if s.nearDupWindow <= 0 {
+		return "disabled",
+			"exact: content-hash dedup per (agent_id, project) is unconditional; " +
+				"near-duplicate: disabled, so no content is folded on normalization or on session and title; " +
+				"neither layer is probabilistic or model-derived"
+	}
+	window = s.nearDupWindow.String()
+	return window,
+		"exact: content-hash dedup per (agent_id, project) is unconditional; " +
+			"near-duplicate: merged into an existing observation only when content normalizes identically " +
+			"(letters and digits only, case-folded, whitespace and punctuation ignored) or the save shares the " +
+			"survivor's session id and non-empty title, and only inside the " + window + " window, with the " +
+			"merged-away content retained verbatim in a provenance record; " +
+			"neither layer is probabilistic or model-derived"
 }
 
 // tiers derives the conformance tier list from the capability flags. Reading

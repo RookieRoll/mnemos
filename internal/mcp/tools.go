@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -92,7 +93,10 @@ func (s *Server) registerTools() {
 	addProfileTool(s, &mcpsdk.Tool{
 		Name: "mnemos_session_end",
 		Description: "Close a session with summary, status (ok|failed|blocked|abandoned), and " +
-			"reflection. Failed sessions' observations get a ranking boost — agents learn from mistakes.",
+			"reflection. Accepted only for the invocation's current session, or a continuity-bound " +
+			"session whose receipt workspace matches; any other id fails with session_not_owned. " +
+			"Orphaned or batch closures belong to the local 'mnemos sessions close' command. " +
+			"Failed sessions' observations get a ranking boost — agents learn from mistakes.",
 	}, s.handleSessionEnd)
 
 	// Context ------------------------------------------------------------
@@ -521,15 +525,111 @@ func (s *Server) handleSessionEnd(ctx context.Context, _ *mcpsdk.CallToolRequest
 		ID: a.SessionID, Summary: a.Summary, Reflection: a.Reflection,
 		Status: status, OutcomeTags: a.OutcomeTags,
 	}
-	var err error
-	if s.cfg.Flow == nil {
-		return nil, nil, fmt.Errorf("mcp: task-session flow unavailable")
+	if s.cfg.Sessions == nil {
+		return nil, nil, fmt.Errorf("mcp: session service unavailable")
 	}
-	err = s.cfg.Flow.End(ctx, closeInput)
+	err := s.cfg.Sessions.EndOwned(ctx, closeInput, s.sessionEndInvocation(ctx))
 	if err != nil {
+		var rejected *session.NotOwnedError
+		if errors.As(err, &rejected) {
+			return sessionNotOwnedResult(rejected)
+		}
 		return nil, nil, err
 	}
 	return textResult("session " + a.SessionID + " closed (" + string(status) + ")")
+}
+
+// sessionEndInvocation assembles the ownership context for one
+// mnemos_session_end call. Project is the same resolution seam the hook path
+// uses; WorkspaceRoot is the workspace the server itself was started in,
+// resolved with continuity's canonical directory identity so a recorded
+// receipt compares by the key continuity bound it with. Without a resolvable
+// workspace or continuity support, only the invocation's bound session may be
+// closed.
+func (s *Server) sessionEndInvocation(ctx context.Context) session.EndInvocation {
+	inv := session.EndInvocation{Project: s.cfg.DefaultProject}
+	inv.WorkspaceRoot = invocationWorkspaceRoot(ctx)
+	if inv.WorkspaceRoot == "" || s.cfg.Flow == nil || !s.cfg.Flow.SupportsContinuity() {
+		return inv
+	}
+	inv.Receipts = continuityReceiptAuthorizer{flow: s.cfg.Flow, workspaceRoot: inv.WorkspaceRoot}
+	return inv
+}
+
+// invocationWorkspaceRoot resolves the directory the server was started in as
+// a continuity workspace, reusing continuity's canonicalization instead of a
+// second path convention. An unresolvable workspace returns "", which disables
+// receipt authorization; the invocation's bound session stays closable.
+func invocationWorkspaceRoot(ctx context.Context) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	resolver := continuity.LocalResolver{}
+	if w, err := resolver.Resolve(ctx, cwd, ""); err == nil {
+		return w.Root
+	}
+	// A non-Git server directory is a valid workspace only as an explicit root.
+	if w, err := resolver.Resolve(ctx, cwd, cwd); err == nil {
+		return w.Root
+	}
+	return ""
+}
+
+// continuityReceiptAuthorizer is the named receipt seam's current
+// implementation: it verifies a continuity receipt through continuity's own
+// read path instead of reaching into session_continuity_bindings. That path
+// accepts a session only when its recorded binding matches the (owner agent,
+// workspace key) pair, so success means the receipt's workspace is the
+// invocation workspace. The agent used for the lookup is the target's own, not
+// the caller's, which keeps the decision workspace-only. A dedicated receipt
+// accessor can replace this type without touching session.EndOwned.
+type continuityReceiptAuthorizer struct {
+	flow          *continuityflow.Service
+	workspaceRoot string
+}
+
+// AuthorizeSessionEnd reports whether target carries a continuity receipt
+// bound to the authorizer's workspace. A session bound elsewhere is a plain
+// refusal; only operational failures surface as errors.
+func (a continuityReceiptAuthorizer) AuthorizeSessionEnd(ctx context.Context, target *session.Session) (bool, error) {
+	_, err := a.flow.Context(ctx, continuity.ContextInput{
+		ProtocolVersion: continuity.ProtocolVersion,
+		AgentID:         target.AgentID,
+		CWD:             a.workspaceRoot,
+		WorkspaceRoot:   a.workspaceRoot,
+		SessionID:       target.ID,
+	})
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, continuity.ErrUnavailable):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// sessionNotOwnedResult maps the guard's rejection onto the stable
+// session_not_owned wire code. The text names both supported routes: close the
+// current session, or run the local maintenance channel against the id.
+func sessionNotOwnedResult(rejected *session.NotOwnedError) (*mcpsdk.CallToolResult, any, error) {
+	body := map[string]any{
+		"code": "session_not_owned",
+		"error": fmt.Sprintf(
+			"session %s is not owned by this invocation: close the current session, or run `mnemos sessions close %s` locally",
+			rejected.SessionID, rejected.SessionID),
+		"session_id": rejected.SessionID,
+	}
+	if rejected.WorkspaceRoot != "" {
+		body["workspace"] = rejected.WorkspaceRoot
+	}
+	res, _, err := jsonResult(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	res.IsError = true
+	return res, nil, nil
 }
 
 // ---- mnemos_context ----------------------------------------------------

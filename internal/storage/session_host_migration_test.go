@@ -30,7 +30,7 @@ func TestSessionHostMigrationBothLineagesAndFresh(t *testing.T) {
 				func() {
 					defer db.Close()
 					var count, latest int
-					if err := db.SQL().QueryRow("SELECT count(*),max(version) FROM schema_migrations").Scan(&count, &latest); err != nil || count != 11 || latest != 11 {
+					if err := db.SQL().QueryRow("SELECT count(*),max(version) FROM schema_migrations").Scan(&count, &latest); err != nil || count != 12 || latest != 12 {
 						t.Fatalf("migration count=%d latest=%d err=%v", count, latest, err)
 					}
 					if lineage != "fresh" {

@@ -104,6 +104,15 @@ subsystem prefix, carrying the rejected id and the workspace; the transports map
 it to a stable error code (`session_not_owned`) whose text names the supported
 route: close the current session, or run `mnemos sessions close <id>` locally.
 
+Implementation note (review ruling): the receipt branch is validated through
+the continuity read path as the binding oracle — the authoriser asks
+continuity to resolve the target session's binding against the invocation's
+canonicalised workspace (the same canonicalization continuity already uses),
+kept behind one named seam so a dedicated receipt accessor can replace it
+later without touching the guard. Every `session_end` costs one extra light
+read; acceptable at this frequency. The hook paths (`EndForHost` /
+`CloseForHost`) resolve their session themselves and are unaffected.
+
 ## Risks
 
 - **Rule D2.3 (same session + same title) can match content that differs beyond

@@ -49,6 +49,12 @@ type EvolutionSave struct {
 	TopicExplicit    bool
 	RequestHash      string
 	Now              time.Time
+	// NearDupWindow is the near-duplicate merge window the store applies after
+	// the exact content-hash dedup misses. Zero disables near-duplicate merging
+	// (exact dedup only). The store resolves it inside the same write
+	// transaction as the insert, so the lookup and the fold cannot straddle
+	// another writer.
+	NearDupWindow time.Duration
 }
 
 // EvolutionStore is the transaction boundary consumed by evolution services.

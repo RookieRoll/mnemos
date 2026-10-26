@@ -169,7 +169,19 @@ type Observation struct {
 	// ContentHash is the SHA-256 of normalised content. Used for dedup on
 	// save: identical content in the same (agent, project) scope bumps the
 	// existing observation's access count instead of creating a duplicate.
+	// Its definition and value never change: Restore and evolution replay
+	// assert it verbatim.
 	ContentHash string
+
+	// ContentHashNormalized is the SHA-256 of the case-folded,
+	// punctuation-and-whitespace-free form of Content (see
+	// NormalizeContentForHash). It is the second, derived dedup key: rows that
+	// differ only in case, spacing or punctuation share it, so a re-typed
+	// sentence folds into the existing observation instead of duplicating it.
+	// Empty (NULL on disk) when Content has no letters or digits, and for every
+	// row written before this key existed — those rows are never backfilled and
+	// never match a near-duplicate rule.
+	ContentHashNormalized string
 
 	// Structured holds type-specific fields as JSON (e.g. corrections carry
 	// tried/wrong_because/fix). Empty for types that only need the free-text
@@ -258,10 +270,25 @@ type SaveInput struct {
 }
 
 // SaveResult is the outcome of Save: the resulting observation plus whether
-// this was a dedup (existing row was reused) or a fresh insert.
+// this was a dedup (existing row was reused) or a fresh insert, and — for the
+// near-duplicate layer — which rule folded the save and which out-of-window
+// candidate the caller may want to reconcile.
 type SaveResult struct {
 	Observation *Observation
-	Deduped     bool // true when the content already existed; AccessCount bumped instead of inserting
+	// Deduped is true when the content already existed and the survivor's
+	// access count was bumped instead of inserting a row. It covers both the
+	// exact content-hash hit and a near-duplicate fold; NearDup tells the two
+	// apart.
+	Deduped bool
+	// NearDup is non-nil when a near-duplicate rule folded this save into an
+	// existing observation. Observation then holds that survivor, no second
+	// live row exists, and NearDup retains the merged-away body so the caller
+	// can report the merge and an operator can restore it.
+	NearDup *NearDupMerge
+	// NearDupHint names a live, normalized-identical observation that sits
+	// outside the merge window. The save still inserted normally; the hint is
+	// advisory only and never changes what was stored.
+	NearDupHint string
 }
 
 // SearchInput parameterises a search query. Query is the BM25 pattern; filters

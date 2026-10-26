@@ -56,7 +56,7 @@ func TestEvolutionMigrationFromVersionSix(t *testing.T) {
 		t.Fatalf("old row changed during additive migration: %+v %v", rows, err)
 	}
 	var version int
-	if err := db.SQL().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 11 {
+	if err := db.SQL().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 12 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	for _, name := range []string{"topics", "observation_versions", "evidence_checks"} {

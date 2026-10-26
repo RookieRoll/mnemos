@@ -78,7 +78,7 @@ func (f *gateFixture) seedCorrection(t *testing.T, project, tag, title, sessID s
 		TriggerContext: "when doing " + tag,
 	})
 	res, err := f.mem.Save(context.Background(), memory.SaveInput{
-		Title: title, Content: "tried X, was wrong because Y, fix Z",
+		Title: title, Content: "tried X, was wrong because Y, fix Z for " + title,
 		Type: memory.TypeCorrection, Project: project,
 		Tags: []string{tag}, SessionID: sessID,
 		Structured: string(structured),
@@ -286,7 +286,7 @@ func TestGateLegacyFallbackWithoutOutcomeStores(t *testing.T) {
 	for _, title := range []string{"oauth a", "oauth b", "oauth c"} {
 		structured, _ := json.Marshal(correctionData{Tried: "x", WrongBecause: "y", Fix: "z"})
 		if _, err := f.mem.Save(ctx, memory.SaveInput{
-			Title: title, Content: "c", Type: memory.TypeCorrection,
+			Title: title, Content: "c " + title, Type: memory.TypeCorrection,
 			Project: "api", Tags: []string{"oauth"}, SessionID: sess.ID,
 			Structured: string(structured),
 		}); err != nil {

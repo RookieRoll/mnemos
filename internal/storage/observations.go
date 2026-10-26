@@ -37,7 +37,7 @@ const obsColumns = `
 	content_hash, structured, rationale,
 	embedding, embedding_model, last_exported_at,
 	source_kind, trust_tier, derived_from,
-	pinned, topic_key`
+	pinned, topic_key, content_hash_normalized`
 
 const evidenceProjection = `COALESCE((SELECT json_group_array(json_object('key', e.evidence_key, 'locator', e.locator, 'relation', e.relation, 'revision', e.revision, 'selector', e.selector, 'fingerprint', e.fingerprint, 'status', e.status, 'checked_at', e.checked_at)) FROM (SELECT * FROM observation_evidence ORDER BY evidence_key) e WHERE e.observation_id = %s.id), '[]')`
 
@@ -883,6 +883,7 @@ type obsScanDest struct {
 	derivedFromJSON           *string
 	pinned                    *int64
 	topicKey                  *sql.NullString
+	normalizedHash            *sql.NullString
 	evidenceJSON              *string
 }
 
@@ -907,6 +908,7 @@ func newObsScanDest(o *memory.Observation) obsScanDest {
 		derivedFromJSON: new(string),
 		pinned:          new(int64),
 		topicKey:        &sql.NullString{},
+		normalizedHash:  &sql.NullString{},
 		evidenceJSON:    new(string),
 	}
 }
@@ -921,7 +923,7 @@ func (d obsScanDest) args() []any {
 		d.contentHash, d.structured, d.rationale,
 		d.embedding, d.embeddingModel, d.lastExportedAt,
 		d.sourceKind, d.trustTier, d.derivedFromJSON,
-		d.pinned, d.topicKey, d.evidenceJSON,
+		d.pinned, d.topicKey, d.normalizedHash, d.evidenceJSON,
 	}
 }
 
@@ -944,6 +946,7 @@ func (d obsScanDest) finalise() error {
 	_ = json.Unmarshal([]byte(*d.derivedFromJSON), &d.o.DerivedFrom)
 	d.o.Pinned = *d.pinned != 0
 	d.o.TopicKey = d.topicKey.String
+	d.o.ContentHashNormalized = d.normalizedHash.String
 	if err := json.Unmarshal([]byte(*d.evidenceJSON), &d.o.Evidence); err != nil {
 		return fmt.Errorf("storage: decode evidence metadata: %w", err)
 	}
