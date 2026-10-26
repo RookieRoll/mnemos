@@ -21,6 +21,10 @@ import (
 type DB struct {
 	sql         *sql.DB
 	maintenance *sql.DB
+	// path is the database file as given to Open, kept so filesystem
+	// diagnostics such as Stats().StorageBytes can measure it. An in-memory
+	// database has no file and reports zero.
+	path string
 }
 
 // Open returns a ready-to-use DB at path. Parent directories are created if
@@ -79,7 +83,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		}
 	}
 
-	return &DB{sql: sqlDB, maintenance: maintenanceDB}, nil
+	return &DB{sql: sqlDB, maintenance: maintenanceDB, path: path}, nil
 }
 
 func isMemoryDatabasePath(path string) bool {

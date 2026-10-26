@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,8 +18,12 @@ import (
 //	mnemos skill import <file-or-url>       → imports a pack from disk or HTTP(S)
 //	mnemos skill list                       → shows installed skills
 func runSkill(ctx context.Context, args []string) error {
+	const usage = "usage: mnemos skill <export|import|list>"
+	if err := treeHelp(args, usage); err != nil {
+		return err
+	}
 	if len(args) == 0 {
-		return errors.New("usage: mnemos skill <export|import|list>")
+		return usageErrorf("%s", usage)
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -33,17 +35,17 @@ func runSkill(ctx context.Context, args []string) error {
 	case "list":
 		return runSkillList(ctx, rest)
 	default:
-		return fmt.Errorf("unknown skill subcommand: %s", sub)
+		return usageErrorf("unknown skill subcommand: %s", sub)
 	}
 }
 
 func runSkillExport(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("skill export", flag.ContinueOnError)
+	fs := newCommandFlagSet("skill export")
 	out := fs.String("out", "", "write pack to file (default: stdout)")
 	source := fs.String("source", "", "source attribution (e.g. '@voidmode')")
 	url := fs.String("url", "", "canonical URL of the pack (optional)")
 	project := fs.String("project", "", "project the pack is scoped to (optional)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -77,10 +79,14 @@ func runSkillExport(ctx context.Context, args []string) error {
 }
 
 func runSkillImport(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: mnemos skill import <file-or-url>")
+	fs := newCommandFlagSet("skill import")
+	if err := parseFlags(fs, args); err != nil {
+		return err
 	}
-	src := args[0]
+	if fs.NArg() != 1 {
+		return usageErrorf("usage: mnemos skill import <file-or-url>")
+	}
+	src := fs.Arg(0)
 
 	reader, closeFn, err := openSource(ctx, src)
 	if err != nil {
@@ -138,7 +144,14 @@ func openSource(ctx context.Context, src string) (io.Reader, func(), error) {
 	return f, func() { _ = f.Close() }, nil
 }
 
-func runSkillList(ctx context.Context, _ []string) error {
+func runSkillList(ctx context.Context, args []string) error {
+	fs := newCommandFlagSet("skill list")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
+	}
 	d, err := loadDeps(ctx)
 	if err != nil {
 		return err

@@ -103,7 +103,7 @@ func newRumination(cfg config.Config, db *storage.DB, skl *skills.Service) *rumi
 
 func runSearch(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: mnemos search <query>")
+		return usageErrorf("usage: mnemos search <query>")
 	}
 	d, err := loadDeps(ctx)
 	if err != nil {
@@ -128,7 +128,14 @@ func runSearch(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runStats(ctx context.Context, _ []string) error {
+func runStats(ctx context.Context, args []string) error {
+	fs := newCommandFlagSet("stats")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
+	}
 	d, err := loadDeps(ctx)
 	if err != nil {
 		return err
@@ -174,7 +181,14 @@ func runStats(ctx context.Context, _ []string) error {
 	return nil
 }
 
-func runSessions(ctx context.Context, _ []string) error {
+func runSessions(ctx context.Context, args []string) error {
+	fs := newCommandFlagSet("sessions")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
+	}
 	d, err := loadDeps(ctx)
 	if err != nil {
 		return err
@@ -201,6 +215,13 @@ func runSessions(ctx context.Context, _ []string) error {
 }
 
 func runExport(ctx context.Context, args []string) error {
+	fs := newCommandFlagSet("export")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return usageErrorf("expected at most one output file")
+	}
 	d, err := loadDeps(ctx)
 	if err != nil {
 		return err
@@ -208,10 +229,11 @@ func runExport(ctx context.Context, args []string) error {
 	defer d.close()
 
 	out := io.Writer(os.Stdout)
-	if len(args) > 0 {
-		f, err := os.Create(args[0])
+	if fs.NArg() == 1 {
+		name := fs.Arg(0)
+		f, err := os.Create(name)
 		if err != nil {
-			return fmt.Errorf("create %s: %w", args[0], err)
+			return fmt.Errorf("create %s: %w", name, err)
 		}
 		defer f.Close()
 		out = f
@@ -241,7 +263,7 @@ func warnContinuityOmission(ctx context.Context, db *storage.DB, w io.Writer) {
 
 func runImport(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: mnemos import <file>")
+		return usageErrorf("usage: mnemos import <file>")
 	}
 	f, err := os.Open(args[0])
 	if err != nil {
@@ -331,7 +353,14 @@ func countAddSkip(added bool, addCount, skipCount *int) {
 	}
 }
 
-func runPrune(ctx context.Context, _ []string) error {
+func runPrune(ctx context.Context, args []string) error {
+	fs := newCommandFlagSet("prune")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
+	}
 	d, err := loadDeps(ctx)
 	if err != nil {
 		return err
@@ -347,14 +376,14 @@ func runPrune(ctx context.Context, _ []string) error {
 }
 
 func runConfig(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	fs := newCommandFlagSet("config")
 	cfgPath := fs.String("path", "", "explicit config path")
 	client := fs.String("client", "", "nonsecret client projection (pi)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || (*client != "" && *client != "pi") {
-		return errors.New("config: expected --client pi and no positional arguments")
+		return usageErrorf("expected --client pi and no positional arguments")
 	}
 	explicit := false
 	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "path" })

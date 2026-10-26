@@ -89,12 +89,15 @@ func (s *Server) readSkillsIndex(ctx context.Context, req *mcpsdk.ReadResourceRe
 	return resourceJSON(req.Params.URI, map[string]any{"skills": slim})
 }
 
+// readStats serves mnemos://stats. It renders through statsView, the same
+// formatter the mnemos_stats tool uses, so neither surface can derive a
+// statistic the other disagrees with.
 func (s *Server) readStats(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
 	st, err := s.cfg.Memory.Stats(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return resourceJSON(req.Params.URI, st)
+	return resourceJSON(req.Params.URI, s.statsView(ctx, st))
 }
 
 func (s *Server) readCapabilities(_ context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {

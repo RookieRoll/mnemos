@@ -13,13 +13,20 @@ import (
 )
 
 // Observations returns the observation store backed by this DB.
-func (d *DB) Observations() memory.Store { return &obsStore{db: d.sql} }
+func (d *DB) Observations() memory.Store { return &obsStore{db: d.sql, path: d.path} }
 
 // FencedObservations returns the observation store's transaction-fenced
 // maintenance surface for dream passes.
-func (d *DB) FencedObservations() memory.FencedMaintenance { return &obsStore{db: d.sql} }
+func (d *DB) FencedObservations() memory.FencedMaintenance {
+	return &obsStore{db: d.sql, path: d.path}
+}
 
-type obsStore struct{ db *sql.DB }
+// obsStore carries the database path next to the handle because Stats reports
+// the on-disk size, which is a filesystem fact rather than a SQL one.
+type obsStore struct {
+	db   *sql.DB
+	path string
+}
 
 const obsColumns = `
 	id, session_id, agent_id, project,
@@ -399,6 +406,10 @@ func (s *obsStore) Prune(ctx context.Context, now time.Time) (int64, error) {
 	return n, nil
 }
 
+// Stats returns the aggregate counts that back mnemos_stats, plus the
+// database's on-disk size. The counts are one query each; the size comes from
+// the filesystem and can never fail the call, because a diagnostics field must
+// not turn into an outage.
 func (s *obsStore) Stats(ctx context.Context) (memory.Stats, error) {
 	var st memory.Stats
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM observations`).
@@ -421,6 +432,7 @@ func (s *obsStore) Stats(ctx context.Context) (memory.Stats, error) {
 	}
 	st.TopTags = collectTopTags(ctx, s.db)
 	st.RecentSessions = collectRecentSessions(ctx, s.db, 5)
+	st.StorageBytes = databaseStorageBytes(s.path)
 	return st, nil
 }
 

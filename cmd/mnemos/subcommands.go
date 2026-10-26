@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,11 +14,14 @@ import (
 // daemon on the configured interval; otherwise performs a single pass
 // and prints the journal.
 func runDream(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("dream", flag.ContinueOnError)
+	fs := newCommandFlagSet("dream")
 	watch := fs.Bool("watch", false, "run continuously on the configured interval")
 	interval := fs.Duration("interval", 0, "override [dream].interval (Go duration: 6h, 30m, ...)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
 	}
 
 	d, err := loadDeps(ctx)
@@ -60,8 +62,12 @@ func runDream(ctx context.Context, args []string) error {
 
 // runVault handles the `vault` subcommand tree: export | watch | status.
 func runVault(ctx context.Context, args []string) error {
+	const usage = "usage: mnemos vault <export|watch|status>"
+	if err := treeHelp(args, usage); err != nil {
+		return err
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mnemos vault <export|watch|status>")
+		return usageErrorf("%s", usage)
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -74,15 +80,18 @@ func runVault(ctx context.Context, args []string) error {
 	case "status":
 		return runVaultStatus(ctx, rest)
 	default:
-		return fmt.Errorf("unknown vault subcommand: %s", sub)
+		return usageErrorf("unknown vault subcommand: %s", sub)
 	}
 }
 
 func runVaultWatch(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("vault watch", flag.ContinueOnError)
+	fs := newCommandFlagSet("vault watch")
 	interval := fs.Duration("interval", 0, "override [vault].watch_interval")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
 	}
 	cfg, err := readOperationConfig(ctx)
 	if err != nil {
@@ -123,10 +132,13 @@ func runVaultWatch(ctx context.Context, args []string) error {
 }
 
 func runVaultExport(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("vault export", flag.ContinueOnError)
+	fs := newCommandFlagSet("vault export")
 	out := fs.String("out", "", "override vault output directory")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
 	}
 	cfg, err := readOperationConfig(ctx)
 	if err != nil {
@@ -163,7 +175,14 @@ func runVaultExport(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runVaultStatus(ctx context.Context, _ []string) error {
+func runVaultStatus(ctx context.Context, args []string) error {
+	fs := newCommandFlagSet("vault status")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
+	}
 	cfg, err := readOperationConfig(ctx)
 	if err != nil {
 		return err
@@ -179,25 +198,36 @@ func runVaultStatus(ctx context.Context, _ []string) error {
 
 // runEmbed handles the `embed` subcommand tree: status | backfill.
 func runEmbed(ctx context.Context, args []string) error {
+	const usage = "usage: mnemos embed <status|backfill>"
+	if err := treeHelp(args, usage); err != nil {
+		return err
+	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: mnemos embed <status|backfill>")
+		return usageErrorf("%s", usage)
 	}
 	sub := args[0]
 	switch sub {
 	case "status":
-		return runEmbedStatus(ctx)
-	case "backfill":
-		fs := flag.NewFlagSet("embed backfill", flag.ContinueOnError)
-		rebuild := fs.Bool("rebuild-incompatible", false, "also rebuild vectors with a different stored model or dimension")
-		if err := fs.Parse(args[1:]); err != nil {
+		fs := newCommandFlagSet("embed status")
+		if err := parseFlags(fs, args[1:]); err != nil {
 			return err
 		}
 		if fs.NArg() != 0 {
-			return fmt.Errorf("embed backfill: unexpected positional arguments")
+			return usageErrorf("unexpected positional arguments")
+		}
+		return runEmbedStatus(ctx)
+	case "backfill":
+		fs := newCommandFlagSet("embed backfill")
+		rebuild := fs.Bool("rebuild-incompatible", false, "also rebuild vectors with a different stored model or dimension")
+		if err := parseFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return usageErrorf("unexpected positional arguments")
 		}
 		return runEmbedBackfillOptions(ctx, embeddingBackfillOptions{RebuildIncompatible: *rebuild})
 	default:
-		return fmt.Errorf("unknown embed subcommand: %s", sub)
+		return usageErrorf("unknown embed subcommand: %s", sub)
 	}
 }
 

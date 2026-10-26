@@ -855,36 +855,14 @@ func (s *Server) handleSkillScore(ctx context.Context, _ *mcpsdk.CallToolRequest
 // statsArgs is empty — stats takes no parameters.
 type statsArgs struct{}
 
+// handleStats renders the typed statistics value through statsView, the same
+// formatter the mnemos://stats resource uses: one derivation, two surfaces.
 func (s *Server) handleStats(ctx context.Context, _ *mcpsdk.CallToolRequest, _ statsArgs) (*mcpsdk.CallToolResult, any, error) {
 	st, err := s.cfg.Memory.Stats(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	skillList, _ := s.cfg.Skills.List(ctx, "")
-	out := map[string]any{
-		"observations":      st.Observations,
-		"live_observations": st.LiveObservations,
-		"sessions":          st.Sessions,
-		"skills":            len(skillList),
-		"top_tags":          st.TopTags,
-		"recent_sessions":   st.RecentSessions,
-		"embedding":         map[string]any{"enabled": s.cfg.Memory.HybridEnabled()},
-	}
-	if s.cfg.StorageSize != nil {
-		if size, err := s.cfg.StorageSize(); err == nil {
-			out["storage_bytes"] = size
-		}
-	}
-	if s.cfg.Rumination != nil {
-		if c, err := s.cfg.Rumination.Counts(ctx); err == nil {
-			out["rumination"] = map[string]any{
-				"pending":   c.Pending,
-				"resolved":  c.Resolved,
-				"dismissed": c.Dismissed,
-			}
-		}
-	}
-	return jsonResult(out)
+	return jsonResult(s.statsView(ctx, st))
 }
 
 // ---- rumination --------------------------------------------------------

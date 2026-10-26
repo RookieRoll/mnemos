@@ -32,15 +32,19 @@ type Config struct {
 	Name    string
 	Version string
 	// Profile is fixed before construction and selects the startup tool set.
-	Profile     string
-	Memory      *memory.Service
-	Sessions    *session.Service
-	Skills      *skills.Service
-	Touches     memory.TouchStore
-	Prewarm     *prewarm.Service
-	Rumination  *rumination.Service // optional; enables the mnemos_ruminate_* tools
-	Logger      *slog.Logger
-	StorageSize func() (int64, error) // optional: reports storage_bytes in mnemos_stats
+	Profile    string
+	Memory     *memory.Service
+	Sessions   *session.Service
+	Skills     *skills.Service
+	Touches    memory.TouchStore
+	Prewarm    *prewarm.Service
+	Rumination *rumination.Service // optional; enables the mnemos_ruminate_* tools
+	Logger     *slog.Logger
+	// StorageSize is unused by the stats surfaces: they read
+	// memory.Stats.StorageBytes instead, so the resource, the tool, and
+	// mnemos stats all report one number. Retained while cmd/mnemos still
+	// supplies it.
+	StorageSize func() (int64, error)
 	// DefaultProject is the project a write lands in when the tool call
 	// names none. serve sets it to the basename of the directory it was
 	// started in, which Claude Code and Codex both set to the project

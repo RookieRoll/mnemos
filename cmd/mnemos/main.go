@@ -2,8 +2,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -13,41 +15,149 @@ import (
 	"github.com/polyxmedia/mnemos/internal/version"
 )
 
-func main() {
-	if len(os.Args) < 2 {
-		printUsage(os.Stderr)
-		os.Exit(2)
-	}
+// Process exit statuses. They are part of the CLI contract: scripts and hooks
+// need to tell "the invocation is wrong, do not retry" (2) from "the store
+// failed, a retry may help" (1).
+const (
+	exitSuccess = 0 // success, or an explicit help request
+	exitFailure = 1 // runtime or domain failure
+	exitUsage   = 2 // usage error: unknown command/flag, missing or invalid input
+)
 
+func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer cancel()
+	code := dispatch(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	cancel()
+	os.Exit(code)
+}
 
-	ctx, cmd, args, err := parseInvocation(ctx, os.Args[1:])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mnemos:", err)
-		os.Exit(2)
+// dispatch routes one argv slice onto a handler and maps its outcome to an
+// exit status. It is separate from main so tests can drive the whole command
+// surface without os.Exit.
+//
+// Help is answered here, before a handler runs (design D1): "mnemos prune -h"
+// must print usage and exit 0 without opening a store or pruning anything, and
+// that guarantee cannot depend on every handler remembering it.
+func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			printUsage(stdout)
+			return exitSuccess
+		}
+	}
+	if len(args) == 0 {
+		printUsage(stderr)
+		return exitUsage
 	}
 
+	ctx, cmd, rest, err := parseInvocation(ctx, args)
+	if err != nil {
+		fmt.Fprintln(stderr, "mnemos:", err)
+		return exitUsage
+	}
 	handler, ok := commands[cmd]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
-		printUsage(os.Stderr)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "unknown command: %s\n\n", cmd)
+		printUsage(stderr)
+		return exitUsage
 	}
+	if err := handler(ctx, rest); err != nil {
+		return commandFailure(cmd, err, stderr)
+	}
+	return exitSuccess
+}
 
-	if err := handler(ctx, args); err != nil {
-		os.Exit(commandFailure(cmd, err, os.Stderr))
+// commandFailure maps a handler error onto the exit taxonomy: help is success,
+// a usage error is 2, everything else — a domain or runtime failure — is 1.
+// An error that already wrote its machine-readable payload
+// (maintenanceJSONError) adds no human-oriented text to stderr.
+func commandFailure(cmd string, err error, stderr io.Writer) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return exitSuccess
+	}
+	var jsonErr maintenanceJSONError
+	if errors.As(err, &jsonErr) {
+		return exitFailure
+	}
+	var usageErr *usageError
+	if errors.As(err, &usageErr) {
+		fmt.Fprintf(stderr, "mnemos: %s: %v\n", cmd, err)
+		if usageErr.usage != "" {
+			fmt.Fprint(stderr, usageErr.usage)
+		}
+		return exitUsage
+	}
+	fmt.Fprintf(stderr, "mnemos: %s: %v\n", cmd, err)
+	return exitFailure
+}
+
+// usageError marks a failure caused by the invocation itself — an unknown
+// subcommand, an unknown flag, a missing required flag, an invalid value —
+// rather than by the work. dispatch exits 2 for it so a script can tell a
+// malformed invocation from a transient one.
+type usageError struct {
+	cause error
+	usage string // usage text to print after the message, when the source has one
+}
+
+func (e *usageError) Error() string { return e.cause.Error() }
+
+func (e *usageError) Unwrap() error { return e.cause }
+
+// usageErrorf builds a usage error. Handlers use it for anything that is the
+// caller's mistake rather than the store's.
+func usageErrorf(format string, args ...any) error {
+	return &usageError{cause: fmt.Errorf(format, args...)}
+}
+
+// newCommandFlagSet builds the flag set every handler parses through.
+// ContinueOnError is deliberate: flag.ExitOnError would call os.Exit inside a
+// handler and skip its deferred store closes.
+func newCommandFlagSet(name string) *flag.FlagSet {
+	return flag.NewFlagSet("mnemos "+name, flag.ContinueOnError)
+}
+
+// parseFlags parses args for a command's flag set and classifies the outcome:
+// nil on success, flag.ErrHelp when help was requested (dispatch exits 0), and
+// a usage error otherwise (dispatch exits 2). flag's own output is suppressed
+// so this one place decides where text goes — stdout for help, stderr for
+// errors — and a help request never reaches a handler's storage work.
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	var rendered bytes.Buffer
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() { writeFlagUsage(&rendered, fs) }
+	err := fs.Parse(args)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, flag.ErrHelp):
+		fmt.Fprint(os.Stdout, rendered.String())
+		return flag.ErrHelp
+	default:
+		return &usageError{cause: err, usage: rendered.String()}
 	}
 }
 
-func commandFailure(cmd string, err error, stderr io.Writer) int {
-	var jsonErr maintenanceJSONError
-	if errors.As(err, &jsonErr) {
-		return 1
+// writeFlagUsage renders "usage: mnemos <command> [flags]" plus the flag
+// defaults, so every subcommand help request has one shape.
+func writeFlagUsage(w io.Writer, fs *flag.FlagSet) {
+	fmt.Fprintf(w, "usage: %s [flags]\n", fs.Name())
+	out := fs.Output()
+	fs.SetOutput(w)
+	fs.PrintDefaults()
+	fs.SetOutput(out)
+}
+
+// treeHelp answers a help request for a subcommand tree (embed/skill/vault),
+// which selects a branch before any flag set exists. It prints the tree usage
+// and returns flag.ErrHelp when the request was a help one, and nil otherwise.
+func treeHelp(args []string, usage string) error {
+	if len(args) == 0 || (args[0] != "-h" && args[0] != "--help") {
+		return nil
 	}
-	fmt.Fprintf(stderr, "mnemos: %s: %v\n", cmd, err)
-	return 1
+	fmt.Fprintln(os.Stdout, usage)
+	return flag.ErrHelp
 }
 
 type handler func(ctx context.Context, args []string) error
@@ -94,7 +204,7 @@ func runHelp(_ context.Context, _ []string) error {
 	return nil
 }
 
-func printUsage(w *os.File) {
+func printUsage(w io.Writer) {
 	fmt.Fprintf(w, `mnemos — persistent memory and skills for AI coding agents
 
 Usage:
@@ -102,6 +212,7 @@ Usage:
 
 Global:
   --config FILE          Select a TOML file (default: ~/.mnemos/config.toml)
+  -h, --help             Print this usage text and exit
 
 Commands:
   serve [--http ADDR]    Start the MCP stdio server (or HTTP if --http given)

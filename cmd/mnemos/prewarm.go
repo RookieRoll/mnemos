@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,19 +34,13 @@ type hookInput struct {
 // a Claude Code SessionStart hook so session_start context gets pushed without
 // the agent having to call mnemos_session_start explicitly.
 //
-// Failure is intentionally quiet: if anything goes wrong (no config, DB
-// unreachable, scanner error) we exit 0 with empty stdout. The hook must not
-// block or spam the user; degraded-silent is the right failure mode.
+// Runtime failure is intentionally quiet: if anything goes wrong (no config,
+// DB unreachable, scanner error) we exit 0 with empty stdout. The hook must
+// not block or spam the user; degraded-silent is the right failure mode.
+// A malformed invocation is different: bad flags and invalid values are usage
+// errors (exit 2), because the caller — not the store — is what needs fixing.
 func runPrewarm(ctx context.Context, args []string) error {
-	cfg, err := readOperationConfig(ctx)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mnemos prewarm:", err)
-		return nil
-	}
-	if cfg.Integration.Disabled {
-		return nil
-	}
-	fs := flag.NewFlagSet("prewarm", flag.ContinueOnError)
+	fs := newCommandFlagSet("prewarm")
 	var (
 		project     = fs.String("project", "", "project name (default: basename of cwd)")
 		goal        = fs.String("goal", "", "optional goal")
@@ -58,16 +51,29 @@ func runPrewarm(ctx context.Context, args []string) error {
 		// cannot pipe stdin can still supply cwd and source.
 		payload = fs.String("payload", "", "hook payload as JSON (overrides stdin)")
 	)
-	if err := fs.Parse(args); err != nil {
+	// Parse before reading config so --help is answered without touching any
+	// user state, and a bad flag cannot be masked by an unreadable config.
+	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return usageErrorf("unexpected positional arguments")
+	}
+	cfg, err := readOperationConfig(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mnemos prewarm:", err)
+		return nil
+	}
+	if cfg.Integration.Disabled {
+		return nil
 	}
 
 	pwMode, err := parsePrewarmMode(*mode)
 	if err != nil {
-		return err
+		return usageErrorf("%v", err)
 	}
 	if *format != "text" && *format != "json" {
-		return fmt.Errorf("invalid format: %s", *format)
+		return usageErrorf("invalid format: %s (want text | json)", *format)
 	}
 
 	in := resolveHookPayload(*payload)
