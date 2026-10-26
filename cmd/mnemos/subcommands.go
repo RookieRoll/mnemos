@@ -124,7 +124,7 @@ func runVaultWatch(ctx context.Context, args []string) error {
 	}
 
 	ex := vault.NewExporter(vault.Config{
-		Root: root, Obs: d.db.Observations(),
+		Root: root, StorePath: d.cfg.Storage.Path, Obs: d.db.Observations(),
 		Sessions: d.db.Sessions(), Skills: d.db.Skills(),
 	})
 	fmt.Fprintf(os.Stderr, "vault watch: %s every %s (ctrl-c to stop)\n", root, every)
@@ -163,7 +163,7 @@ func runVaultExport(ctx context.Context, args []string) error {
 	}
 
 	ex := vault.NewExporter(vault.Config{
-		Root: root, Obs: d.db.Observations(),
+		Root: root, StorePath: d.cfg.Storage.Path, Obs: d.db.Observations(),
 		Sessions: d.db.Sessions(), Skills: d.db.Skills(),
 	})
 	stats, err := ex.ExportAll(ctx)
@@ -175,6 +175,9 @@ func runVaultExport(ctx context.Context, args []string) error {
 	return nil
 }
 
+// runVaultStatus projects what is actually on disk. It deliberately does not
+// call loadDeps: opening the store through storage.Open would create or
+// migrate it, and status must stay a read-only projection.
 func runVaultStatus(ctx context.Context, args []string) error {
 	fs := newCommandFlagSet("vault status")
 	if err := parseFlags(fs, args); err != nil {
@@ -187,12 +190,40 @@ func runVaultStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("vault path: %s\n", cfg.Vault.Path)
-	if _, err := os.Stat(cfg.Vault.Path); err != nil {
-		fmt.Println("status:     not yet exported")
-		return nil
+	interval, err := vault.ParseInterval(cfg.Vault.WatchInterval)
+	if err != nil || interval <= 0 {
+		interval = 5 * time.Minute
 	}
-	fmt.Println("status:     exists")
+	status := vault.InspectStatus(ctx, vault.StatusOptions{
+		Root:      cfg.Vault.Path,
+		StorePath: cfg.Storage.Path,
+		Interval:  interval,
+	})
+	fmt.Printf("vault path: %s\n", status.Root)
+	if !status.DirExists {
+		fmt.Println("directory:  missing")
+	}
+	switch {
+	case status.ManifestError != "":
+		fmt.Printf("last_exported_at: unknown (%s)\n", status.ManifestError)
+	case status.ManifestSeen:
+		fmt.Printf("last_exported_at: %s\n", status.LastExportedAt.UTC().Format(time.RFC3339))
+	default:
+		fmt.Println("last_exported_at: never")
+	}
+	if status.PendingKnown {
+		fmt.Printf("pending %d\n", status.Pending)
+	} else {
+		fmt.Println("pending: unknown")
+	}
+	switch {
+	case status.WatcherRunning:
+		fmt.Println("watcher: running")
+	case status.HeartbeatSeen && !status.HeartbeatAt.IsZero():
+		fmt.Printf("watcher: stopped (last heartbeat %s)\n", status.HeartbeatAt.UTC().Format(time.RFC3339))
+	default:
+		fmt.Println("watcher: stopped")
+	}
 	return nil
 }
 

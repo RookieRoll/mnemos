@@ -110,8 +110,8 @@ func TestVaultDisabledCommandsHaveNoOutputOrStorageEffectsAndStatusWorks(t *test
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, filepath.ToSlash(vaultPath)) || !strings.Contains(out, "not yet exported") {
-		t.Fatalf("vault status should remain available: %s", out)
+	if !strings.Contains(out, filepath.ToSlash(vaultPath)) || !strings.Contains(out, "last_exported_at: never") || !strings.Contains(out, "watcher: stopped") {
+		t.Fatalf("vault status should report on-disk provenance even when disabled: %s", out)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 		t.Fatalf("vault status opened storage: %v", err)

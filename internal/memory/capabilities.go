@@ -59,12 +59,36 @@ type Capabilities struct {
 
 	// PinnedMemory reports first-class core memory support: observations can
 	// be pinned to bypass recency decay and earn Tier-0 prewarm delivery.
+	// It is true in the default core profile: pinning is live there through
+	// the pinned parameter of mnemos_save, so the flag must not be downgraded
+	// to false just because the standalone pin tool is not registered.
 	PinnedMemory bool `json:"pinned_memory"`
+
+	// PinnedMemorySemantics states, in words, where pin state can actually be
+	// changed. A bare true flag invites the reader to assume post-hoc pinning
+	// is available on the default surface, so the flag ships with the profile
+	// boundary it really has: pinning is live on core at save time, while the
+	// standalone tool that flips pin state after the fact is maintenance-only.
+	PinnedMemorySemantics string `json:"pinned_memory_semantics"`
 
 	// GraphRetrieval reports 1-hop expansion along refines and derived_from
 	// edges and contradiction-aware scoring during memory search.
 	GraphRetrieval bool `json:"graph_retrieval"`
 }
+
+// pinnedMemorySemantics is the sentence that limits PinnedMemory. Unlike the
+// dedup window it is a constant, not live state, because the boundary comes
+// from the fixed tool registry rather than from configuration: pinning itself
+// is live in the default core profile through the pinned parameter of
+// mnemos_save, while the standalone tool that changes pin state after the fact
+// (mnemos_pin) is registered only by the maintenance profile. It ships for the
+// same reason as the dedup sentence: a bare flag invites the reader to imagine
+// capability the running profile does not have.
+const pinnedMemorySemantics = "pinned: live in the default core profile through the pinned parameter of " +
+	"mnemos_save (the observation is exempt from recency decay, its expiry is cleared, and it holds a " +
+	"Tier-0 prewarm slot); post-hoc pin state changes are maintenance-only, because the standalone " +
+	"mnemos_pin tool is registered only by the maintenance profile, so under core pin state can be set " +
+	"only at save time"
 
 // Capabilities returns the live capability document for this service. Read it
 // fresh each call so HybridRetrieval reflects current embedder state.
@@ -82,7 +106,10 @@ func (s *Service) Capabilities() Capabilities {
 		// Service.Restore round-trips a full dump verbatim.
 		PortableExport: true,
 		PinnedMemory:   true,
-		GraphRetrieval: true,
+		// The flag never travels alone: the sentence names the profile that can
+		// change pin state after a save.
+		PinnedMemorySemantics: pinnedMemorySemantics,
+		GraphRetrieval:        true,
 	}
 	c.NearDupWindow, c.DeterministicDedupSemantics = s.dedupSemantics()
 	c.Tiers = c.tiers()

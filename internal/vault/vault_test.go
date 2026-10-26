@@ -29,10 +29,11 @@ func newVault(t *testing.T) (*vault.Exporter, *memory.Service, *session.Service,
 
 	root := filepath.Join(dir, "vault")
 	ex := vault.NewExporter(vault.Config{
-		Root:     root,
-		Obs:      db.Observations(),
-		Sessions: db.Sessions(),
-		Skills:   db.Skills(),
+		Root:      root,
+		StorePath: filepath.Join(dir, "m.db"),
+		Obs:       db.Observations(),
+		Sessions:  db.Sessions(),
+		Skills:    db.Skills(),
 	})
 	return ex, mem, sess, skl, root
 }

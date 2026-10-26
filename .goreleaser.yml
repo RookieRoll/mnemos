@@ -42,6 +42,10 @@ archives:
     files:
       - LICENSE
       - README.md
+      # The skill docs referenced by SKILL.md ship next to the binary so the
+      # relative docs/*.md references resolve offline (fileglob includes the
+      # whole tree: docs/API.md, docs/spec/*.md, docs/research/*.md).
+      - docs
 
 checksum:
   name_template: "checksums.txt"

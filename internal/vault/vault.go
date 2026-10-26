@@ -37,20 +37,24 @@ type obsRW interface {
 }
 
 type Exporter struct {
-	root  string
-	obs   obsRW
-	sess  session.Store
-	skill skills.Store
-	log   *slog.Logger
+	root      string
+	storePath string
+	obs       obsRW
+	sess      session.Store
+	skill     skills.Store
+	log       *slog.Logger
 }
 
 // Config bundles dependencies.
 type Config struct {
-	Root     string
-	Obs      obsRW
-	Sessions session.Store
-	Skills   skills.Store
-	Logger   *slog.Logger
+	Root string
+	// StorePath is the database the export reads. It is recorded in the
+	// vault-local export manifest so status can report export provenance.
+	StorePath string
+	Obs       obsRW
+	Sessions  session.Store
+	Skills    skills.Store
+	Logger    *slog.Logger
 }
 
 // NewExporter constructs an Exporter.
@@ -59,11 +63,12 @@ func NewExporter(cfg Config) *Exporter {
 		cfg.Logger = slog.Default()
 	}
 	return &Exporter{
-		root:  cfg.Root,
-		obs:   cfg.Obs,
-		sess:  cfg.Sessions,
-		skill: cfg.Skills,
-		log:   cfg.Logger,
+		root:      cfg.Root,
+		storePath: cfg.StorePath,
+		obs:       cfg.Obs,
+		sess:      cfg.Sessions,
+		skill:     cfg.Skills,
+		log:       cfg.Logger,
 	}
 }
 
@@ -144,6 +149,17 @@ func (e *Exporter) ExportAll(ctx context.Context) (ExportStats, error) {
 
 	// Dashboard.
 	if err := e.writeIndex(sessions, sks, stats); err != nil {
+		return stats, err
+	}
+
+	// Provenance is written last and atomically, after every exported file:
+	// an interrupted export therefore leaves the previous manifest, and the
+	// previous watermark, intact.
+	if err := WriteExportManifest(e.root, ExportManifest{
+		ExportedAt:   time.Now().UTC(),
+		Observations: stats.Observations,
+		Store:        e.storePath,
+	}); err != nil {
 		return stats, err
 	}
 

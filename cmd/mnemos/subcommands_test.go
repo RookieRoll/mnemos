@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/polyxmedia/mnemos/internal/config"
+	"github.com/polyxmedia/mnemos/internal/vault"
 )
 
 // homeWithConfig prepares an isolated home directory and writes a config
@@ -177,13 +179,92 @@ func TestRunEmbedUnknownSubcommand(t *testing.T) {
 	}
 }
 
+func TestRunVaultStatusAfterExport(t *testing.T) {
+	homeWithConfig(t, "[vault]\nenabled = true\n")
+	captureStdout(t, func() {
+		if err := runVaultExport(context.Background(), nil); err != nil {
+			t.Fatalf("vault export: %v", err)
+		}
+	})
+	out := captureStdout(t, func() {
+		if err := runVaultStatus(context.Background(), nil); err != nil {
+			t.Fatalf("vault status: %v", err)
+		}
+	})
+	if strings.Contains(out, "last_exported_at: never") {
+		t.Errorf("status ignored the export manifest:\n%s", out)
+	}
+	if !strings.Contains(out, "pending 0") {
+		t.Errorf("status should report nothing pending after export:\n%s", out)
+	}
+	if !strings.Contains(out, "watcher: stopped") {
+		t.Errorf("status should report the watcher stopped:\n%s", out)
+	}
+}
+
+func TestRunVaultStatusCreatesNothing(t *testing.T) {
+	home := homeWithConfig(t, "[vault]\nenabled = true\n")
+	vaultDir := filepath.Join(home, ".mnemos", "vault")
+	if err := os.MkdirAll(vaultDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(vaultDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		if err := runVaultStatus(context.Background(), nil); err != nil {
+			t.Fatalf("vault status: %v", err)
+		}
+	})
+	after, err := os.ReadDir(vaultDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != len(after) {
+		t.Fatalf("status changed the vault directory: before=%v after=%v", before, after)
+	}
+}
+
+func TestRunVaultStatusNamesStaleHeartbeat(t *testing.T) {
+	home := homeWithConfig(t, "[vault]\nenabled = true\n")
+	vaultDir := filepath.Join(home, ".mnemos", "vault")
+	if err := os.MkdirAll(vaultDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().UTC().Add(-time.Hour)
+	if err := vault.WriteWatchHeartbeat(vaultDir, vault.WatchHeartbeat{
+		PID: 99, StartedAt: stale, HeartbeatAt: stale,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := runVaultStatus(context.Background(), nil); err != nil {
+			t.Fatalf("vault status: %v", err)
+		}
+	})
+	if !strings.Contains(out, "watcher: stopped (last heartbeat "+stale.Format(time.RFC3339)+")") {
+		t.Fatalf("status did not name the stale heartbeat time:\n%s", out)
+	}
+}
+
 func TestRunVaultStatusBeforeExport(t *testing.T) {
 	homeWithConfig(t, "")
 	out := captureStdout(t, func() {
 		_ = runVaultStatus(context.Background(), nil)
 	})
-	// Fresh config creates a vault path but nothing's been exported yet.
-	if !strings.Contains(out, "vault path") {
-		t.Errorf("expected vault path line, got: %s", out)
+	// A vault directory mnemos never wrote to must say so instead of looking
+	// healthy: no manifest is "never", the store is absent so pending is
+	// unknown, and no heartbeat is "stopped".
+	for _, want := range []string{
+		"vault path",
+		"directory:  missing",
+		"last_exported_at: never",
+		"pending: unknown",
+		"watcher: stopped",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output missing %q:\n%s", want, out)
+		}
 	}
 }
