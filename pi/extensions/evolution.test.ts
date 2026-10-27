@@ -70,7 +70,7 @@ test("every pi session-start reason gets one fresh non-accumulating prewarm", as
     number++;
     await h.fire("session_start", { reason });
     const first = await h.fire("before_agent_start", { prompt: "", systemPrompt: "BASE" });
-    assert.equal(first.systemPrompt, `BASE\nPREWARM-${number}`);
+    assert.ok(first.systemPrompt.startsWith(`BASE\nPREWARM-${number}\nmnemos_session_id: S${number}\nmnemos_host_session_id: `));
     assert.equal(await h.fire("before_agent_start", { prompt: "", systemPrompt: "BASE" }), undefined);
   }
 });

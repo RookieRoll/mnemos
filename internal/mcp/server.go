@@ -9,6 +9,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/polyxmedia/mnemos/internal/continuityflow"
@@ -22,8 +23,10 @@ import (
 // Server is the Mnemos MCP server. It is a thin wrapper around the SDK
 // server, holding the service dependencies our tool handlers close over.
 type Server struct {
-	sdk *mcpsdk.Server
-	cfg Config
+	sdk             *mcpsdk.Server
+	cfg             Config
+	currentMu       sync.Mutex
+	currentSessions map[*mcpsdk.ServerSession]string
 }
 
 // Config bundles the dependencies a Server needs. Every field except
@@ -83,7 +86,7 @@ func NewServer(cfg Config) *Server {
 		Version: cfg.Version,
 	}, nil)
 
-	s := &Server{sdk: sdk, cfg: cfg}
+	s := &Server{sdk: sdk, cfg: cfg, currentSessions: make(map[*mcpsdk.ServerSession]string)}
 	sdk.AddReceivingMiddleware(continuityValidationMiddleware)
 	s.registerTools()
 	s.registerResources()
@@ -99,3 +102,29 @@ func (s *Server) ServeStdio(ctx context.Context) error {
 // SDK returns the underlying SDK server. Useful for tests that need to
 // wire an in-memory transport pair.
 func (s *Server) SDK() *mcpsdk.Server { return s.sdk }
+
+// bindCurrentSession records only a successful start on this MCP connection.
+// A shared SDK server can serve several connections to the same project.
+func (s *Server) bindCurrentSession(connection *mcpsdk.ServerSession, id string) {
+	if connection == nil {
+		return
+	}
+	s.currentMu.Lock()
+	_, tracked := s.currentSessions[connection]
+	s.currentSessions[connection] = id
+	s.currentMu.Unlock()
+	if !tracked {
+		go func() {
+			_ = connection.Wait()
+			s.currentMu.Lock()
+			delete(s.currentSessions, connection)
+			s.currentMu.Unlock()
+		}()
+	}
+}
+
+func (s *Server) currentSession(connection *mcpsdk.ServerSession) string {
+	s.currentMu.Lock()
+	defer s.currentMu.Unlock()
+	return s.currentSessions[connection]
+}

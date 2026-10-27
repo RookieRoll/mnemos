@@ -2,6 +2,7 @@ package memory_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,6 +78,173 @@ func nearDupNote(content string) memory.SaveInput {
 	}
 }
 
+func TestNearDuplicatePreservesTypeAndPin(t *testing.T) {
+	for _, sameSession := range []bool{false, true} {
+		for _, intent := range []string{"convention", "pin"} {
+			t.Run(fmt.Sprintf("%s/session=%v", intent, sameSession), func(t *testing.T) {
+				f := newNearDupFixture(t, nil)
+				in := nearDupNote("Use WAL.")
+				if sameSession {
+					f.createSession(t, "same-session")
+					in.SessionID = "same-session"
+				}
+				first := f.save(t, in)
+				in.Content = "Use WAL!"
+				if intent == "convention" {
+					in.Type = memory.TypeConvention
+				} else {
+					in.Pinned = true
+				}
+				second := f.save(t, in)
+				if second.Observation.ID == first.Observation.ID || second.Observation.Type != in.Type || second.Observation.Pinned != in.Pinned {
+					t.Fatal("near-duplicate fold discarded the new write intent")
+				}
+			})
+		}
+	}
+}
+
+func TestNearDuplicatePreservesScopeAndTime(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*nearDupFixture, *memory.SaveInput)
+	}{
+		{"agent", func(_ *nearDupFixture, in *memory.SaveInput) { in.AgentID = "other" }},
+		{"project", func(_ *nearDupFixture, in *memory.SaveInput) { in.Project = "other" }},
+		{"topic", func(_ *nearDupFixture, in *memory.SaveInput) { in.TopicKey = "other" }},
+		{"future", func(f *nearDupFixture, in *memory.SaveInput) { future := f.now.Add(time.Hour); in.ValidFrom = &future }},
+		{"past", func(f *nearDupFixture, in *memory.SaveInput) { past := f.now.Add(-time.Hour); in.ValidFrom = &past }},
+		{"valid until", func(f *nearDupFixture, in *memory.SaveInput) { until := f.now.Add(time.Hour); in.ValidUntil = &until }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newNearDupFixture(t, nil)
+			f.createSession(t, "same-session")
+			in := memory.SaveInput{SessionID: "same-session", Title: "same title", Content: "first body", Type: memory.TypeContext, Project: "proj"}
+			first := f.save(t, in)
+			in.Content = "different body"
+			tc.change(f, &in)
+			second := f.save(t, in)
+			if first.Observation.ID == second.Observation.ID {
+				t.Fatal("distinct scope or fact time was merged")
+			}
+		})
+	}
+}
+
+func TestNearDuplicateNumericAndExistingKey(t *testing.T) {
+	f := newNearDupFixture(t, nil)
+	first := f.save(t, nearDupNote("limit 1.5 seconds"))
+	// Simulate a derived key written by the old rule that removed decimal points.
+	secondInput := nearDupNote("limit 15 seconds")
+	other := f.save(t, secondInput)
+	if first.Observation.ID == other.Observation.ID {
+		t.Fatal("decimal was folded")
+	}
+	if _, err := f.db.SQL().Exec(`UPDATE observations SET content_hash_normalized = (SELECT content_hash_normalized FROM observations WHERE id = ?) WHERE id = ?`, other.Observation.ID, first.Observation.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Retire the actual matching row, leaving only the stale-key candidate.
+	if _, err := f.db.SQL().Exec(`UPDATE observations SET invalidated_at = ? WHERE id = ?`, f.now, other.Observation.ID); err != nil {
+		t.Fatal(err)
+	}
+	third := f.save(t, secondInput)
+	if third.Observation.ID == first.Observation.ID {
+		t.Fatal("stale normalized key caused incorrect fold")
+	}
+}
+
+func TestNearDuplicateSessionTitleKeepsNumericChanges(t *testing.T) {
+	f := newNearDupFixture(t, nil)
+	f.createSession(t, "numeric-session")
+	in := memory.SaveInput{SessionID: "numeric-session", Project: "proj", Title: "limit", Content: "limit 1.5 seconds", Type: memory.TypeContext}
+	first := f.save(t, in)
+	in.Content = "limit 15 seconds"
+	second := f.save(t, in)
+	if first.Observation.ID == second.Observation.ID {
+		t.Fatal("numeric change folded through session/title")
+	}
+}
+
+func TestExactDuplicateFutureStart(t *testing.T) {
+	f := newNearDupFixture(t, nil)
+	in := nearDupNote("same body")
+	first := f.save(t, in)
+	future := f.now.Add(time.Hour)
+	in.ValidFrom = &future
+	second := f.save(t, in)
+	if first.Observation.ID == second.Observation.ID || !second.Observation.ValidFrom.Equal(future) {
+		t.Fatal("future validity lost to exact dedup")
+	}
+}
+
+func TestRepeatedExplicitFactTimeDeduplicates(t *testing.T) {
+	for _, kind := range []string{"past", "future", "until", "interval"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newNearDupFixture(t, nil)
+			in := nearDupNote("same temporal fact")
+			past, future, until := f.now.Add(-time.Hour), f.now.Add(time.Hour), f.now.Add(2*time.Hour)
+			switch kind {
+			case "past":
+				in.ValidFrom = &past
+			case "future":
+				in.ValidFrom = &future
+			case "until":
+				in.ValidUntil = &until
+			case "interval":
+				in.ValidFrom, in.ValidUntil = &future, &until
+			}
+			first := f.save(t, in)
+			f.advance(time.Minute)
+			second := f.save(t, in)
+			if first.Observation.ID != second.Observation.ID || !second.Deduped {
+				t.Fatal("identical fact interval inserted twice")
+			}
+			changed := until.Add(time.Hour)
+			in.ValidUntil = &changed
+			if third := f.save(t, in); third.Observation.ID == first.Observation.ID {
+				t.Fatal("different fact interval was discarded")
+			}
+		})
+	}
+}
+
+func TestLeadingDecimalsDoNotMerge(t *testing.T) {
+	for _, pair := range [][2]string{{"limit .5 seconds", "limit 5 seconds"}, {"limit -.5 seconds", "limit -5 seconds"}} {
+		for _, sameSession := range []bool{false, true} {
+			name := pair[0]
+			if sameSession {
+				name += "/same session"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newNearDupFixture(t, nil)
+				in := nearDupNote(pair[0])
+				if sameSession {
+					f.createSession(t, "decimal")
+					in.SessionID = "decimal"
+				}
+				first := f.save(t, in)
+				in.Content = pair[1]
+				if second := f.save(t, in); second.Observation.ID == first.Observation.ID {
+					t.Fatal("different decimal values merged")
+				}
+			})
+		}
+	}
+}
+
+func TestNearDuplicateDoesNotLoseSurvivorEnd(t *testing.T) {
+	f := newNearDupFixture(t, nil)
+	until := f.now.Add(time.Hour)
+	in := nearDupNote("same body")
+	in.ValidUntil = &until
+	first := f.save(t, in)
+	in.ValidUntil = nil
+	second := f.save(t, in)
+	if first.Observation.ID == second.Observation.ID {
+		t.Fatal("unbounded input was folded into a finite survivor")
+	}
+}
+
 // TestSaveNearDuplicateDecision is the table for the whole save-path order:
 // exact hash, normalized hash, session and title, and the out-of-window hint.
 // Every case runs against the real SQLite store, so the transaction that
@@ -121,9 +289,9 @@ func TestSaveNearDuplicateDecision(t *testing.T) {
 		wantRows  int
 	}{
 		{
-			name: "punctuation only merges", window: &window, gap: time.Hour,
+			name: "trailing prose punctuation merges", window: &window, gap: time.Hour,
 			first:      nearDupNote("Enable WAL for concurrent readers"),
-			second:     nearDupNote("Enable WAL, for concurrent readers!"),
+			second:     nearDupNote("Enable WAL for concurrent readers!"),
 			wantMerged: true, wantReason: memory.NearDupReasonContentHash, wantRows: 1,
 		},
 		{
@@ -171,33 +339,33 @@ func TestSaveNearDuplicateDecision(t *testing.T) {
 		{
 			name: "different project does not merge", window: &window, gap: time.Hour,
 			first:    nearDupNote("Enable WAL for concurrent readers"),
-			second:   memory.SaveInput{Title: "deploy note", Content: "Enable WAL, for concurrent readers!", Type: memory.TypePattern, Project: "other"},
+			second:   memory.SaveInput{Title: "deploy note", Content: "Enable WAL for concurrent readers!", Type: memory.TypePattern, Project: "other"},
 			wantRows: 2,
 		},
 		{
 			name: "exactly at the window boundary still merges", window: &window, gap: memory.DefaultNearDupWindow,
 			first:      nearDupNote("Enable WAL for concurrent readers"),
-			second:     nearDupNote("Enable WAL, for concurrent readers!"),
+			second:     nearDupNote("Enable WAL for concurrent readers!"),
 			wantMerged: true, wantReason: memory.NearDupReasonContentHash, wantRows: 1,
 		},
 		{
 			name: "outside the window inserts and hints", window: &window, gap: memory.DefaultNearDupWindow + time.Second,
 			first:    nearDupNote("Enable WAL for concurrent readers"),
-			second:   nearDupNote("Enable WAL, for concurrent readers!"),
+			second:   nearDupNote("Enable WAL for concurrent readers!"),
 			wantHint: true,
 			wantRows: 2,
 		},
 		{
 			name: "far outside the window still hints only", window: &window, gap: 30 * 24 * time.Hour,
 			first:    nearDupNote("Enable WAL for concurrent readers"),
-			second:   nearDupNote("Enable WAL, for concurrent readers!"),
+			second:   nearDupNote("Enable WAL for concurrent readers!"),
 			wantHint: true,
 			wantRows: 2,
 		},
 		{
 			name: "disabled window merges nothing", window: &disabled, gap: time.Hour,
 			first:    nearDupNote("Enable WAL for concurrent readers"),
-			second:   nearDupNote("Enable WAL, for concurrent readers!"),
+			second:   nearDupNote("Enable WAL for concurrent readers!"),
 			wantRows: 2,
 		},
 		{
@@ -246,7 +414,7 @@ func TestSaveNearDuplicateDecision(t *testing.T) {
 		{
 			name: "raw tier is never folded into a curated survivor", window: &window, gap: time.Minute,
 			first:    nearDupNote("Enable WAL for concurrent readers"),
-			second:   rawNote("Enable WAL, for concurrent readers!"),
+			second:   rawNote("Enable WAL for concurrent readers!"),
 			wantRows: 2,
 		},
 	}

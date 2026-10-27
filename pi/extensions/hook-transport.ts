@@ -10,6 +10,7 @@ import type { MnemosRoute } from "./bootstrap.ts";
 /** The neutral result envelope every hook emits under `--format json`. */
 export interface HookResult {
   session_id?: string;
+  host_session_id?: string;
   context?: string;
   block?: boolean;
   block_reason?: string;
@@ -28,7 +29,7 @@ export interface HookPayload {
   tool_input?: Record<string, unknown>;
   /** SessionEnd reason. */
   reason?: string;
-  /** mnemos session id, when the caller already knows it. */
+  /** Host identity at prewarm startup; exact Mnemos ID for subsequent neutral hooks. */
   session_id?: string;
 }
 
@@ -81,7 +82,12 @@ export function createSpawnInvoker(pi: PiApi, route: MnemosRoute, disabled = fal
       if (disabled) return EMPTY;
       const raw = await runCapture(pi, route, ["prewarm"], payload, timeoutMs);
       const text = (raw as { text?: unknown }).text;
-      return typeof text === "string" ? { ...raw, context: text } : raw;
+      const id = sessionIdOf(raw);
+      const host = raw.host_session_id ?? payload.session_id;
+      const identity = id === "" ? "" : `mnemos_session_id: ${id}` +
+        (host ? `\nmnemos_host_session_id: ${host}` : "");
+      const context = [typeof text === "string" ? text : "", identity].filter(Boolean).join("\n");
+      return context === "" ? raw : { ...raw, context };
     },
     async run(subcommand, payload, timeoutMs) {
       if (disabled) return EMPTY;

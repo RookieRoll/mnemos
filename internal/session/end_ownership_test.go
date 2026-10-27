@@ -116,7 +116,7 @@ func TestEndOwnedSessionOwnership(t *testing.T) {
 			name: "bound session closes",
 			setup: func(t *testing.T, f *endFixture) (string, session.EndInvocation) {
 				sess := f.open(t, session.OpenInput{Project: "api", Goal: "g"})
-				return sess.ID, session.EndInvocation{Project: "api"}
+				return sess.ID, session.EndInvocation{CurrentSessionID: sess.ID, Project: "api"}
 			},
 			wantClosed: true,
 		},
@@ -130,12 +130,20 @@ func TestEndOwnedSessionOwnership(t *testing.T) {
 			wantClosed: true,
 		},
 		{
-			name: "project-less invocation binds the newest open session",
+			name: "project-less invocation cannot infer the newest session",
 			setup: func(t *testing.T, f *endFixture) (string, session.EndInvocation) {
 				sess := f.open(t, session.OpenInput{Project: "api"})
 				return sess.ID, session.EndInvocation{}
 			},
-			wantClosed: true,
+			wantNotOwned: true,
+		},
+		{
+			name: "latest session of another host is not owned by a project label",
+			setup: func(t *testing.T, f *endFixture) (string, session.EndInvocation) {
+				foreign := f.open(t, session.OpenInput{Project: "api", HostSessionID: "other-terminal"})
+				return foreign.ID, session.EndInvocation{Project: "api"}
+			},
+			wantNotOwned: true,
 		},
 		{
 			name: "foreign same-project id rejected and stays open",

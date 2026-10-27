@@ -47,14 +47,34 @@ type EvolutionSave struct {
 	ReplacesID       string
 	UnpinReplacement bool
 	TopicExplicit    bool
-	RequestHash      string
-	Now              time.Time
+	// ValidFromExplicit distinguishes a requested fact time from the default
+	// save time, so ordinary repeated saves still deduplicate across sessions.
+	ValidFromExplicit bool
+	RequestHash       string
+	Now               time.Time
 	// NearDupWindow is the near-duplicate merge window the store applies after
 	// the exact content-hash dedup misses. Zero disables near-duplicate merging
 	// (exact dedup only). The store resolves it inside the same write
 	// transaction as the insert, so the lookup and the fold cannot straddle
 	// another writer.
 	NearDupWindow time.Duration
+}
+
+// SameSaveFactTime reports whether deduplication preserves the requested fact
+// interval. Omitted start times mean "effective now", not a new version on
+// every retry; explicit times must match the stored boundary exactly.
+func SameSaveFactTime(existing Observation, validFrom, validUntil *time.Time, now time.Time) bool {
+	if validFrom != nil {
+		if !existing.ValidFrom.Equal(*validFrom) {
+			return false
+		}
+	} else if existing.ValidFrom.After(now) {
+		return false
+	}
+	if validUntil == nil || existing.ValidUntil == nil {
+		return validUntil == nil && existing.ValidUntil == nil
+	}
+	return existing.ValidUntil.Equal(*validUntil)
 }
 
 // EvolutionStore is the transaction boundary consumed by evolution services.

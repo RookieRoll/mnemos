@@ -291,12 +291,19 @@ Returns `{session_id, started_at, prewarm: {text, token_estimate, section_count,
 | Param | Required | Notes |
 |---|---|---|
 | `session_id` | ✓ | |
+| `host_session_id` |   | for legacy hook starts, copy `mnemos_host_session_id` from startup context; must match that session's recorded host |
 | `summary` | ✓ | what shipped, what broke, what was learned |
 | `reflection` |   | transferable lessons — drives skill promotion |
 | `status` |   | `ok` \| `failed` \| `blocked` \| `abandoned` |
 | `outcome_tags` |   | short tags characterising the outcome |
 
 Observations from `failed` sessions get a ranking boost — agents learn faster from what went wrong.
+
+Hook startup returns both the current Mnemos ID and its host ID. Pass those exact
+values when closing a legacy hook session. MCP-started sessions use the binding
+on that MCP connection; continuity-bound sessions use their workspace receipt.
+An explicit `prewarm --open-session` without a host payload also returns an
+independent generated host identity; use the same two fields to close that session.
 
 ### `mnemos_context`
 Two modes.

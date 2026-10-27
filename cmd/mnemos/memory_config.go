@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/polyxmedia/mnemos/internal/config"
 	"github.com/polyxmedia/mnemos/internal/memory"
 )
@@ -13,6 +15,13 @@ func memoryServiceConfig(search config.SearchConfig, store memory.Store, embedde
 	rank.DecayRate = search.DecayRate
 	hybrid := memory.DefaultHybridParams()
 	hybrid.Alpha = search.HybridAlpha
+	// File loading validates this duration. A zero-valued SearchConfig used by
+	// an embedded caller keeps the service default rather than disabling it.
+	var nearDupWindow *time.Duration
+	if search.NearDupWindow != "" {
+		window, _ := time.ParseDuration(search.NearDupWindow)
+		nearDupWindow = &window
+	}
 	return memory.Config{Store: store, Embedder: embedder, Injections: recorder, RankParams: rank, Hybrid: hybrid,
-		DefaultLimit: search.DefaultLimit, MaxContextTokens: search.MaxContextTokens}
+		DefaultLimit: search.DefaultLimit, MaxContextTokens: search.MaxContextTokens, NearDupWindow: nearDupWindow}
 }

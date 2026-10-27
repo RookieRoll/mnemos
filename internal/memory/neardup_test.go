@@ -8,12 +8,8 @@ import (
 	"time"
 )
 
-// TestNormalizeContentForHash pins the normalization contract: letters, digits,
-// combining marks and the meaning-bearing signs - + = % survive, whitespace runs
-// collapse to a single space so word boundaries survive, other punctuation is
-// dropped, and the surviving runes are Unicode-lowercased. Anything stronger
-// (stemming, synonyms, locale rules) would be inference, which the memory layer
-// does not do.
+// TestNormalizeContentForHash distinguishes plain-prose equivalence from
+// syntax-bearing literal comparison, without parsing a programming language.
 func TestNormalizeContentForHash(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -22,15 +18,19 @@ func TestNormalizeContentForHash(t *testing.T) {
 	}{
 		{name: "already normalized", content: "use wal mode", want: "use wal mode"},
 		{name: "lowercased", content: "Use WAL Mode", want: "use wal mode"},
-		{name: "punctuation dropped", content: "Use WAL, Mode!", want: "use wal mode"},
+		{name: "trailing prose punctuation dropped", content: "Use WAL Mode!", want: "use wal mode"},
+		{name: "internal punctuation preserved", content: "Use WAL, Mode!", want: "Use WAL, Mode!"},
 		{name: "whitespace collapsed to one space", content: "  use\twal\nmode  ", want: "use wal mode"},
-		{name: "digits kept", content: "sqlite 3.45.1", want: "sqlite 3451"},
-		{name: "cjk letters kept", content: "使用 WAL 模式，记得", want: "使用 wal 模式记得"},
-		{name: "math symbols kept", content: "done ✅ ok → yes", want: "done ok → yes"},
+		{name: "numeric separators kept", content: "sqlite 3.45.1", want: "sqlite 3.45.1"},
+		{name: "cjk interior punctuation kept", content: "使用 WAL 模式，记得", want: "使用 WAL 模式，记得"},
+		{name: "symbols kept", content: "done ✅ ok → yes", want: "done ✅ ok → yes"},
 		{name: "accents lowercased not stripped", content: "ÜBER Straße", want: "über straße"},
 		{name: "word boundary kept", content: "ab c", want: "ab c"},
 		{name: "minus and assignment signs kept", content: "x=-1", want: "x=-1"},
 		{name: "plus equals percent kept", content: "a+b=c 50%", want: "a+b=c 50%"},
+		{name: "code punctuation kept", content: "C# user_id a&&b", want: "C# user_id a&&b"},
+		{name: "negation kept", content: "x!=y !ready !!ready !(ready)", want: "x!=y !ready !!ready !(ready)"},
+		{name: "literal case and spaces kept", content: "  Set token=\"Ab  c\"  ", want: "Set token=\"Ab  c\""},
 		{name: "combining mark kept", content: "e\u0301", want: "e\u0301"},
 		{name: "punctuation only", content: "...!!! ???", want: ""},
 		{name: "whitespace only", content: "   ", want: ""},
@@ -59,7 +59,16 @@ func TestNormalizeContentForHashKeepsMeaning(t *testing.T) {
 		{name: "word boundary", a: "ab c", b: "a bc"},
 		{name: "minus sign", a: "x=-1", b: "x=1"},
 		{name: "comparison", a: "x<1", b: "x>1"},
+		{name: "inequality", a: "x!=y", b: "x=y"},
+		{name: "negation", a: "!ready", b: "ready"},
+		{name: "double negation", a: "!!ready", b: "!ready"},
+		{name: "language", a: "C#", b: "C"},
+		{name: "identifier", a: "user_id", b: "userid"},
+		{name: "conjunction", a: "a&&b", b: "ab"},
 		{name: "division", a: "a/b", b: "ab"},
+		{name: "decimal", a: "1.5", b: "15"},
+		{name: "version", a: "3.45.1", b: "3451"},
+		{name: "address", a: "10.0.0.1", b: "10001"},
 		{name: "combining mark", a: "e\u0301", b: "e"},
 	}
 	for _, tc := range distinct {
@@ -99,15 +108,15 @@ func TestHashNormalizedIgnoresFormattingOnly(t *testing.T) {
 		"Enable WAL for concurrent readers.",
 		"enable wal for concurrent readers",
 		"  Enable  WAL\tfor\nconcurrent readers  ",
-		"ENABLE WAL, FOR CONCURRENT READERS!",
-		"...Enable WAL ...for... concurrent readers...",
-		"(Enable WAL) [for] {concurrent} readers",
 	} {
 		if got := hashNormalized(variant); got != base {
 			t.Errorf("hashNormalized(%q) = %q, want the base key %q", variant, got, base)
 		}
 	}
 	for _, variant := range []string{
+		"ENABLE WAL, FOR CONCURRENT READERS!",
+		"...Enable WAL ...for... concurrent readers...",
+		"(Enable WAL) [for] {concurrent} readers",
 		"Enable WAL for concurrent reader",
 		"Enable WAL for concurrent readers 2",
 		"Enable WAL for sequential readers",

@@ -103,9 +103,19 @@ func (s *Service) promoteSkillsFromCorrections(ctx context.Context, fence mainte
 		if len(g.corrections) < minCorrectionsPerGroup {
 			continue
 		}
-		existing, err := s.findSkillByOrigin(ctx, g.agentID, g.hash)
+		existing, err := s.findSkillByOrigin(ctx, g.hash)
 		if err != nil {
 			return promoted, deferred, fmt.Errorf("find promoted origin %s: %w", g.hash, err)
+		}
+		if existing != nil && existing.AgentID != g.agentID {
+			updated, err := s.upsertAbsorbedPromotion(ctx, fence, g, existing)
+			if err != nil {
+				return promoted, deferred, fmt.Errorf("refresh absorbed promotion %s: %w", g.hash, err)
+			}
+			if updated {
+				promoted++
+			}
+			continue
 		}
 		if existing == nil {
 			// No skill carries this group's origin tag yet. Before writing a new
@@ -457,6 +467,62 @@ func (s *Service) upsertPromotedSkill(ctx context.Context, fence maintenance.Fen
 	return true, nil
 }
 
+// upsertAbsorbedPromotion refreshes only this admitted group's section in the
+// explicit merge keeper. The owner and other absorbed/manual sections survive.
+func (s *Service) upsertAbsorbedPromotion(ctx context.Context, fence maintenance.Fence, g correctionGroup, keeper *skills.Skill) (bool, error) {
+	procedure, pitfalls := synthesisePromotion(g)
+	procedure = refreshAbsorbedSection(keeper.Procedure, g, procedure)
+	pitfalls = refreshAbsorbedSection(keeper.Pitfalls, g, pitfalls)
+	sources := unionStrings(keeper.SourceSessions, sessionIDs(g.corrections))
+	if procedure == keeper.Procedure && pitfalls == keeper.Pitfalls && sameSourceSet(sources, keeper.SourceSessions) {
+		return false, nil
+	}
+	_, err := s.skills.SaveFenced(ctx, fence, skills.SaveInput{
+		AgentID: keeper.AgentID, Name: keeper.Name, Description: keeper.Description,
+		Procedure: procedure, Pitfalls: pitfalls, Tags: keeper.Tags, SourceSessions: sources,
+	})
+	if err != nil {
+		return false, fmt.Errorf("save absorbed skill: %w", err)
+	}
+	return true, nil
+}
+
+// The first refresh upgrades skills.Merge's versioned heading to a stable
+// origin heading. Later corrections replace that section instead of appending
+// another copy; nested manual/merge headings remain separate preserved sections.
+func refreshAbsorbedSection(body string, g correctionGroup, generated string) string {
+	header := skills.MergeSectionHeader + " " + g.agentID + " (" + originPrefix + g.hash + ")"
+	oldPrefix := skills.MergeSectionHeader + " " + g.agentID + " v"
+	start, end, offset := -1, len(body), 0
+	for _, line := range strings.SplitAfter(body, "\n") {
+		if start >= 0 && strings.HasPrefix(line, skills.MergeSectionHeader+" ") {
+			end = offset
+			break
+		}
+		if strings.TrimSuffix(line, "\n") == header || strings.HasPrefix(line, oldPrefix) {
+			start = offset
+		}
+		offset += len(line)
+	}
+	section := ""
+	if strings.TrimSpace(generated) != "" {
+		section = header + "\n\n" + strings.TrimSpace(generated)
+	}
+	if start < 0 {
+		if section == "" {
+			return body
+		}
+		return strings.TrimRight(body, "\n") + "\n\n" + section
+	}
+	var parts []string
+	for _, part := range []string{strings.TrimRight(body[:start], "\n"), section, strings.TrimLeft(body[end:], "\n")} {
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func preserveManualPromotionText(generated, manual string) string {
 	if strings.TrimSpace(manual) == "" {
 		return generated
@@ -468,10 +534,11 @@ func preserveManualPromotionText(generated, manual string) string {
 // appended paragraphs as well as explicitly marked sections on later passes.
 func preservePromotedDescription(generated, existing string) string {
 	if strings.HasPrefix(existing, "Auto-promoted from ") {
-		_, rest, found := strings.Cut(existing, "\n\n")
+		_, rest, found := strings.Cut(existing, "\n")
 		if !found {
 			return generated
 		}
+		rest = strings.TrimPrefix(rest, "\n")
 		if strings.HasPrefix(rest, skills.MergeSectionHeader) {
 			return generated + "\n\n" + rest
 		}
@@ -557,12 +624,11 @@ func decodeCorrection(o memory.Observation) correctionData {
 	return c
 }
 
-// findSkillByOrigin looks up an existing skill for this agent tagged with
-// originPrefix+hash. Skills are modest in volume so a client-side scan is
-// fine; a dedicated index would be premature.
-func (s *Service) findSkillByOrigin(ctx context.Context, agentID, hash string) (*skills.Skill, error) {
+// findSkillByOrigin follows a group's stable identity even when an explicit
+// cross-agent merge moved that identity into another keeper.
+func (s *Service) findSkillByOrigin(ctx context.Context, hash string) (*skills.Skill, error) {
 	want := originPrefix + hash
-	list, err := s.skills.List(ctx, agentID)
+	list, err := s.skills.List(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("list skills: %w", err)
 	}

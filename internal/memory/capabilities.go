@@ -133,9 +133,10 @@ func (s *Service) dedupSemantics() (window, sentence string) {
 	return window,
 		"exact: content-hash dedup per (agent_id, project) is unconditional; " +
 			"near-duplicate: merged into an existing observation only when content normalizes identically " +
-			"(letters, digits, combining marks and the signs - + = % kept, Unicode-lowercased, whitespace " +
-			"collapsed to one space, other punctuation removed) or the save shares the " +
-			"survivor's session id and non-empty title, and only inside the " + window + " window, with the " +
+			"(plain prose: Unicode-lowercased, whitespace collapsed, trailing sentence marks removed; " +
+			"interior punctuation or symbols: whole body compared literally, outer whitespace trimmed) " +
+			"or the save shares the survivor's session id, non-empty title and numeric tokens with no changed " +
+			"syntax-bearing body, and only inside the " + window + " window, with the " +
 			"merged-away content retained verbatim in a provenance record; " +
 			"neither layer is probabilistic or model-derived"
 }

@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/polyxmedia/mnemos/internal/memory"
 )
@@ -39,6 +42,7 @@ type nearDupHit struct {
 const nearDupLivePredicate = `invalidated_at IS NULL
 	   AND valid_from <= ?
 	   AND (valid_until IS NULL OR valid_until > ?)
+	   AND valid_until IS NULL
 	   AND (expires_at IS NULL OR expires_at > ?)
 	   AND NOT EXISTS (SELECT 1 FROM observation_evidence e WHERE e.observation_id = observations.id)`
 
@@ -73,7 +77,7 @@ func nearDupEligible(o *memory.Observation) bool {
 // inclusive at the cutoff: a candidate touched exactly one window ago still
 // merges.
 func resolveNearDupTx(ctx context.Context, tx *sql.Tx, o *memory.Observation, window time.Duration, now time.Time) (*nearDupHit, error) {
-	if window <= 0 || !nearDupEligible(o) {
+	if window <= 0 || !nearDupEligible(o) || !o.ValidFrom.Equal(o.CreatedAt) || o.ValidUntil != nil {
 		return nil, nil
 	}
 	cutoff := now.UTC().Add(-window)
@@ -99,7 +103,7 @@ func resolveNearDupTx(ctx context.Context, tx *sql.Tx, o *memory.Observation, wi
 }
 
 // nearDupByNormalizedHashTx finds the live observation in the same
-// (agent, project, topic, trust tier) whose content normalizes identically to
+// (agent, project, topic, trust tier, type, pin state, expiry) whose content normalizes identically to
 // the incoming save and that was touched inside the window. Scope matches the
 // exact-hash rule so a near-duplicate cannot cross a boundary the exact rule
 // respects: topics group assertions, projects separate scopes, and trust tiers
@@ -110,24 +114,46 @@ func nearDupByNormalizedHashTx(ctx context.Context, tx *sql.Tx, o *memory.Observ
 		   AND COALESCE(project, '') = ?
 		   AND COALESCE(topic_key, '') = ?
 		   AND trust_tier = ?
+		   AND obs_type = ? AND pinned = ?
+		   AND expires_at IS ?
 		   AND content_hash_normalized = ?
 		   AND `+nearDupLivePredicate+`
 		   AND COALESCE(last_accessed_at, created_at) >= ?
-		 ORDER BY COALESCE(last_accessed_at, created_at) DESC, created_at DESC, id DESC
-		 LIMIT 1`,
-		o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), o.ContentHashNormalized, now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
+		 ORDER BY COALESCE(last_accessed_at, created_at) DESC, created_at DESC, id DESC`,
+		o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), string(o.Type), pinnedInt(o.Pinned), nullableTime(o.ExpiresAt), o.ContentHashNormalized, now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("storage: probe near-duplicate content: %w", err)
 	}
-	return firstObs(rows, "near-duplicate content")
+	return firstNormalizedObs(rows, o.Content, "near-duplicate content")
+}
+
+// Stored keys may have been written under an older normalization rule. Verify
+// each candidate's content before returning it as either a match or a hint.
+func firstNormalizedObs(rows *sql.Rows, content, what string) (*memory.Observation, error) {
+	obs, err := scanObsList(rows)
+	closeErr := rows.Close()
+	if err != nil {
+		return nil, fmt.Errorf("storage: scan %s: %w", what, err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("storage: close %s probe: %w", what, closeErr)
+	}
+	want := memory.NormalizeContentForHash(content)
+	for i := range obs {
+		if memory.NormalizeContentForHash(obs[i].Content) == want {
+			return &obs[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // nearDupBySessionTitleTx finds the live observation carrying the same session
 // id and the same title, created inside the window. This is the weaker rule:
 // the bodies may differ beyond normalization, which is why the merged-away body
-// is kept verbatim in the provenance record. It is scoped by session and title
-// only, exactly as the design states, so a second save for the same task in the
-// same session folds into the first.
+// is kept verbatim in the provenance record. Agent, project and topic must also
+// match so a session shared across scopes cannot mix observations. Matching
+// numeric tokens and the complete syntax-bearing body keep this rule from
+// undoing the content rule's distinctions between facts such as != and =.
 //
 // The probe also requires a non-NULL content_hash_normalized. That column is the
 // near-duplicate key, and NULL means "written before the rule existed": the
@@ -138,17 +164,60 @@ func nearDupByNormalizedHashTx(ctx context.Context, tx *sql.Tx, o *memory.Observ
 func nearDupBySessionTitleTx(ctx context.Context, tx *sql.Tx, o *memory.Observation, cutoff, now time.Time) (*memory.Observation, error) {
 	rows, err := tx.QueryContext(ctx, selectObsSQL+` WHERE session_id = ?
 		   AND title = ?
+		   AND agent_id = ?
+		   AND COALESCE(project, '') = ?
+		   AND COALESCE(topic_key, '') = ?
 		   AND trust_tier = ?
+		   AND obs_type = ? AND pinned = ?
+		   AND expires_at IS ?
 		   AND content_hash_normalized IS NOT NULL
 		   AND `+nearDupLivePredicate+`
 		   AND created_at >= ?
-		 ORDER BY created_at DESC, id DESC
-		 LIMIT 1`,
-		o.SessionID, o.Title, string(o.TrustTier), now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
+		 ORDER BY created_at DESC, id DESC`,
+		o.SessionID, o.Title, o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), string(o.Type), pinnedInt(o.Pinned), nullableTime(o.ExpiresAt), now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("storage: probe near-duplicate session title: %w", err)
 	}
-	return firstObs(rows, "near-duplicate session title")
+	obs, err := scanObsList(rows)
+	closeErr := rows.Close()
+	if err != nil {
+		return nil, fmt.Errorf("storage: scan near-duplicate session title: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("storage: close near-duplicate session title: %w", closeErr)
+	}
+	codeContent := memory.NearDupCodeContent(o.Content)
+	for i := range obs {
+		if slices.Equal(numericTokens(obs[i].Content), numericTokens(o.Content)) &&
+			memory.NearDupCodeContent(obs[i].Content) == codeContent {
+			return &obs[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// Numeric changes can change a fact even when session and title match.
+func numericTokens(content string) []string {
+	runes := []rune(content)
+	var tokens []string
+	var token strings.Builder
+	for i, r := range runes {
+		startsNumber := i+1 < len(runes) && (unicode.IsDigit(runes[i+1]) || (runes[i+1] == '.' && i+2 < len(runes) && unicode.IsDigit(runes[i+2])))
+		if (r == '-' || r == '+' || r == '−') && token.Len() == 0 && startsNumber {
+			token.WriteRune(r)
+			continue
+		}
+		if unicode.IsDigit(r) || (i+1 < len(runes) && unicode.IsDigit(runes[i+1]) && (r == '.' || (r == ',' && i > 0 && unicode.IsDigit(runes[i-1])))) {
+			token.WriteRune(r)
+		} else if token.Len() != 0 {
+			tokens = append(tokens, token.String())
+			token.Reset()
+		}
+	}
+	if token.Len() != 0 {
+		tokens = append(tokens, token.String())
+	}
+	return tokens
 }
 
 // nearDupOutsideWindowTx reports a live, normalized-identical observation that
@@ -165,34 +234,17 @@ func nearDupOutsideWindowTx(ctx context.Context, tx *sql.Tx, o *memory.Observati
 		   AND COALESCE(project, '') = ?
 		   AND COALESCE(topic_key, '') = ?
 		   AND trust_tier = ?
+		   AND obs_type = ? AND pinned = ?
+		   AND expires_at IS ?
 		   AND content_hash_normalized = ?
 		   AND `+nearDupLivePredicate+`
 		   AND COALESCE(last_accessed_at, created_at) < ?
-		 ORDER BY created_at DESC, id DESC
-		 LIMIT 1`,
-		o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), o.ContentHashNormalized, now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
+		 ORDER BY created_at DESC, id DESC`,
+		o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), string(o.Type), pinnedInt(o.Pinned), nullableTime(o.ExpiresAt), o.ContentHashNormalized, now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("storage: probe out-of-window near-duplicate: %w", err)
 	}
-	return firstObs(rows, "out-of-window near-duplicate")
-}
-
-// firstObs drains a single-row observation query and closes it. A missing row
-// is not an error: every near-duplicate probe treats "no candidate" as the
-// normal miss path.
-func firstObs(rows *sql.Rows, what string) (*memory.Observation, error) {
-	obs, scanErr := scanObsList(rows)
-	closeErr := rows.Close()
-	if scanErr != nil {
-		return nil, fmt.Errorf("storage: scan %s: %w", what, scanErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("storage: close %s probe: %w", what, closeErr)
-	}
-	if len(obs) == 0 {
-		return nil, nil
-	}
-	return &obs[0], nil
+	return firstNormalizedObs(rows, o.Content, "out-of-window near-duplicate")
 }
 
 // foldNearDupTx performs the merge: bump the survivor's access signal and write

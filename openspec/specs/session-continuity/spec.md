@@ -320,6 +320,17 @@ receipt whose workspace binding matches the invocation's workspace. Ownership
 SHALL be decided by workspace binding rather than by agent identity. The host
 hook paths SHALL resolve their session themselves and SHALL be unaffected.
 
+For legacy MCP starts, the binding SHALL be the exact session returned by
+`mnemos_session_start` on that MCP connection. A newer session in the same project
+SHALL NOT change it. Project names and latest-session queries SHALL NOT authorize
+a close on a connection that has not opened a session.
+
+For legacy hook starts, prewarm SHALL return the recorded host identity beside
+the current session ID. `mnemos_session_end` SHALL accept that exact current ID
+with its matching `host_session_id`; a different host's newer session in the same
+project SHALL remain rejected. Pi legacy adapters SHALL create one independent
+host identity per startup and retain it across that generation's hooks.
+
 #### Scenario: own session closes
 
 - **WHEN** the MCP tool is invoked with the session id the invocation is bound to

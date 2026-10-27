@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/polyxmedia/mnemos/internal/continuityflow"
 	"github.com/polyxmedia/mnemos/internal/injection"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
@@ -159,15 +160,18 @@ func runPrewarm(ctx context.Context, args []string) error {
 	}
 	defer d.close()
 
-	pw := prewarm.NewService(prewarm.Config{
+	pwConfig := prewarm.Config{
 		Observations: d.db.Observations(),
 		Sessions:     d.db.Sessions(),
 		Skills:       d.db.Skills(),
 		Touches:      d.db.Touches(),
 		Rumination:   d.rum,
-		Injections:   injection.NewLogger(d.db.Injections(), nil),
 		MaxTokens:    d.cfg.Search.PrewarmMaxTokens,
-	})
+	}
+	if openSession {
+		pwConfig.Injections = injection.NewLogger(d.db.Injections(), nil)
+	}
+	pw := prewarm.NewService(pwConfig)
 
 	flowConfig := continuityflow.Config{
 		LegacySessions: d.sess, Composer: pw, PrewarmMaxTokens: d.cfg.Search.PrewarmMaxTokens,
@@ -179,15 +183,23 @@ func runPrewarm(ctx context.Context, args []string) error {
 	}
 	flow := continuityflow.New(flowConfig)
 	var sessID string
+	var hostID string
 	var block *prewarm.Block
 	startedSession := false
 	if openSession && pwMode == prewarm.ModeSessionStart {
+		host := in.SessionID
+		if host == "" {
+			// An explicit unhosted invocation owns a fresh identity; a project
+			// label cannot tell which terminal's session is safe to adopt.
+			host = "prewarm:" + ulid.Make().String()
+		}
 		started, startErr := flow.Start(ctx, continuityflow.TaskSessionInput{
-			Project: proj, Goal: *goal, HostSessionID: in.SessionID, AdoptLegacy: true,
+			Project: proj, Goal: *goal, HostSessionID: host, AdoptLegacy: true,
 		})
 		if startErr == nil && started.Receipt.LegacySession != nil {
 			startedSession = true
 			sessID = started.Receipt.LegacySession.ID
+			hostID = started.Receipt.LegacySession.HostSessionID
 			block = started.LegacyBlock
 		}
 	} else if pwMode == prewarm.ModeCompactionRecovery {
@@ -195,6 +207,7 @@ func runPrewarm(ctx context.Context, args []string) error {
 		// the one SessionStart opened for this host conversation.
 		if sess, err := flow.ResolveLegacy(ctx, in.SessionID, proj); err == nil && sess != nil {
 			sessID = sess.ID
+			hostID = sess.HostSessionID
 		}
 	}
 
@@ -218,6 +231,9 @@ func runPrewarm(ctx context.Context, args []string) error {
 			"section_count":  len(block.Sections),
 			"safety_risk":    block.SafetyReport.MaxRisk.String(),
 		}
+		if hostID != "" {
+			out["host_session_id"] = hostID
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(out)
@@ -227,6 +243,9 @@ func runPrewarm(ctx context.Context, args []string) error {
 		}
 		if sessID != "" {
 			fmt.Printf("\nmnemos_session_id: %s\n", sessID)
+			if hostID != "" {
+				fmt.Printf("mnemos_host_session_id: %s\n", hostID)
+			}
 		}
 	}
 	return nil
@@ -408,12 +427,20 @@ func (b *boundedStdinBuffer) bytes() []byte {
 }
 
 // readHookStdin best-effort parses a Claude Code hook payload from stdin.
-// Returns a zero value if stdin is a TTY, empty, oversized, not valid JSON, or
-// does not close within hookStdinTimeout. Errors are swallowed on purpose: the
-// CLI also runs interactively, and a hook must not fail loudly.
+// Hook events can contain large tool inputs, so they retain the unbounded input
+// behavior of existing harnesses; the prewarm-specific cap is not used here.
 func readHookStdin(r io.Reader) hookInput {
 	var in hookInput
-	data, err := readNonTerminalStdin(context.Background(), r)
+	if r == nil {
+		return in
+	}
+	if f, ok := r.(*os.File); ok {
+		fi, err := f.Stat()
+		if err != nil || fi.Mode()&os.ModeCharDevice != 0 {
+			return in
+		}
+	}
+	data, err := io.ReadAll(r)
 	if err != nil || len(data) == 0 {
 		return in
 	}

@@ -2,7 +2,7 @@
 name: mnemos
 description: Persistent memory and learning-loop skills for AI coding agents using mnemos MCP tools. Use whenever mnemos_* MCP tools are available and you are doing work worth remembering. Cross-session memory, conventions, corrections, and architectural decisions surface back into context automatically. Triggers on session start (record a goal), session end (record a summary), the user says "save", "remember", "record this", "we were wrong about", and on any genuine correction or architectural decision. Keeps mnemos's memory store alive across sessions so the next session starts smarter. Without this skill, agents silently edit and the store goes empty.
 allowed-tools: mcp__mnemos mcp__mnemos_mnemos_session_start mcp__mnemos_mnemos_session_end mcp__mnemos_mnemos_search mcp__mnemos_mnemos_get_many mcp__mnemos_mnemos_save mcp__mnemos_mnemos_correct mcp__mnemos_mnemos_convention mcp__mnemos_mnemos_checkpoint mcp__mnemos_mnemos_resume_context
-version: 0.18.0
+version: 0.18.1
 author: André Figueira <andre@polyxmedia.com>
 license: MIT
 compatibility: "Designed for Claude Code; the same MCP server also works in Claude Desktop, Cursor, Windsurf, OpenAI Codex CLI, and pi. The client MCP route must resolve the mnemos executable through PATH or an absolute path; run mnemos doctor to verify."
@@ -111,7 +111,7 @@ mnemos_session_start(
 
 Without a goal, the UserPromptSubmit hook backfills the first real prompt when available. With a goal, the session becomes a durable record that `mnemos replay` and future prewarms can use.
 
-**End.** At the end of completed work or the current session (or when the user explicitly asks to end it), close the exact current session. The server enforces ownership: it accepts only that session, or a continuity-bound session whose receipt workspace matches, and rejects any other id with `session_not_owned`. Orphaned or batch closures belong to the local `mnemos sessions close` command.
+**End.** At the end of completed work or the current session (or when the user explicitly asks to end it), close the exact current session. The server enforces ownership: it accepts only that session, or a continuity-bound session whose receipt workspace matches, and rejects any other id with `session_not_owned`. Orphaned or batch closures belong to the local `mnemos sessions close` command. For a legacy hook-started session, copy `mnemos_host_session_id` from startup context into the optional `host_session_id` argument alongside the exact current `session_id`. Omit it for an MCP-started or continuity-bound session. Do not guess a host identity.
 
 ```
 mnemos_session_end(

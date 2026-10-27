@@ -125,17 +125,21 @@ NOT run as part of `doctor`, `init`, `serve`, prewarm or session start.
 - **WHEN** doctor reports a stale database
 - **THEN** the file and its rows are still present afterwards
 
-### Requirement: Vault export records when it completed
+### Requirement: Vault export records its successful read watermark
 
 `mnemos vault export` SHALL write an export manifest (`<vault>/.mnemos-vault-export.json`)
-into the vault directory when it completes successfully, containing the completion time
-(RFC 3339, UTC), the number of observations exported and the store path read. The
+into the vault directory when it completes successfully, containing the observation-read watermark
+(RFC 3339, UTC), the number and IDs of observations exported and the store path read. The
 manifest SHALL be replaced atomically so an interrupted export leaves the previous
 manifest intact, and a failed export SHALL NOT update it.
 
 #### Scenario: Successful export writes the manifest
 - **WHEN** `mnemos vault export` completes
 - **THEN** `<vault>/.mnemos-vault-export.json` parses as JSON carrying `exported_at`, `observations` and `store`
+
+The `observation_ids` snapshot SHALL include exactly the successfully exported
+observation IDs. An empty array SHALL represent an empty export; a missing or null
+field SHALL retain compatibility with older manifests.
 
 #### Scenario: Interrupted export keeps the previous manifest
 - **WHEN** an export fails before completing
@@ -165,8 +169,10 @@ status reflects the most recent heartbeat.
 `mnemos vault status` SHALL derive `last_exported_at`, `pending N` and
 `watcher: running|stopped` from on-disk artifacts rather than from configuration alone.
 `last_exported_at` SHALL come from the export manifest and SHALL print `never` when the
-manifest is absent. `pending N` SHALL count observations created or invalidated after
-the manifest's export time, and SHALL print `pending: unknown` when the store cannot be
+manifest is absent. With an ID snapshot, `pending N` SHALL count currently exportable
+observations absent from that snapshot plus observations invalidated after the export
+watermark. Older manifests SHALL retain timestamp-only counting until the next successful
+export. Status SHALL print `pending: unknown` when the store cannot be
 read. `watcher` SHALL be `running` only while a heartbeat newer than three tick intervals
 (floored at 30 seconds) exists, and otherwise `stopped`, naming the stale heartbeat time
 when the file is present but old.
@@ -182,6 +188,14 @@ when the file is present but old.
 #### Scenario: Observations written after the last export
 - **WHEN** one observation is saved, or one is invalidated, after the last export
 - **THEN** status reports `pending 1`
+
+#### Scenario: Save waits on embedding across an export
+- **WHEN** a save captures its creation time before export but commits after the observation snapshot was read
+- **THEN** it remains pending until an export actually includes its ID
+
+#### Scenario: Two vaults export the same store
+- **WHEN** only one vault has exported a newly committed observation
+- **THEN** each vault derives pending status from its own successful snapshot
 
 #### Scenario: Store unreadable
 - **WHEN** the configured store cannot be opened

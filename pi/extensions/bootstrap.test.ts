@@ -118,7 +118,9 @@ test("pending and late configuration cannot affect the next generation's file ro
   await fire("session_start");
   finish(ok(settings(true, true))); await old;
   const pushed = await fire("before_agent_start", { prompt: "inspect", systemPrompt: "BASE" });
-  assert.equal(pushed.systemPrompt, "BASE\nNEW-CONTEXT");
+  const prewarm = calls.find(c => c[0] === "new-mnemos" && c.includes("prewarm"))!;
+  const host = JSON.parse(prewarm[prewarm.indexOf("--payload") + 1]).session_id;
+  assert.equal(pushed.systemPrompt, `BASE\nNEW-CONTEXT\nmnemos_session_id: NEW\nmnemos_host_session_id: ${host}`);
   assert.equal(calls.at(-1)![0], "new-mnemos");
   assert.equal(JSON.parse(calls.at(-1)![calls.at(-1)!.indexOf("--payload") + 1]).session_id, "NEW");
 });

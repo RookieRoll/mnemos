@@ -364,6 +364,76 @@ func TestPreservePromotedDescription(t *testing.T) {
 	}
 }
 
+func TestPromotedSkillMergeDescriptionSurvivesPromotion(t *testing.T) {
+	f := newPromoteFixture(t)
+	ctx := context.Background()
+	seedCorrectionGroup(t, f, "api", "oauth", "oauth retry")
+	if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
+		t.Fatal(err)
+	}
+	keeper := f.onlySkill(t)
+	updated, err := f.sk.Save(ctx, skills.SaveInput{AgentID: keeper.AgentID, Name: keeper.Name, Description: keeper.Description, Procedure: keeper.Procedure, Pitfalls: keeper.Pitfalls, Tags: keeper.Tags, SourceSessions: keeper.SourceSessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keeper = *updated
+	if _, err := f.sk.Save(ctx, skills.SaveInput{AgentID: "other", Name: keeper.Name, Description: "absorbed runbook", Procedure: "another step"}); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := f.sk.Merge(ctx, skills.MergeInput{Name: keeper.Name, KeepVersion: keeper.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Keeper.ID != keeper.ID || !strings.Contains(merged.Keeper.Description, "absorbed runbook") {
+		t.Fatalf("invalid merge setup: %+v", merged.Keeper)
+	}
+	if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
+		t.Fatal(err)
+	}
+	after := f.onlySkill(t)
+	if !strings.Contains(after.Description, "absorbed runbook") {
+		t.Fatalf("promotion lost description: %s", after.Description)
+	}
+	if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
+		t.Fatal(err)
+	}
+	if stable := f.onlySkill(t); stable.Version != after.Version || stable.Description != after.Description {
+		t.Fatal("repeated promotion changed description")
+	}
+}
+
+func TestCrossAgentPromotionRemainsMerged(t *testing.T) {
+	f := newPromoteFixture(t)
+	for _, agent := range []string{"default", "other"} {
+		for _, title := range []string{"first", "second", "third"} {
+			f.seedCorrectionForAgent(t, agent, "api", "oauth", title+" "+agent)
+		}
+	}
+	ctx := context.Background()
+	if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := f.sk.Merge(ctx, skills.MergeInput{Name: promotedSkillName(correctionGroup{project: "api", label: "oauth"})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged.Superseded) != 1 {
+		t.Fatal("expected two promoted skills before merge")
+	}
+	for range 2 {
+		if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
+			t.Fatal(err)
+		}
+		after := f.onlySkill(t)
+		if after.ID != merged.Keeper.ID {
+			t.Fatal("promotion recreated the absorbed skill")
+		}
+		if !strings.Contains(after.Procedure, "first default") || !strings.Contains(after.Procedure, "first other") {
+			t.Fatal("promotion lost an absorbed procedure")
+		}
+	}
+}
+
 func TestPromotionKeepsMergedSections(t *testing.T) {
 	f := newPromoteFixture(t)
 	ctx := context.Background()

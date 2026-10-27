@@ -1,5 +1,19 @@
 # Release notes
 
+## 0.18.1
+
+- Near-duplicate saves preserve observation type, pin state, retention deadline
+  and explicit fact-time boundaries. Syntax-bearing content is compared as a
+  complete literal so operators, grouping, identifiers and quoted values survive.
+- MCP session closure follows the connection's exact session or a verified hook
+  host receipt. Unhosted prewarm starts and independent pi startups stay separate.
+- File configuration now reaches the near-duplicate window and raw-promotion
+  policy; explicit prewarm previews leave injection statistics unchanged.
+- Correction promotion refreshes the corresponding section after a cross-agent
+  skill merge while retaining manual and other merged content.
+- Vault manifests record each directory's exported observation snapshot, keeping
+  saves that finish after that snapshot visible as pending work.
+
 ## 0.15.1
 
 - Concurrent database upgrades recheck migration versions under the writer lock.

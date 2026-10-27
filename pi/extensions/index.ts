@@ -171,7 +171,7 @@ export default function mnemosPi(pi: PiApi, bootstrapPath?: string): void {
       }
       generation.binding = "legacy";
     }
-    const payload: HookPayload = { hook_event_name: "SessionStart", cwd: ctx?.cwd };
+    const payload: HookPayload = { hook_event_name: "SessionStart", cwd: ctx?.cwd, session_id: randomUUID() };
     const result = await invoker.prewarm(payload, TIMEOUTS.prewarm);
     if (state !== generation) return;
     generation.mnemosSessionId = result.session_id ?? "";

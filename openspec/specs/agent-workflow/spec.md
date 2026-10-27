@@ -68,6 +68,7 @@ JSON object carrying `hook_event_name` or `session_id`.
 
 When no payload is present, `mnemos prewarm` SHALL be read-only: it composes and
 prints the prewarm block and MUST NOT create, modify, or close any session.
+Manual previews SHALL NOT record injection events as actual context delivery.
 
 The `--open-session` flag SHALL force the session-open behaviour regardless of
 payload detection.
@@ -94,6 +95,11 @@ invocation cannot block.
 
 - **WHEN** a human runs `mnemos prewarm --open-session` with no payload
 - **THEN** a session is opened and the prewarm block is printed
+
+#### Scenario: Unhosted startup returns an independent identity
+
+- **WHEN** prewarm opens a session without an incoming host identity
+- **THEN** it creates an independent opaque host identity and returns it alongside the current Mnemos ID for ownership-checked closure; it does not adopt another session by project recency
 
 #### Scenario: Installer command strings unchanged
 

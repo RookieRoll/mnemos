@@ -91,6 +91,7 @@ func newRumination(cfg config.Config, db *storage.DB, skl *skills.Service) *rumi
 		&rumination.StaleRawObservationMonitor{
 			Observations: db.Observations(),
 			StaleDays:    cfg.Rumination.StaleRawDays,
+			RawPromote:   rumination.RawPromotePolicy(cfg.Rumination.RawPromote),
 		},
 	}
 	return rumination.NewService(rumination.Config{

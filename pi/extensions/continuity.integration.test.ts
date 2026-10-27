@@ -79,6 +79,8 @@ test("real pi startup, checkpoint, shared offer, guardrail and exact shutdown", 
         if (commandArgs[0] === "continuity" && commandArgs[1] === "open" && result.code === 0) {
           id = JSON.parse(result.stdout).session_id;
           if (id) receivers.push(id);
+        } else if (commandArgs[0] === "prewarm" && result.code === 0) {
+          id = JSON.parse(result.stdout).session_id;
         }
         return result;
       },
@@ -168,5 +170,31 @@ test("real pi startup, checkpoint, shared offer, guardrail and exact shutdown", 
       touch: { project: "api", path: "nested/edited.ts", session_id: c.id() },
       sourceStillOpen: true, lateCode: "conflict",
     }, JSON.stringify(c.results));
+  });
+
+  await t.test("legacy startup identity survives prompt, touch and shutdown beside another host", async () => {
+    writeFileSync(config, readFileSync(config, "utf8").replace("[continuity]\nenabled = true", "[continuity]\nenabled = false"));
+    const mine = host(), other = host();
+    await mine.fire("session_start");
+    await other.fire("session_start");
+    assert.ok(mine.id() && other.id() && mine.id() !== other.id());
+    const push = await mine.fire("before_agent_start", { prompt: "Verify legacy lifecycle", systemPrompt: "BASE" });
+    assert.ok(push.systemPrompt.includes(`mnemos_session_id: ${mine.id()}`));
+    const startup = mine.calls.find(args => args[0] === "prewarm")!;
+    const hostID = JSON.parse(startup[startup.indexOf("--payload") + 1]).session_id;
+    assert.ok(push.systemPrompt.includes(`mnemos_host_session_id: ${hostID}`));
+    await mine.fire("tool_result", { toolName: "edit", input: { path: "legacy.go" }, isError: false });
+    await mine.fire("session_shutdown");
+    const db = new DatabaseSync(join(home, "memory.db"), { readOnly: true });
+    try {
+      const current: any = db.prepare("SELECT host_session_id,goal,ended_at FROM sessions WHERE id=?").get(mine.id());
+      const foreign: any = db.prepare("SELECT ended_at FROM sessions WHERE id=?").get(other.id());
+      const touch: any = db.prepare("SELECT session_id FROM file_touches WHERE path='legacy.go'").get();
+      assert.equal(current.host_session_id, hostID);
+      assert.equal(current.goal, "Verify legacy lifecycle");
+      assert.ok(current.ended_at);
+      assert.equal(foreign.ended_at, null);
+      assert.equal(touch.session_id, mine.id());
+    } finally { db.close(); }
   });
 });

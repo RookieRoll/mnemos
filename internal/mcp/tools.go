@@ -327,7 +327,7 @@ func (s *Server) handleSave(ctx context.Context, _ *mcpsdk.CallToolRequest, a sa
 	if err != nil {
 		return evolutionError(err)
 	}
-	return jsonResult(map[string]any{
+	return saveResultJSON(res, map[string]any{
 		"id":           res.Observation.ID,
 		"title":        res.Observation.Title,
 		"type":         string(res.Observation.Type),
@@ -498,6 +498,9 @@ func (s *Server) handleSessionStart(ctx context.Context, req *mcpsdk.CallToolReq
 	if sess == nil {
 		return nil, nil, fmt.Errorf("mcp: legacy session receipt unavailable")
 	}
+	if req != nil {
+		s.bindCurrentSession(req.Session, sess.ID)
+	}
 	legacyResponse := map[string]any{"session_id": sess.ID, "started_at": sess.StartedAt}
 	if block := out.LegacyBlock; block != nil && block.Text != "" {
 		legacyResponse["prewarm"] = map[string]any{
@@ -509,14 +512,15 @@ func (s *Server) handleSessionStart(ctx context.Context, req *mcpsdk.CallToolReq
 }
 
 type sessionEndArgs struct {
-	SessionID   string   `json:"session_id"`
-	Summary     string   `json:"summary"`
-	Reflection  string   `json:"reflection,omitempty" jsonschema:"transferable lessons"`
-	Status      string   `json:"status,omitempty" jsonschema:"ok|failed|blocked|abandoned"`
-	OutcomeTags []string `json:"outcome_tags,omitempty"`
+	SessionID     string   `json:"session_id"`
+	HostSessionID string   `json:"host_session_id,omitempty" jsonschema:"for hook-started legacy sessions, copy mnemos_host_session_id from startup context"`
+	Summary       string   `json:"summary"`
+	Reflection    string   `json:"reflection,omitempty" jsonschema:"transferable lessons"`
+	Status        string   `json:"status,omitempty" jsonschema:"ok|failed|blocked|abandoned"`
+	OutcomeTags   []string `json:"outcome_tags,omitempty"`
 }
 
-func (s *Server) handleSessionEnd(ctx context.Context, _ *mcpsdk.CallToolRequest, a sessionEndArgs) (*mcpsdk.CallToolResult, any, error) {
+func (s *Server) handleSessionEnd(ctx context.Context, req *mcpsdk.CallToolRequest, a sessionEndArgs) (*mcpsdk.CallToolResult, any, error) {
 	status := session.Status(a.Status)
 	if status == "" {
 		status = session.StatusOK
@@ -528,7 +532,12 @@ func (s *Server) handleSessionEnd(ctx context.Context, _ *mcpsdk.CallToolRequest
 	if s.cfg.Sessions == nil {
 		return nil, nil, fmt.Errorf("mcp: session service unavailable")
 	}
-	err := s.cfg.Sessions.EndOwned(ctx, closeInput, s.sessionEndInvocation(ctx))
+	inv := s.sessionEndInvocation(ctx)
+	inv.HostSessionID = a.HostSessionID
+	if req != nil {
+		inv.CurrentSessionID = s.currentSession(req.Session)
+	}
+	err := s.cfg.Sessions.EndOwned(ctx, closeInput, inv)
 	if err != nil {
 		var rejected *session.NotOwnedError
 		if errors.As(err, &rejected) {
@@ -539,13 +548,9 @@ func (s *Server) handleSessionEnd(ctx context.Context, _ *mcpsdk.CallToolRequest
 	return textResult("session " + a.SessionID + " closed (" + string(status) + ")")
 }
 
-// sessionEndInvocation assembles the ownership context for one
-// mnemos_session_end call. Project is the same resolution seam the hook path
-// uses; WorkspaceRoot is the workspace the server itself was started in,
-// resolved with continuity's canonical directory identity so a recorded
-// receipt compares by the key continuity bound it with. Without a resolvable
-// workspace or continuity support, only the invocation's bound session may be
-// closed.
+// sessionEndInvocation assembles workspace receipt authorization. The handler
+// separately adds the exact session opened on its MCP connection; project
+// recency is never used as a substitute for that identity.
 func (s *Server) sessionEndInvocation(ctx context.Context) session.EndInvocation {
 	inv := session.EndInvocation{Project: s.cfg.DefaultProject}
 	inv.WorkspaceRoot = invocationWorkspaceRoot(ctx)
@@ -824,7 +829,7 @@ func (s *Server) handleCorrect(ctx context.Context, _ *mcpsdk.CallToolRequest, a
 	if err != nil {
 		return nil, nil, err
 	}
-	return jsonResult(map[string]any{"id": res.Observation.ID, "deduped": res.Deduped})
+	return saveResultJSON(res, map[string]any{"id": res.Observation.ID, "deduped": res.Deduped})
 }
 
 // ---- mnemos_convention -------------------------------------------------
@@ -852,7 +857,20 @@ func (s *Server) handleConvention(ctx context.Context, _ *mcpsdk.CallToolRequest
 	if err != nil {
 		return nil, nil, err
 	}
-	return jsonResult(map[string]any{"id": res.Observation.ID, "deduped": res.Deduped})
+	return saveResultJSON(res, map[string]any{"id": res.Observation.ID, "deduped": res.Deduped})
+}
+
+// saveResultJSON keeps near-duplicate feedback visible on every write tool.
+// The caller already has the submitted body; returning the match identity and
+// reason is enough to distinguish a fold from an exact repeated save.
+func saveResultJSON(res *memory.SaveResult, out map[string]any) (*mcpsdk.CallToolResult, any, error) {
+	if res.NearDupHint != "" {
+		out["near_dup_hint"] = res.NearDupHint
+	}
+	if res.NearDup != nil {
+		out["near_dup"] = map[string]any{"survivor_id": res.NearDup.SurvivorID, "reason": res.NearDup.Reason}
+	}
+	return jsonResult(out)
 }
 
 // ---- mnemos_touch ------------------------------------------------------

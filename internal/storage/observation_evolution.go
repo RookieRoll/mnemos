@@ -233,7 +233,11 @@ func (s *obsStore) SaveEvolution(ctx context.Context, in memory.EvolutionSave) (
 			return nil, fmt.Errorf("storage: scan dedup candidates: %w", scanErr)
 		}
 		for _, existing := range candidates {
-			if sameEvidenceIdentity(existing.Evidence, o.Evidence) {
+			from := (*time.Time)(nil)
+			if in.ValidFromExplicit || !o.ValidFrom.Equal(o.CreatedAt) {
+				from = &o.ValidFrom
+			}
+			if memory.SameSaveFactTime(existing, from, o.ValidUntil, in.Now) && sameEvidenceIdentity(existing.Evidence, o.Evidence) {
 				if _, err := tx.ExecContext(ctx, "UPDATE observations SET access_count=access_count+1,last_accessed_at=? WHERE id=?", in.Now, existing.ID); err != nil {
 					return nil, fmt.Errorf("storage: bump dedup access: %w", err)
 				}

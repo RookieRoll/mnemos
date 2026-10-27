@@ -55,6 +55,22 @@ test("session_start runs prewarm and captures the session id", async () => {
   assert.ok(h.calls[0].join(" ").startsWith("mnemos prewarm"), h.calls[0].join(" "));
 });
 
+test("legacy startup publishes the host receipt while later hooks retain the exact Mnemos ID", async () => {
+  const h = harness({ prewarm: '{"session_id":"S1","text":"P"}' });
+  await h.fire("session_start", {});
+  const payloadOf = (call: string[]) => JSON.parse(call[call.indexOf("--payload") + 1]);
+  const host = payloadOf(h.calls[0]).session_id;
+  assert.ok(host && host !== "S1");
+  const push = await h.fire("before_agent_start", { prompt: "hello", systemPrompt: "BASE" });
+  assert.match(push[0].systemPrompt, /mnemos_session_id: S1/);
+  assert.ok(push[0].systemPrompt.includes(`mnemos_host_session_id: ${host}`));
+  await h.fire("tool_result", { toolName: "edit", input: { path: "a.go" }, isError: false });
+  await h.fire("session_shutdown", {});
+  for (const call of h.calls.slice(1)) assert.equal(payloadOf(call).session_id, "S1");
+  await h.fire("session_start", {});
+  assert.notEqual(payloadOf(h.calls.at(-1)!).session_id, host);
+});
+
 test("prewarm is pushed on the first turn, not stored in history", async () => {
   const h = harness({
     prewarm: '{"session_id":"S1","text":"PREWARM BLOCK"}',

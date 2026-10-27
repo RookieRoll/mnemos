@@ -44,7 +44,7 @@ func TestNearDupProvenanceRetainsBodyByteForByte(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const incoming = "  第二版：Release\tnotes\n\n— with unicode punctuation…  "
+	const incoming = "  第二版 Release\tnotes\n\nwith unicode café\u0301！  "
 	second, err := svc.Save(ctx, memory.SaveInput{
 		SessionID: "sess-verbatim", Title: "release notes", Type: memory.TypeContext,
 		Project: "proj", Content: incoming,
@@ -98,7 +98,7 @@ func TestNearDupProvenanceCascadesWithSurvivor(t *testing.T) {
 		t.Fatal(err)
 	}
 	second, err := svc.Save(ctx, memory.SaveInput{
-		Title: "deploy note", Content: "Enable WAL, for concurrent readers!", Type: memory.TypePattern, Project: "proj",
+		Title: "deploy note", Content: "Enable WAL for concurrent readers!", Type: memory.TypePattern, Project: "proj",
 	})
 	if err != nil || second.NearDup == nil {
 		t.Fatalf("expected a near-duplicate merge: %+v %v", second, err)
@@ -256,7 +256,7 @@ func TestNearDupLivePredicateRequiresEffectiveSurvivor(t *testing.T) {
 			}
 			second, err := svc.Save(ctx, memory.SaveInput{
 				Title: "deploy note", Type: memory.TypePattern, Project: "proj",
-				Content: "Enable WAL, for concurrent readers!",
+				Content: "Enable WAL for concurrent readers!",
 			})
 			if err != nil {
 				t.Fatal(err)

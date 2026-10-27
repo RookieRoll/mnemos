@@ -123,12 +123,13 @@ func (s *Service) HybridEnabled() bool {
 //  1. Exact content hash, unconditional: the same (agent, project, content
 //     hash, topic, evidence identity) already live bumps that row.
 //  2. Near-duplicate fold, bounded by the configured window: a live row in the
-//     same (agent, project) whose content normalizes identically — differing
-//     only in case, spacing or removable punctuation, with word boundaries and
-//     the signs - + = % preserved — or a live row sharing the save's session id
-//     and non-empty title is folded in. The survivor's access
-//     count is bumped, the merged-away body is retained verbatim in a
-//     provenance record, and no second live row is created.
+//     same (agent, project) whose content normalizes identically — plain prose
+//     ignores case, whitespace runs and trailing sentence marks, while a body
+//     with interior punctuation or symbols is compared literally — or a live
+//     row sharing the save's session id, non-empty title and numeric tokens,
+//     without a changed syntax-bearing body, is folded in. The
+//     survivor's access count is bumped, the merged-away body is retained
+//     verbatim in a provenance record, and no second live row is created.
 //
 // A normalized-identical row outside the window is never merged: the save
 // inserts and SaveResult.NearDupHint names the candidate. Returns SaveResult so
@@ -210,7 +211,7 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 		// transaction, so a plain store stops here.
 		if existing, err := s.store.FindByContentHash(ctx, agent, in.Project, hash); err != nil {
 			return nil, fmt.Errorf("dedup lookup: %w", err)
-		} else if existing != nil {
+		} else if existing != nil && SameSaveFactTime(*existing, in.ValidFrom, in.ValidUntil, now) {
 			if err := s.store.BumpAccess(ctx, existing.ID); err != nil {
 				return nil, err
 			}
@@ -266,7 +267,7 @@ func (s *Service) Save(ctx context.Context, in SaveInput) (*SaveResult, error) {
 				return nil, err
 			}
 		}
-		return evolution.SaveEvolution(ctx, EvolutionSave{Observation: o, ReplacesID: in.ReplacesID, UnpinReplacement: in.UnpinReplacement, TopicExplicit: topic != "", RequestHash: requestHash, Now: now, NearDupWindow: s.nearDupWindow})
+		return evolution.SaveEvolution(ctx, EvolutionSave{Observation: o, ReplacesID: in.ReplacesID, UnpinReplacement: in.UnpinReplacement, TopicExplicit: topic != "", ValidFromExplicit: in.ValidFrom != nil, RequestHash: requestHash, Now: now, NearDupWindow: s.nearDupWindow})
 	}
 	if err := s.store.Insert(ctx, o); err != nil {
 		return nil, err

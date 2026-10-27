@@ -48,14 +48,14 @@ type EndReceipts interface {
 }
 
 // EndInvocation is the caller context of one ownership-checked session end.
-// The bound session is resolved through the same seam the hooks use (Resolve);
-// a server with no project label falls back to the newest open legacy
-// session, mirroring mnemos://session/current.
+// The transport supplies the exact session established on this connection.
+// Project labels and recency do not establish ownership between terminals.
 type EndInvocation struct {
+	// CurrentSessionID is the session opened by this invocation's MCP connection.
+	CurrentSessionID string
 	// HostSessionID is the host conversation id, when the transport has one.
 	HostSessionID string
-	// Project is the invocation's project label; empty means the server has
-	// no project to scope the bound-session lookup to.
+	// Project is the invocation's project label; it does not authorize a close.
 	Project string
 	// WorkspaceRoot names the invocation workspace for the rejection record.
 	// Workspace comparison itself belongs to EndReceipts.
@@ -104,25 +104,25 @@ func (s *Service) EndOwned(ctx context.Context, in CloseInput, inv EndInvocation
 	return &NotOwnedError{SessionID: in.ID, WorkspaceRoot: inv.WorkspaceRoot}
 }
 
-// boundSession resolves the session the invocation is bound to. It is the
-// hook seam: a host id is authoritative, then the newest unowned session in
-// the project. With neither a host id nor a project, the newest open legacy
-// session stands in (the same fallback mnemos://session/current uses). No
-// open session returns (nil, nil).
+// boundSession uses explicit identities only. Hook callers may supply a host
+// conversation, while MCP supplies its exact connection-bound session.
 func (s *Service) boundSession(ctx context.Context, inv EndInvocation) (*Session, error) {
-	bound, err := s.Resolve(ctx, inv.HostSessionID, inv.Project)
-	if err == nil {
-		return bound, nil
+	if inv.CurrentSessionID != "" {
+		current, err := s.Get(ctx, inv.CurrentSessionID)
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return current, err
 	}
-	if !errors.Is(err, ErrNotFound) {
+	if inv.HostSessionID == "" {
+		return nil, nil
+	}
+	owned, err := s.ListLegacyOpenByHost(ctx, inv.HostSessionID)
+	if err != nil {
 		return nil, err
 	}
-	if inv.HostSessionID != "" || inv.Project != "" {
+	if len(owned) == 0 {
 		return nil, nil
 	}
-	newest, err := s.Current(ctx, "")
-	if errors.Is(err, ErrNotFound) {
-		return nil, nil
-	}
-	return newest, err
+	return &owned[0], nil
 }

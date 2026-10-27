@@ -86,3 +86,13 @@ content into it — bumping its version and preserving its existing
 
 - **WHEN** the same live correction set is promoted twice with no membership change
 - **THEN** the resulting skill content is identical and no second skill is created
+
+#### Scenario: Explicit cross-agent merge remains effective
+
+- **WHEN** an operator merges promoted skills across agents and the keeper retains their origin tags
+- **THEN** a later promotion pass recognizes those absorbed origins and does not recreate a loser or overwrite the keeper with that loser's group alone
+
+#### Scenario: An absorbed group receives another correction
+
+- **WHEN** new live corrections arrive for a group whose origin is retained by a cross-agent merge keeper
+- **THEN** promotion refreshes that group's generated section in the keeper, preserves the other merged/manual sections and keeper identity, and a repeated unchanged pass writes nothing

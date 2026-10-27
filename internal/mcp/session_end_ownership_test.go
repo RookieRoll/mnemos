@@ -56,7 +56,11 @@ func newSessionEndHarness(t *testing.T, adjust func(*testing.T, *mcp.Config, *st
 		adjust(t, &cfg, db, sessions)
 	}
 	srv := mcp.NewServer(cfg)
+	return connectSessionEndHarness(t, srv), db, sessions
+}
 
+func connectSessionEndHarness(t *testing.T, srv *mcp.Server) *harness {
+	t.Helper()
 	ctx := context.Background()
 	t1, t2 := mcpsdk.NewInMemoryTransports()
 	serverSession, err := srv.SDK().Connect(ctx, t1, nil)
@@ -71,7 +75,61 @@ func newSessionEndHarness(t *testing.T, adjust func(*testing.T, *mcp.Config, *st
 	}
 	h := &harness{t: t, client: clientSession, server: serverSession}
 	t.Cleanup(h.close)
-	return h, db, sessions
+	return h
+}
+
+func TestSessionEndIsBoundToConnection(t *testing.T) {
+	var shared *mcp.Config
+	newSessionEndHarness(t, func(_ *testing.T, cfg *mcp.Config, _ *storage.DB, _ *session.Service) {
+		copy := *cfg
+		copy.DefaultProject = "same-project"
+		shared = &copy
+	})
+	srv := mcp.NewServer(*shared)
+	first, second := connectSessionEndHarness(t, srv), connectSessionEndHarness(t, srv)
+	mine := startSessionViaTool(t, first, "same-project")
+	other := startSessionViaTool(t, second, "same-project")
+	if res, _ := first.call("mnemos_session_end", map[string]any{"session_id": other, "summary": "wrong connection"}); !res.IsError {
+		t.Fatal("first connection closed another connection's newer session")
+	}
+	for _, tc := range []struct {
+		h  *harness
+		id string
+	}{{first, mine}, {second, other}} {
+		if res, body := tc.h.call("mnemos_session_end", map[string]any{"session_id": tc.id, "summary": "done"}); res.IsError {
+			t.Fatalf("own session close failed: %s", body)
+		}
+	}
+}
+
+func TestHookCurrentSessionEndsThroughMCP(t *testing.T) {
+	h, _, sessions := newSessionEndHarness(t, func(_ *testing.T, cfg *mcp.Config, _ *storage.DB, _ *session.Service) { cfg.DefaultProject = "p" })
+	flow := continuityflow.New(continuityflow.Config{LegacySessions: sessions})
+	started, err := flow.Start(t.Context(), continuityflow.TaskSessionInput{Project: "p", HostSessionID: "hook-host", AdoptLegacy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := started.Receipt.LegacySession
+	foreign, err := flow.Start(t.Context(), continuityflow.TaskSessionInput{Project: "p", HostSessionID: "another-host", AdoptLegacy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id     string
+		denied bool
+	}{{foreign.Receipt.LegacySession.ID, true}, {mine.ID, false}} {
+		res, body := h.call("mnemos_session_end", map[string]any{"session_id": tc.id, "host_session_id": mine.HostSessionID, "summary": "completed hooked task"})
+		if res.IsError != tc.denied {
+			t.Fatalf("close result: %s", body)
+		}
+	}
+	closed, err := sessions.Get(t.Context(), mine.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Summary != "completed hooked task" || closed.EndedAt == nil {
+		t.Fatal("hook close lost its summary")
+	}
 }
 
 // withContinuityFlow wires the unified task-session flow with a real

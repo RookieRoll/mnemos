@@ -20,6 +20,7 @@ default_limit = 20
 max_context_tokens = 2000
 prewarm_max_tokens = 500
 hybrid_alpha = 0.5
+near_dup_window = "24h"
 
 [server]
 transport = "stdio"
@@ -94,6 +95,7 @@ Omitting a field uses the default shown above. Boolean `false`, empty strings an
 | `search.prewarm_max_tokens` | `500` | session-start prewarm block 的 token 预算；至少 100。 |
 | `search.hybrid_alpha` | `0.5` | 关键词/向量混合权重，范围 `[0,1]`；0 表示纯语义，1 表示纯关键词。 |
 | `server.transport` | `stdio` | 服务传输方式：`stdio` 或 `http`。 |
+| `search.near_dup_window` | `24h` | 近重复合并窗口，非负 Go duration；`0s` 关闭近重复合并，精确内容去重保留。所有 CLI、MCP 和 HTTP 保存路径使用同一配置。 |
 | `server.http_addr` | `:8080` | HTTP 服务监听地址；仅 HTTP 模式使用。 |
 | `server.api_key` | 空 | HTTP API bearer key；为空时不启用 key 校验。按密钥管理，不要提交到仓库。 |
 | `mcp.profile` | `core` | 启动时固定工具面：`core` 只注册九个常用任务工具；`maintenance` 恢复完整既有 MCP 工具集合。未知值在启动前拒绝。默认值改变是 0.17.0 的 MCP 工具面破坏性变更；需要高级工具的宿主须显式设为 `maintenance` 并重启。 |

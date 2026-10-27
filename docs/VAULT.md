@@ -69,11 +69,17 @@ roles. Added a test that asserts max 2 queries for the endpoint.
 | --- | --- |
 | `mnemos vault export` | One-shot full export. Overwrites existing files. |
 | `mnemos vault watch` | Daemon. Syncs on an interval (default 5m). |
-| `mnemos vault status` | Prints vault path + whether it has been exported. |
+| `mnemos vault status` | Reports the last successful export, pending observations and watcher liveness. |
 
 `vault watch` uses the `last_exported_at` column on observations to drive
 incremental sync once implemented fully; the current implementation writes
 the whole vault on each tick (cheap for realistic sizes).
+
+Each successful export records which observations it wrote in the vault-local
+manifest. A save that finishes embedding after that snapshot remains pending
+until a later export includes it. Separate vault directories keep separate
+snapshots. Older manifests retain timestamp-only status until the next successful
+export.
 
 ## Configuration
 

@@ -43,6 +43,7 @@ type SearchConfig struct {
 	MaxContextTokens int     `toml:"max_context_tokens"`
 	PrewarmMaxTokens int     `toml:"prewarm_max_tokens"`
 	HybridAlpha      float64 `toml:"hybrid_alpha"`
+	NearDupWindow    string  `toml:"near_dup_window"` // duration; 0s disables near-duplicate folding
 }
 
 // IntegrationConfig controls automatic hooks without disabling explicit tools.
@@ -160,6 +161,7 @@ func Default() Config {
 			MaxContextTokens: 2000,
 			PrewarmMaxTokens: 500,
 			HybridAlpha:      0.5,
+			NearDupWindow:    "24h",
 		},
 		Server: ServerConfig{
 			Transport: "stdio",
@@ -419,6 +421,9 @@ func applyDefaults(cfg *Config) {
 func validate(cfg Config) error {
 	if cfg.Storage.Path == "" {
 		return errors.New("config: storage.path is empty")
+	}
+	if window, err := time.ParseDuration(cfg.Search.NearDupWindow); err != nil || window < 0 {
+		return fmt.Errorf("config: search.near_dup_window must be a non-negative duration, got %q", cfg.Search.NearDupWindow)
 	}
 	switch cfg.Server.Transport {
 	case "stdio", "http":

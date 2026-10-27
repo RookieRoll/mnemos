@@ -163,12 +163,16 @@ The capability document SHALL report `pinned_memory` and `graph_retrieval` only 
 
 ### Requirement: Near-duplicate save merge
 
-The memory layer SHALL store a normalized form of each observation's content —
-using Unicode simple lowercase, collapsed whitespace, preserved letters, digits,
-combining marks and mathematical signs, and otherwise removed punctuation and
-symbols — and SHALL use equal normalized forms to merge observations within the same
+The memory layer SHALL store a normalized form of each observation's content.
+Plain prose SHALL use Unicode simple lowercase, collapsed whitespace and removal
+of trailing sentence marks (`.,!?，。！？、；：`). If interior punctuation or other
+symbols remain after that suffix is removed, the complete original body SHALL
+instead be compared literally, trimming outer whitespace only. Structure, case
+and whitespace within such bodies SHALL be preserved without language parsing.
+The layer SHALL use equal normalized forms to merge observations within the same
 `(agent_id, project)` and inside a configurable time window whose default is 24
-hours. Every merge SHALL retain the merged-away content verbatim in a provenance
+hours. A near-duplicate fold SHALL preserve the agent, project, topic and trust
+boundaries and SHALL NOT discard a distinct fact-time interval. Every merge SHALL retain the merged-away content verbatim in a provenance
 record. The exact content hash SHALL keep its current definition and value, and
 SHALL NOT be recomputed for existing rows.
 
@@ -179,13 +183,55 @@ SHALL NOT be recomputed for existing rows.
 
 #### Scenario: same session and title inside the window merges
 
-- **WHEN** an observation is saved with a session id and a non-empty title that match a live observation inside the near-duplicate window
+- **WHEN** an observation is saved with a session id and a non-empty title that match a live observation in the same agent, project and topic inside the near-duplicate window, and their numeric tokens match, with neither body containing syntax or both complete syntax-bearing bodies matching literally after trimming outer whitespace
 - **THEN** that observation is merged into under the same rule, the merged-away content is retained verbatim in the provenance record, and the provenance row is marked with the session/title origin
 
 #### Scenario: different content does not merge
 
 - **WHEN** two observations in the same `(agent_id, project)` differ by at least one letter or digit
 - **THEN** both are stored as separate observations
+
+#### Scenario: Different observation type or pin intent
+
+- **WHEN** normalized content or session/title matches but the incoming observation type or pinned state differs
+- **THEN** near-duplicate folding does not discard that distinct save
+
+#### Scenario: File configuration disables near-duplicate folding
+
+- **WHEN** `[search].near_dup_window` is `0s`
+- **THEN** production save paths apply exact deduplication only; omitted configuration uses `24h`, and invalid or negative durations fail configuration loading
+
+#### Scenario: Near-duplicate saves request different retention deadlines
+
+- **WHEN** a matching normalized body or session/title has a different TTL expiry, including a finite deadline versus no expiry
+- **THEN** near-duplicate folding preserves the new save instead of changing its requested deadline
+
+#### Scenario: numeric separators preserve meaning
+
+- **WHEN** two contents differ by a decimal point or other numeric separator
+- **THEN** their normalized keys differ and the content rule does not merge them
+
+#### Scenario: code punctuation preserves meaning
+
+- **WHEN** two contents differ by code punctuation or structure, such as `!=` versus `=`, `C#` versus `C`, `user_id` versus `userid`, parentheses grouping, field access, subscripts or quoted values
+- **THEN** their normalized keys differ and neither the content rule nor the session/title rule merges them
+- **AND** syntax-bearing contents also preserve operand changes, case-sensitive names and whitespace inside strings
+
+#### Scenario: plain prose retains formatting equivalence
+
+- **WHEN** plain prose differs only in case, whitespace runs or trailing sentence marks
+- **THEN** it may still fold within the configured window
+- **AND** interior punctuation is retained rather than assumed to be formatting
+
+#### Scenario: explicit fact time is preserved
+
+- **WHEN** a save has a different explicit fact-time interval from an existing observation
+- **THEN** deduplication does not discard that interval
+
+#### Scenario: repeated explicit fact time deduplicates
+
+- **WHEN** the same content and explicit fact-time interval are saved again
+- **THEN** exact deduplication returns the existing observation
 
 #### Scenario: outside the window never merges
 

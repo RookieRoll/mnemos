@@ -100,16 +100,21 @@ func (e *Exporter) ExportAll(ctx context.Context) (ExportStats, error) {
 	// Observations: pull everything (no bulk-list method exists; use a
 	// simple project-agnostic list via an empty-filter ListByProject with
 	// a large limit).
+	// Use the read start as the successful export's watermark. A save arriving
+	// after this read must remain pending even if file generation finishes later.
+	watermark := time.Now().UTC()
 	obs, err := e.obs.ListByProject(ctx, "", "", "", 10000)
 	if err != nil {
 		return stats, fmt.Errorf("list observations: %w", err)
 	}
 	tagMap := map[string][]memory.Observation{}
+	exportedIDs := make([]string, 0, len(obs))
 	for _, o := range obs {
 		if err := e.writeObservation(ctx, o); err != nil {
 			return stats, err
 		}
 		stats.Observations++
+		exportedIDs = append(exportedIDs, o.ID)
 		for _, tag := range o.Tags {
 			tagMap[tag] = append(tagMap[tag], o)
 		}
@@ -156,9 +161,10 @@ func (e *Exporter) ExportAll(ctx context.Context) (ExportStats, error) {
 	// an interrupted export therefore leaves the previous manifest, and the
 	// previous watermark, intact.
 	if err := WriteExportManifest(e.root, ExportManifest{
-		ExportedAt:   time.Now().UTC(),
-		Observations: stats.Observations,
-		Store:        e.storePath,
+		ExportedAt:     watermark,
+		Observations:   stats.Observations,
+		ObservationIDs: exportedIDs,
+		Store:          e.storePath,
 	}); err != nil {
 		return stats, err
 	}

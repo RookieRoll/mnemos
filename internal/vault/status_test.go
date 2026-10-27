@@ -21,6 +21,48 @@ type fakeCounter struct {
 	err   error
 }
 
+type saveDuringExport struct {
+	memory.Store
+	afterRead func()
+}
+
+func (s saveDuringExport) ListByProject(ctx context.Context, agent, project string, typ memory.ObsType, limit int) ([]memory.Observation, error) {
+	rows, err := s.Store.ListByProject(ctx, agent, project, typ, limit)
+	if err == nil {
+		s.afterRead()
+	}
+	return rows, err
+}
+
+func TestExportKeepsConcurrentSavePending(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "m.db")
+	db, err := storage.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mem := memory.NewService(memory.Config{Store: db.Observations()})
+	root := t.TempDir()
+	obs := saveDuringExport{Store: db.Observations(), afterRead: func() {
+		if _, err := mem.Save(ctx, memory.SaveInput{Title: "new", Content: "arrived after observation read", Type: memory.TypeContext}); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	ex := vault.NewExporter(vault.Config{Root: root, StorePath: path, Obs: obs, Sessions: db.Sessions(), Skills: db.Skills()})
+	stats, err := ex.ExportAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Observations != 0 {
+		t.Fatal("test observation unexpectedly entered export snapshot")
+	}
+	status := vault.InspectStatus(ctx, vault.StatusOptions{Root: root, StorePath: path})
+	if !status.PendingKnown || status.Pending != 1 {
+		t.Fatalf("pending=%d known=%v: %s", status.Pending, status.PendingKnown, status.PendingError)
+	}
+}
+
 func (f fakeCounter) CountObservationsSince(context.Context, time.Time) (int, error) {
 	return f.count, f.err
 }

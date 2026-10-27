@@ -30,10 +30,13 @@ const (
 // it wrote and which store it read. It lives inside the vault directory so
 // export provenance travels with the exported files.
 type ExportManifest struct {
-	// ExportedAt is the completion time in RFC 3339 UTC.
+	// ExportedAt is the observation-read watermark of a successful export.
 	ExportedAt time.Time `json:"exported_at"`
 	// Observations is the number of observation files the export wrote.
 	Observations int `json:"observations"`
+	// ObservationIDs is the exact successful observation snapshot. Nil means
+	// an older manifest; an empty non-nil slice records an empty export.
+	ObservationIDs []string `json:"observation_ids"`
 	// Store is the database path the export read.
 	Store string `json:"store"`
 }
@@ -170,21 +173,23 @@ type ObservationCounter interface {
 type StoreCounter struct {
 	// Path is the database file to inspect.
 	Path string
+	// ExportedIDs is the manifest snapshot, when available. Nil retains the
+	// timestamp-only projection used by manifests from older versions.
+	ExportedIDs []string
 }
 
-// CountObservationsSince counts observations whose created_at or
-// invalidated_at is strictly after since. A zero since counts every row, the
-// truthful answer for a vault that has never been exported.
+// CountObservationsSince reports pending observation changes. A recorded
+// snapshot counts live rows missing from that export, plus later invalidations.
+// Older manifests without IDs use created_at/invalidated_at after since. A zero
+// since without a snapshot counts every row in a never-exported vault.
 //
 // The comparison binds time.Time values, so the driver writes the same
 // encoding the store's own writers use (time.Time.String() in UTC) and SQLite
 // compares the two representations lexicographically. The test suite pins the
 // boundary against rows written through memory.Service.
 //
-// The count is a watermark, not manifest.observations minus the current row
-// count: export lists at most 10000 observations, rows can be deleted, and an
-// invalidation is a pending export change that adds no row. The accepted cost
-// is that a writer whose timestamp encoding is coarser (SQLite
+// The timestamp-only compatibility path is a watermark, not a subtraction of
+// row counts. Its accepted cost is that a writer whose encoding is coarser (SQLite
 // CURRENT_TIMESTAMP rows carry whole seconds) can sit on the same second as
 // the export and escape a strict ">" comparison.
 func (c StoreCounter) CountObservationsSince(ctx context.Context, since time.Time) (int, error) {
@@ -215,10 +220,27 @@ func (c StoreCounter) CountObservationsSince(ctx context.Context, since time.Tim
 	db.SetMaxOpenConns(1)
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	query := `SELECT COUNT(*) FROM observations WHERE created_at > ? OR (invalidated_at IS NOT NULL AND invalidated_at > ?)`
+	args := []any{since.UTC(), since.UTC()}
+	if c.ExportedIDs != nil {
+		ids, err := json.Marshal(c.ExportedIDs)
+		if err != nil {
+			return 0, fmt.Errorf("vault: observation counter: encode snapshot: %w", err)
+		}
+		// Save captures created_at before provider work. Snapshot membership
+		// detects a late commit regardless of that earlier wall-clock value.
+		// NOT IN materializes the ID set once rather than rescanning it per row.
+		query = `SELECT COUNT(*) FROM observations
+			WHERE (invalidated_at IS NOT NULL AND invalidated_at > ?)
+			OR (invalidated_at IS NULL
+			AND (valid_until IS NULL OR valid_until > ?)
+			AND (expires_at IS NULL OR expires_at > ?)
+			AND id NOT IN (SELECT value FROM json_each(?)))`
+		now := time.Now().UTC()
+		args = []any{since.UTC(), now, now, string(ids)}
+	}
 	var count int
-	if err := db.QueryRowContext(queryCtx,
-		`SELECT COUNT(*) FROM observations WHERE created_at > ? OR (invalidated_at IS NOT NULL AND invalidated_at > ?)`,
-		since.UTC(), since.UTC()).Scan(&count); err != nil {
+	if err := db.QueryRowContext(queryCtx, query, args...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("vault: observation counter: count pending observations: %w", err)
 	}
 	return count, nil
@@ -251,15 +273,15 @@ type Status struct {
 	ManifestSeen bool
 	// ManifestError names why a present manifest could not be used.
 	ManifestError string
-	// LastExportedAt is the completion time of the last successful export.
+	// LastExportedAt is the observation-read time of the last successful export.
 	LastExportedAt time.Time
 	// ExportedObservations is the observation count recorded by that export.
 	ExportedObservations int
 	// ExportedStore is the store path recorded by that export.
 	ExportedStore string
 
-	// Pending is the number of observations created or invalidated after the
-	// export watermark.
+	// Pending counts live observations absent from the successful snapshot and
+	// later invalidations, or timestamp-only changes for an older manifest.
 	Pending int
 	// PendingKnown is false when the store could not be read.
 	PendingKnown bool
@@ -312,7 +334,7 @@ func InspectStatus(ctx context.Context, opts StatusOptions) Status {
 	if status.ManifestError == "" {
 		counter := opts.Counter
 		if counter == nil {
-			counter = StoreCounter{Path: opts.StorePath}
+			counter = StoreCounter{Path: opts.StorePath, ExportedIDs: manifest.ObservationIDs}
 		}
 		pending, err := counter.CountObservationsSince(ctx, status.LastExportedAt)
 		if err != nil {

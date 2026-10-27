@@ -25,9 +25,9 @@ const (
 	NearDupReasonContentHash NearDupReason = "content_hash"
 	// NearDupReasonSessionTitle: the incoming save carries the same session id
 	// and the same non-empty title as a live observation inside the window,
-	// whatever its body says. This is the weaker rule: the bodies may differ
-	// beyond normalization, which is exactly why the merged-away body is kept
-	// verbatim in the provenance record.
+	// with matching numeric tokens. Syntax-bearing content must also match in
+	// full; only plain prose may differ beyond normalization. The merged-away
+	// body is kept verbatim in the provenance record.
 	NearDupReasonSessionTitle NearDupReason = "session_title"
 )
 
@@ -58,7 +58,7 @@ type NearDupMerge struct {
 	// content-hash identity, unchanged in meaning by this feature.
 	IncomingHash string
 	// NormalizedHash is the incoming save's normalized hash, or empty when
-	// normalization left no letters or digits.
+	// only removable sentence marks and whitespace remain.
 	NormalizedHash string
 }
 
@@ -67,34 +67,29 @@ type NearDupMerge struct {
 // table, no locale rules — because the memory layer makes no inference: the aim
 // is "the same sentence typed twice", not semantic matching.
 //
-// The rule is a conservative equivalence, not an aggressive squash:
-//
-//   - Letters, digits and combining marks survive, so a decomposed accent is
-//     not erased into its base letter ("e" + U+0301 stays distinct from "e").
-//     There is no NFC pass: the standard library ships no normalizer and the
-//     memory layer takes no dependency to gain one, so precomposed and
-//     decomposed spellings of the same word remain distinct inputs.
-//   - Whitespace runs collapse to a single space, so word boundaries survive:
-//     "ab c" and "a bc" stay different.
-//   - Mathematical symbols and ASCII arithmetic signs survive.
-//   - Other punctuation and symbols are removed
-//     without introducing a boundary, which is what still folds CJK sentence
-//     punctuation away: "过期，" and "过期：" both normalize to "过期".
-//
-// Case is lowered with unicode.ToLower, i.e. Unicode simple lowercase rather
-// than full case folding: no expanding mapping (ß, ligatures) is applied.
+// Plain prose permits Unicode simple lowercase, collapsed whitespace and
+// removal of a small set of trailing sentence marks. Interior punctuation and
+// other symbols are ambiguous without a language parser, so their presence
+// selects literal comparison of the whole body, trimming outer whitespace only.
+// This preserves grouping, field access, string quoting, case-sensitive names
+// and whitespace inside literals, including through the weaker session/title
+// rule. Combining marks are never stripped and no NFC pass is applied.
 //
 // The exact content hash never uses this function; it is a second, derived key.
 func NormalizeContentForHash(content string) string {
+	literal := strings.TrimSpace(content)
+	prose := strings.TrimRightFunc(literal, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(".,!?，。！？、；：", r)
+	})
+	if hasNearDupSyntax(prose) {
+		return literal
+	}
 	var b strings.Builder
-	b.Grow(len(content))
+	b.Grow(len(prose))
 	pendingSpace := false
-	for _, r := range content {
+	for _, r := range prose {
 		if unicode.IsSpace(r) {
 			pendingSpace = true
-			continue
-		}
-		if !hashSignificant(r) {
 			continue
 		}
 		if pendingSpace && b.Len() > 0 {
@@ -106,28 +101,31 @@ func NormalizeContentForHash(content string) string {
 	return b.String()
 }
 
-// hashSignificant reports whether r survives normalization. Letters, digits and
-// combining marks carry content; the hyphen/minus and the arithmetic and
-// assignment signs carry meaning that a letters-and-digits filter would erase
-// ("x=-1" versus "x=1"). Every other punctuation or symbol rune is formatting.
-func hashSignificant(r rune) bool {
-	switch {
-	case unicode.IsLetter(r), unicode.IsDigit(r), unicode.IsMark(r), unicode.Is(unicode.Sm, r):
-		return true
-	}
-	switch r {
-	case '-', '+', '=', '%', '*', '/', '^':
-		return true
+func hasNearDupSyntax(content string) bool {
+	for _, r := range content {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r) && !unicode.IsSpace(r) {
+			return true
+		}
 	}
 	return false
 }
 
+// NearDupCodeContent returns the complete comparison body when it contains
+// syntax, or an empty string for plain prose. The weaker session/title rule
+// must compare the whole syntax-bearing body, including unpunctuated operands.
+func NearDupCodeContent(content string) string {
+	normalized := NormalizeContentForHash(content)
+	if hasNearDupSyntax(normalized) {
+		return normalized
+	}
+	return ""
+}
+
 // hashNormalized returns the SHA-256 hex digest of NormalizeContentForHash
-// (content), or the empty string when normalization leaves nothing significant
-// at all — no letter, digit, combining mark or meaning-bearing sign.
-// Punctuation-only bodies ("...", "!!!") all normalize to the empty string;
-// treating that as "no near-duplicate key" keeps them from colliding with each
-// other instead of matching on nothing.
+// (content), or the empty string when only removable sentence marks and
+// whitespace remain. Sentence-marks-only bodies ("...", "!!!") normalize to
+// the empty string; treating that as "no near-duplicate key" keeps them from
+// colliding with each other instead of matching on nothing.
 func hashNormalized(content string) string {
 	normalized := NormalizeContentForHash(content)
 	if normalized == "" {
