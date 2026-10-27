@@ -5,7 +5,6 @@ Defines observation lifecycle semantics and graph-augmented retrieval behaviour 
 
 ## Requirements
 
-
 ### Requirement: Type-differentiated time decay
 
 The retrieval ranking policy SHALL apply time-decay rates specific to observation types instead of a single global rate. Types carrying durable system knowledge (`convention`, `architecture`, `decision`) SHALL decay at rate 0.002; `pattern`, `preference`, `semantic` at 0.03; `bugfix`, `context`, `episodic` at 0.05; and `correction` at 0.10. The decay rate used for a result SHALL be derivable from its observation type alone.
@@ -161,3 +160,106 @@ The capability document SHALL report `pinned_memory` and `graph_retrieval` only 
 
 - **WHEN** the capability document is read from a build where pinning and graph expansion are active
 - **THEN** both flags are true and the derived tier list reflects them
+
+### Requirement: Near-duplicate save merge
+
+The memory layer SHALL store a normalized form of each observation's content —
+case-folded with whitespace and punctuation removed — and SHALL use it to merge
+observations that differ only in case, whitespace or punctuation, within the same
+`(agent_id, project)` and inside a configurable time window whose default is 24
+hours. Every merge SHALL retain the merged-away content verbatim in a provenance
+record. The exact content hash SHALL keep its current definition and value, and
+SHALL NOT be recomputed for existing rows.
+
+#### Scenario: punctuation, case or whitespace variant merges
+
+- **WHEN** an observation is saved in an `(agent_id, project)` that already holds a live observation whose content differs only in case, whitespace or punctuation, and that observation was last touched inside the near-duplicate window
+- **THEN** no second live observation is created, the existing observation's access signal is incremented, a provenance record retains the merged-away content, and the save returns the existing observation's id
+
+#### Scenario: same session and title inside the window merges
+
+- **WHEN** an observation is saved with a session id and a non-empty title that match a live observation inside the near-duplicate window
+- **THEN** that observation is merged into under the same rule, the merged-away content is retained verbatim in the provenance record, and the provenance row is marked with the session/title origin
+
+#### Scenario: different content does not merge
+
+- **WHEN** two observations in the same `(agent_id, project)` differ by at least one letter or digit
+- **THEN** both are stored as separate observations
+
+#### Scenario: outside the window never merges
+
+- **WHEN** a normalized-identical observation exists but falls outside the near-duplicate window
+- **THEN** the new observation is created and the save result reports the existing one as a candidate without merging it
+
+#### Scenario: observational content is traceable
+
+- **WHEN** a near-duplicate merge occurs
+- **THEN** a provenance record links the survivor to the merged-away save and holds both its verbatim content and its content hash (plus the normalized hash and the merge reason), and this record does not alter retrieval scores
+
+#### Scenario: a merge is auditable and reversible
+
+- **WHEN** an operator inspects a provenance record for a merge
+- **THEN** the merged-away content is available verbatim and can be restored by saving it again, with no dedicated undo command required
+
+#### Scenario: pre-existing rows are not backfilled
+
+- **WHEN** an observation written before this behaviour existed is compared against a new save
+- **THEN** no near-duplicate match is produced from it, its content hash is unchanged, and its stored content is untouched
+
+### Requirement: Deterministic dedup capability reporting
+
+`read_capabilities` SHALL describe `deterministic_dedup` in terms of the behaviour
+the layer actually enforces: exact content-hash dedup per `(agent_id, project)` is
+unconditional, and near-duplicate merging is bounded by the configured window.
+
+#### Scenario: capability text matches enforcement
+
+- **WHEN** capabilities are read
+- **THEN** the dedup entry names both layers and the effective window, and it reports no probabilistic or model-dependent matching
+
+### Requirement: Bulk Fact-Time Retirement
+
+`mnemos retire` SHALL set `valid_until = now` on every observation matching the
+supplied selectors, in one transaction, and SHALL report the affected count.
+
+Retirement MUST set only `valid_until`. It MUST NOT modify `created_at`,
+`invalidated_at`, or any indexed text column, and it MUST NOT delete rows, so
+that a historical query before the retirement instant still returns the
+observation.
+
+At least one selector among `--project`, `--importance-max`, `--no-access`, and
+`--older-than` MUST be supplied; with none, the command SHALL fail as a usage
+error and MUST NOT write.
+
+`--dry-run` SHALL run the identical selection, print the identical report, and
+write nothing.
+
+#### Scenario: Retire by project, importance and access
+
+- **WHEN** `mnemos retire --project alpha --importance-max 3 --no-access` runs
+- **THEN** observations in project `alpha` with importance 3 or less and zero accesses get `valid_until` set to now, and the count is printed
+
+#### Scenario: Retirement is visible to temporal queries
+
+- **WHEN** an observation is retired and is then queried with `AsOf` set to a time before the retirement
+- **THEN** the observation is returned; with `AsOf` after the retirement it is not
+
+#### Scenario: Supersession semantics untouched
+
+- **WHEN** a retired observation is inspected
+- **THEN** its `invalidated_at` is unchanged and its text is unchanged
+
+#### Scenario: No selector is refused
+
+- **WHEN** `mnemos retire` runs with no selectors
+- **THEN** the command exits with a usage error and no row is modified
+
+#### Scenario: Dry run previews
+
+- **WHEN** `mnemos retire --project alpha --dry-run` runs
+- **THEN** the count and sample rows that would be affected are printed and no row is modified
+
+#### Scenario: Bounded sample
+
+- **WHEN** more than five observations match
+- **THEN** the report includes a sample of at most five entries and the full count

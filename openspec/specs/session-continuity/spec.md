@@ -311,3 +311,119 @@ Candidate enumeration SHALL determine visibility, exact task matching and ambigu
 #### Scenario: Recorded times have equivalent textual formats
 - **WHEN** sources use different valid timestamp representations
 - **THEN** ordering follows their actual time values and the existing session-ID tie break
+
+### Requirement: Session end ownership guard
+
+`mnemos_session_end` SHALL close only a session the caller is entitled to close:
+the session the invocation is bound to, or a session carried by a continuity
+receipt whose workspace binding matches the invocation's workspace. Ownership
+SHALL be decided by workspace binding rather than by agent identity. The host
+hook paths SHALL resolve their session themselves and SHALL be unaffected.
+
+#### Scenario: own session closes
+
+- **WHEN** the MCP tool is invoked with the session id the invocation is bound to
+- **THEN** the session is closed and the summary stored as before
+
+#### Scenario: foreign UUIDv7 rejected
+
+- **WHEN** the tool is invoked with a session id that is neither the bound session nor covered by a continuity receipt
+- **THEN** the call fails with `session_not_owned`, the session is left open, and the error text names the supported route (`mnemos sessions close <id>`)
+
+#### Scenario: receipt authorises across agents in one workspace
+
+- **WHEN** the caller holds a valid continuity receipt for the target session and the receipt's workspace matches the invocation's workspace, while the agent identity differs
+- **THEN** the close is accepted
+
+#### Scenario: receipt from another workspace rejected
+
+- **WHEN** the only receipt for the target session binds a different workspace
+- **THEN** the call fails with `session_not_owned`
+
+#### Scenario: hook path unaffected
+
+- **WHEN** a session is closed through the host hook path
+- **THEN** the host session is resolved as before and no ownership rejection occurs
+
+### Requirement: Local close as trusted maintenance channel
+
+The local CLI `mnemos sessions close` SHALL remain able to close any session id,
+because it is a trusted maintenance channel reached with local operator authority,
+and it SHALL be the documented route for orphaned sessions and batch closure.
+
+#### Scenario: orphan closure via CLI
+
+- **WHEN** an operator closes an orphaned session id locally
+- **THEN** the close succeeds regardless of the MCP ownership guard
+
+### Requirement: Open Session Backlog Is Reported
+
+`mnemos stats`, the MCP `read_stats` resource, and the MCP stats tool SHALL all
+report the number of open sessions and the age of the oldest open session, in
+the form `open sessions: N (oldest Xd)`.
+
+All three surfaces SHALL derive the value from a single session-service read so
+they cannot disagree.
+
+#### Scenario: Backlog line on an empty store
+
+- **WHEN** no session has been opened
+- **THEN** the surfaces report `open sessions: 0` and no oldest age
+
+#### Scenario: Backlog line with orphans
+
+- **WHEN** three sessions were opened and none closed, the oldest two days ago
+- **THEN** the surfaces report `open sessions: 3 (oldest 2d)`
+
+#### Scenario: Surfaces agree
+
+- **WHEN** the CLI and both MCP surfaces are queried against the same database
+- **THEN** they report the same count and the same oldest age
+
+### Requirement: Bulk Stale Session Reclaim
+
+`mnemos sessions close --stale <duration>` SHALL close every open session whose
+start time is older than `now - duration`, using the session service's existing
+per-session close path, with the status given by `--status` (default
+`abandoned`) and the summary given by `--summary`.
+
+A non-positive duration SHALL be rejected as a usage error with a non-zero exit
+code, because it would include the session that just started.
+
+The command SHALL print the number of sessions closed.
+
+#### Scenario: Reclaim orphaned sessions
+
+- **WHEN** five open sessions exist, two of them started more than 24 hours ago
+- **THEN** `mnemos sessions close --stale 24h --status abandoned --summary "reclaimed"` closes those two, prints `2`, and leaves the other three open
+
+#### Scenario: Nothing to reclaim
+
+- **WHEN** every open session started within the last hour
+- **THEN** `mnemos sessions close --stale 24h` closes nothing, prints `0`, and exits successfully
+
+#### Scenario: Non-positive duration rejected
+
+- **WHEN** `mnemos sessions close --stale 0` is run
+- **THEN** the command exits with a usage-error status and closes no session
+
+### Requirement: Session Listing Filters And Pagination
+
+`mnemos sessions` SHALL accept `--status`, `--limit`, `--offset`, and `--json`.
+The filtered result SHALL be stable across pages for an unchanged store, and the
+JSON form SHALL expose the same fields as the text form.
+
+#### Scenario: Filter by status
+
+- **WHEN** `mnemos sessions --status open` runs against a store with open and closed sessions
+- **THEN** only open sessions are listed
+
+#### Scenario: Paginate
+
+- **WHEN** `mnemos sessions --limit 2 --offset 2` runs against five sessions
+- **THEN** sessions three and four in the stable order are listed
+
+#### Scenario: JSON form
+
+- **WHEN** `mnemos sessions --json --limit 1` runs
+- **THEN** stdout is a JSON array with one object carrying the session fields

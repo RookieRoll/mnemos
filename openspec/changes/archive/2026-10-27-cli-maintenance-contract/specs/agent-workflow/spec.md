@@ -43,7 +43,7 @@ invocation cannot block.
 - **WHEN** the installer byte-comparison tests run against a pre-change binary
 - **THEN** they pass, because no hook command string or payload shape was modified
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Shared Task Session Flow
 
