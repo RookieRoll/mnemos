@@ -173,14 +173,16 @@ type Observation struct {
 	// assert it verbatim.
 	ContentHash string
 
-	// ContentHashNormalized is the SHA-256 of the case-folded,
-	// punctuation-and-whitespace-free form of Content (see
-	// NormalizeContentForHash). It is the second, derived dedup key: rows that
-	// differ only in case, spacing or punctuation share it, so a re-typed
-	// sentence folds into the existing observation instead of duplicating it.
-	// Empty (NULL on disk) when Content has no letters or digits, and for every
-	// row written before this key existed — those rows are never backfilled and
-	// never match a near-duplicate rule.
+	// ContentHashNormalized is the SHA-256 of the normalized form of Content
+	// (see NormalizeContentForHash): letters, digits, combining marks and the
+	// meaning-bearing signs - + = % survive, Unicode-lowercased, whitespace
+	// runs collapse to one space and other punctuation is removed. It is the
+	// second, derived dedup key: rows that differ only in case, spacing or
+	// punctuation share it, so a re-typed sentence folds into the existing
+	// observation instead of duplicating it. Empty (NULL on disk) when Content
+	// holds no significant rune at all, and for every row written before this
+	// key existed — those rows are never backfilled and never match a
+	// near-duplicate rule.
 	ContentHashNormalized string
 
 	// Structured holds type-specific fields as JSON (e.g. corrections carry

@@ -159,6 +159,70 @@ func TestSameSourceSetIgnoresOrder(t *testing.T) {
 	}
 }
 
+// TestWithMergeSections pins the c3#2 rewrite rule: the synthesised body replaces
+// the prose the promotion owns, while the "## Merged from ..." tail a
+// skills.Merge appended is content absorbed from another skill and is carried
+// across the rewrite verbatim.
+func TestWithMergeSections(t *testing.T) {
+	const synthesised = "## Avoid\n- retry on 401"
+	cases := []struct {
+		name        string
+		synthesised string
+		existing    string
+		want        string
+	}{
+		{
+			name:        "hand-written body without a merged section is replaced",
+			synthesised: synthesised,
+			existing:    "hand step: refresh the token first",
+			want:        synthesised,
+		},
+		{
+			name:        "merged section survives after the synthesis",
+			synthesised: synthesised,
+			existing:    "old synthesis\n\n## Merged from other v2\n\nabsorbed step",
+			want:        synthesised + "\n\n## Merged from other v2\n\nabsorbed step",
+		},
+		{
+			name:        "absorbed body keeps its own headings",
+			synthesised: synthesised,
+			existing:    "old\n\n## Merged from other v2\n\n## Avoid\n- inner step",
+			want:        synthesised + "\n\n## Merged from other v2\n\n## Avoid\n- inner step",
+		},
+		{
+			name:        "every merged section is carried, not just the first",
+			synthesised: synthesised,
+			existing:    "old\n\n## Merged from a v1\n\nA\n\n## Merged from b v2\n\nB",
+			want:        synthesised + "\n\n## Merged from a v1\n\nA\n\n## Merged from b v2\n\nB",
+		},
+		{
+			name:        "a merged tail replaces an empty synthesis",
+			synthesised: "",
+			existing:    "## Merged from a v1\n\nA",
+			want:        "## Merged from a v1\n\nA",
+		},
+		{
+			name:        "an inline mention is not a section",
+			synthesised: synthesised,
+			existing:    "note: ## Merged from is the marker skills.Merge writes",
+			want:        synthesised,
+		},
+		{
+			name:        "empty existing body leaves the synthesis alone",
+			synthesised: synthesised,
+			existing:    "",
+			want:        synthesised,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := withMergeSections(c.synthesised, c.existing); got != c.want {
+				t.Errorf("withMergeSections() =\n%q\nwant\n%q", got, c.want)
+			}
+		})
+	}
+}
+
 // ---- integration tests -----------------------------------------------------
 
 type promoteFixture struct {

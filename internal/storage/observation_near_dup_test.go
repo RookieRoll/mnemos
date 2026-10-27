@@ -27,7 +27,7 @@ func nearDupService(t *testing.T, now time.Time) (*storage.DB, *memory.Service) 
 
 // TestNearDupProvenanceRetainsBodyByteForByte covers the reversibility
 // contract: the merged-away content is stored verbatim — whitespace, unicode
-// punctuation, newlines and all — so an operator can restore it by re-saving
+// punctuation, newlines and all — so an operator can inspect it for recovery
 // that text, and the recorded hashes identify exactly which save was folded.
 func TestNearDupProvenanceRetainsBodyByteForByte(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
@@ -162,5 +162,158 @@ func TestNearDupSchemaShape(t *testing.T) {
 	}
 	if saved.Observation.ContentHash == normalized {
 		t.Fatal("the derived key must not equal the legacy content hash")
+	}
+}
+
+// TestNearDupSessionTitleSkipsLegacyRows pins the no-backfill guarantee on the
+// weaker rule. The derived key arrives without a backfill, so a row written
+// before this behaviour existed carries NULL, and no near-duplicate rule may use
+// it as a survivor — including session/title, which never reads the key. A row
+// saved by this build still folds normally.
+func TestNearDupSessionTitleSkipsLegacyRows(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	db, svc := nearDupService(t, now)
+	ctx := context.Background()
+	if _, err := db.SQL().Exec(
+		"INSERT INTO sessions(id, agent_id, project, goal) VALUES('sess-legacy','default','proj','legacy')"); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-0012 row: same session, title, project and trust tier inside the
+	// window, but content_hash_normalized is NULL because 0012 never backfills.
+	if _, err := db.SQL().Exec(`
+		INSERT INTO observations
+		       (id, session_id, agent_id, project, title, content, obs_type, importance,
+		        created_at, valid_from, content_hash, trust_tier, source_kind)
+		VALUES ('legacy-row', 'sess-legacy', 'default', 'proj', 'rollout plan',
+		        'phase zero body', 'context', 5, ?, ?, 'legacy-hash', 'curated', 'user')`,
+		now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := svc.Save(ctx, memory.SaveInput{
+		SessionID: "sess-legacy", Title: "rollout plan", Type: memory.TypeContext,
+		Project: "proj", Content: "phase one covers the staging cluster",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.NearDup != nil || fresh.Deduped {
+		t.Fatalf("a pre-0012 row must never be a survivor: %+v", fresh)
+	}
+	if fresh.Observation.ID == "legacy-row" {
+		t.Fatal("the save folded into a row written before the rule existed")
+	}
+
+	merged, err := svc.Save(ctx, memory.SaveInput{
+		SessionID: "sess-legacy", Title: "rollout plan", Type: memory.TypeContext,
+		Project: "proj", Content: "phase one shipped to staging on friday",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.NearDup == nil || merged.NearDup.Reason != memory.NearDupReasonSessionTitle {
+		t.Fatalf("a row carrying the derived key must still fold: %+v", merged)
+	}
+	if merged.Observation.ID != fresh.Observation.ID {
+		t.Fatalf("merge returned %s, want %s", merged.Observation.ID, fresh.Observation.ID)
+	}
+	var rows int
+	if err := db.SQL().QueryRow("SELECT COUNT(*) FROM observations").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 {
+		t.Fatalf("rows = %d, want the legacy row plus one live survivor", rows)
+	}
+}
+
+// TestNearDupLivePredicateRequiresEffectiveSurvivor pins valid_from in the
+// shared live predicate: a row whose fact time has not started is not a survivor
+// for either rule, while the effective instant itself is inclusive. Folding into
+// a future-effective row would bury the incoming save behind an observation
+// retrieval cannot see yet.
+func TestNearDupLivePredicateRequiresEffectiveSurvivor(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name      string
+		offset    time.Duration
+		wantMerge bool
+	}{
+		{name: "past-effective survivor folds", offset: -time.Hour, wantMerge: true},
+		{name: "survivor effective exactly now folds", offset: 0, wantMerge: true},
+		{name: "future-effective survivor never folds", offset: time.Hour, wantMerge: false},
+	}
+	for _, tc := range cases {
+		t.Run("content hash: "+tc.name, func(t *testing.T) {
+			db, svc := nearDupService(t, now)
+			ctx := context.Background()
+			validFrom := now.Add(tc.offset)
+			first, err := svc.Save(ctx, memory.SaveInput{
+				Title: "deploy note", Type: memory.TypePattern, Project: "proj",
+				Content: "Enable WAL for concurrent readers", ValidFrom: &validFrom,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := svc.Save(ctx, memory.SaveInput{
+				Title: "deploy note", Type: memory.TypePattern, Project: "proj",
+				Content: "Enable WAL, for concurrent readers!",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNearDupSurvivorDecision(t, db, first, second, tc.wantMerge)
+		})
+		t.Run("session title: "+tc.name, func(t *testing.T) {
+			db, svc := nearDupService(t, now)
+			ctx := context.Background()
+			if _, err := db.SQL().Exec(
+				"INSERT INTO sessions(id, agent_id, project, goal) VALUES('sess-effective','default','proj','effective')"); err != nil {
+				t.Fatal(err)
+			}
+			validFrom := now.Add(tc.offset)
+			first, err := svc.Save(ctx, memory.SaveInput{
+				SessionID: "sess-effective", Title: "rollout plan", Type: memory.TypeContext,
+				Project: "proj", Content: "phase one covers the staging cluster", ValidFrom: &validFrom,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := svc.Save(ctx, memory.SaveInput{
+				SessionID: "sess-effective", Title: "rollout plan", Type: memory.TypeContext,
+				Project: "proj", Content: "phase one shipped to staging on friday",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNearDupSurvivorDecision(t, db, first, second, tc.wantMerge)
+		})
+	}
+}
+
+// assertNearDupSurvivorDecision checks one fold decision and, on the miss path,
+// that a not-yet-effective row is not even reported as an out-of-window hint.
+func assertNearDupSurvivorDecision(t *testing.T, db *storage.DB, first, second *memory.SaveResult, wantMerge bool) {
+	t.Helper()
+	var rows int
+	if err := db.SQL().QueryRow("SELECT COUNT(*) FROM observations").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if wantMerge {
+		if second.NearDup == nil || second.Observation.ID != first.Observation.ID {
+			t.Fatalf("expected a fold into %s, got %+v", first.Observation.ID, second)
+		}
+		if rows != 1 {
+			t.Fatalf("merged save left %d rows, want 1", rows)
+		}
+		return
+	}
+	if second.NearDup != nil || second.Observation.ID == first.Observation.ID {
+		t.Fatalf("a not-yet-effective survivor must not be folded into: %+v", second)
+	}
+	if second.NearDupHint != "" {
+		t.Fatalf("a not-yet-effective row must not be reported as a hint either: %q", second.NearDupHint)
+	}
+	if rows != 2 {
+		t.Fatalf("rows = %d, want 2", rows)
 	}
 }

@@ -137,10 +137,11 @@ func (s *Service) Select(ctx context.Context, name string, scope Scope) ([]Skill
 }
 
 // Delete removes every skill selected by the input through the skill store's
-// normal delete, so the skills_fts mirror is maintained by the table triggers
-// (the skill-lifecycle contract forbids a raw SQL DELETE, which would leave
-// orphan index rows behind). Selection is shared with Select, so DryRun prints
-// exactly the rows a real run removes while writing nothing.
+// normal delete. Every skill write goes through the store, and the skills_fts
+// mirror follows the skills table through its database triggers, so no separate
+// index bookkeeping is needed (or wanted) at this layer. Selection is shared
+// with Select, so DryRun prints exactly the rows a real run removes while
+// writing nothing.
 //
 // A name that matches nothing is not an error: the result simply carries zero
 // rows, which is what the CLI reports.
@@ -164,29 +165,46 @@ func (s *Service) Delete(ctx context.Context, in DeleteInput) (*DeleteResult, er
 // Merge keeps one of the skills selected by the input and absorbs the rest.
 // The keeper is the highest version by default, or the version named by
 // KeepVersion; every other match is folded into it — tags and source sessions
-// are unioned, and the keeper's content plus version are rewritten through the
-// store's normal Upsert, which is the versioning path every other skill write
-// uses.
+// are unioned, and the keeper's content plus version are rewritten by the store.
 //
 // "Mark superseded" is implemented as absorb-then-remove. The skills table has
 // no status column and this change is deliberately migration-free (design D6),
 // so a merged loser does not survive as a flagged row: its content and
 // provenance live on in the keeper at a higher version, and the loser row is
-// removed through the store delete so the full-text mirror drops it too.
+// removed.
+//
+// The rewrite and the removals happen in one store transaction (see
+// MergingStore), guarded by the versions this selection observed. That makes the
+// whole merge all-or-nothing — a delete that fails rolls the keeper rewrite back
+// instead of leaving a bumped keeper behind — and it turns a concurrent write
+// into a reported ErrMergeConflict rather than a silent overwrite. A store that
+// cannot offer that guarantee is refused, not degraded to a multi-step write.
 //
 // Two rows can share a name only across agents, because (agent_id, name) is
 // unique, so a single-agent scope has at most one match and merges nothing.
 // Merge is idempotent: a second run over an already merged name selects one row
-// and writes nothing. DryRun returns the same selection and writes nothing. The
-// keeper is written before any loser is removed, so a failure part-way through
-// leaves the merged content in the keeper rather than deleting it.
+// and writes nothing, and a merge whose folded content already matches the
+// keeper deletes the superseded rows without bumping the version.
+//
+// KeepVersion is validated even when the name matches nothing: a negative value
+// is a usage error and a version that cannot match is a no-match error, so a
+// caller that asked for a specific version never gets a silent success. DryRun
+// returns the same selection and writes nothing.
 func (s *Service) Merge(ctx context.Context, in MergeInput) (*MergeResult, error) {
+	if in.KeepVersion < 0 {
+		return nil, fmt.Errorf("skill merge: keep version must be positive, got %d", in.KeepVersion)
+	}
 	rows, err := s.Select(ctx, in.Name, in.Scope)
 	if err != nil {
 		return nil, fmt.Errorf("skill merge: %w", err)
 	}
 	res := &MergeResult{DryRun: in.DryRun}
 	if len(rows) == 0 {
+		if in.KeepVersion > 0 {
+			// Nothing matched the name, so nothing can match the version either:
+			// the request is unsatisfiable, not a successful no-op.
+			return nil, fmt.Errorf("skill merge: no match at version %d", in.KeepVersion)
+		}
 		return res, nil
 	}
 	keeper, losers, err := splitMergeRows(rows, in.KeepVersion)
@@ -203,17 +221,14 @@ func (s *Service) Merge(ctx context.Context, in MergeInput) (*MergeResult, error
 		return nil, fmt.Errorf("skill merge: %w", err)
 	}
 	res.Keeper = merged
-	for _, sk := range losers {
-		if err := s.store.Delete(ctx, sk.ID); err != nil {
-			return res, fmt.Errorf("skill merge: delete %q: %w", sk.ID, err)
-		}
-	}
 	return res, nil
 }
 
 // splitMergeRows picks the keeper out of a Select result. KeepVersion above zero
 // must name an exact version; zero keeps the highest version. The selection is
 // already ordered, so ties break deterministically instead of by map iteration.
+// Merge validates the same rules before it selects — this guard keeps the helper
+// honest for any future caller that skips that pre-check.
 func splitMergeRows(rows []Skill, keepVersion int) (Skill, []Skill, error) {
 	if keepVersion < 0 {
 		return Skill{}, nil, fmt.Errorf("keep version must be positive, got %d", keepVersion)
@@ -241,25 +256,39 @@ func splitMergeRows(rows []Skill, keepVersion int) (Skill, []Skill, error) {
 	return rows[keeperIdx], losers, nil
 }
 
-// mergeSectionHeader labels content a merge appended to the keeper, so a reader
-// can tell the keeper's own text from what arrived from another row.
-const mergeSectionHeader = "## Merged from"
+// MergeSectionHeader labels content a merge appended to the keeper, so a reader
+// can tell the keeper's own text from what arrived from another row. It is
+// exported because the promotion path re-synthesises a skill's body and must
+// carry the sections a merge contributed across that rewrite instead of dropping
+// them.
+const MergeSectionHeader = "## Merged from"
 
-// mergeInto folds losers into keeper. The keeper's identity fields (agent, name,
-// id) are untouched — only its content, tags, provenance, and version move — so
-// anything referencing the keeper (rumination records, promoted-origin tags)
-// keeps pointing at a live skill.
+// mergeInto folds losers into keeper and hands the result to the store's
+// transactional merge. The keeper's identity fields (agent, name, id) are
+// untouched — only its content, tags, provenance, and version move — so anything
+// referencing the keeper (rumination records, promoted-origin tags) keeps
+// pointing at a live skill.
+//
+// The content fold itself is pure: it reads the rows the selection returned and
+// produces the payload. The store performs every write, and it performs them
+// together, so a failure cannot leave a half-merged store behind.
 func (s *Service) mergeInto(ctx context.Context, keeper Skill, losers []Skill) (*Skill, error) {
-	in := SaveInput{
-		AgentID:        keeper.AgentID,
-		Name:           keeper.Name,
+	store, ok := s.store.(MergingStore)
+	if !ok {
+		return nil, fmt.Errorf("store does not support transactional merge")
+	}
+	in := MergeWriteInput{
+		KeeperID:       keeper.ID,
+		KeeperVersion:  keeper.Version,
 		Description:    strings.TrimSpace(keeper.Description),
 		Procedure:      strings.TrimRight(keeper.Procedure, "\n"),
 		Pitfalls:       strings.TrimRight(keeper.Pitfalls, "\n"),
 		Tags:           append([]string(nil), keeper.Tags...),
 		SourceSessions: append([]string(nil), keeper.SourceSessions...),
+		Losers:         make([]SkillRef, 0, len(losers)),
 	}
 	for _, loser := range losers {
+		in.Losers = append(in.Losers, SkillRef{ID: loser.ID, Version: loser.Version})
 		source := fmt.Sprintf("%s v%d", loser.AgentID, loser.Version)
 		in.Description = mergeText(in.Description, strings.TrimSpace(loser.Description))
 		in.Procedure = mergeSection(in.Procedure, source, loser.Procedure)
@@ -270,7 +299,7 @@ func (s *Service) mergeInto(ctx context.Context, keeper Skill, losers []Skill) (
 	if in.Description == "" {
 		in.Description = fmt.Sprintf("Merged skill %q", keeper.Name)
 	}
-	return s.Save(ctx, in)
+	return store.Merge(ctx, in)
 }
 
 // mergeText appends extra to base once, keeping the merged description free of
@@ -292,7 +321,7 @@ func mergeSection(base, source, body string) string {
 	if body == "" || strings.Contains(base, body) {
 		return base
 	}
-	section := mergeSectionHeader + " " + source + "\n\n" + body
+	section := MergeSectionHeader + " " + source + "\n\n" + body
 	if base == "" {
 		return section
 	}

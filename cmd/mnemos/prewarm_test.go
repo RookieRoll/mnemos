@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/polyxmedia/mnemos/internal/memory"
 	"github.com/polyxmedia/mnemos/internal/prewarm"
@@ -358,25 +363,37 @@ func sessionTotal(t *testing.T, ctx context.Context) int64 {
 }
 
 func TestPrewarm_NoPayloadIsReadOnly(t *testing.T) {
-	homeWithConfig(t, "")
-	ctx := context.Background()
-	before := sessionTotal(t, ctx)
-
 	// The hand-run shape: stdin is a pipe, not a terminal, but it carries no
-	// hook payload. Prewarm must compose and print, and write nothing.
-	var out string
-	withStdin(t, "", func() {
-		out = captureStdout(t, func() {
-			if err := runPrewarm(ctx, []string{"--project", "mnemos"}); err != nil {
-				t.Fatalf("prewarm: %v", err)
+	// hook payload. Prewarm must compose and print, and write nothing. The
+	// stdin path only counts a payload that carries hook_event_name or
+	// session_id (CR c4#1), so unrelated JSON and plain text stay read-only.
+	cases := []struct{ name, stdin string }{
+		{"empty stdin", ""},
+		{"unrelated json", `{"cwd":"/tmp"}`},
+		{"empty json object", `{}`},
+		{"not json", "not a payload"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			homeWithConfig(t, "")
+			ctx := context.Background()
+			before := sessionTotal(t, ctx)
+
+			var out string
+			withStdin(t, tc.stdin, func() {
+				out = captureStdout(t, func() {
+					if err := runPrewarm(ctx, []string{"--project", "mnemos"}); err != nil {
+						t.Fatalf("prewarm: %v", err)
+					}
+				})
+			})
+			if strings.Contains(out, "mnemos_session_id:") {
+				t.Errorf("a payload-less prewarm must not report a session: %q", out)
+			}
+			if after := sessionTotal(t, ctx); after != before {
+				t.Fatalf("payload-less prewarm changed the session count: %d -> %d", before, after)
 			}
 		})
-	})
-	if strings.Contains(out, "mnemos_session_id:") {
-		t.Errorf("a payload-less prewarm must not report a session: %q", out)
-	}
-	if after := sessionTotal(t, ctx); after != before {
-		t.Fatalf("payload-less prewarm changed the session count: %d -> %d", before, after)
 	}
 }
 
@@ -452,21 +469,67 @@ func TestPrewarm_OpenSessionFlagForces(t *testing.T) {
 	}
 }
 
-func TestHookPayloadFrom(t *testing.T) {
+// TestParseExplicitHookPayload pins CR c4#1: --payload is only a hook call
+// when it is a JSON object. A bare token used to be enough to open a session.
+func TestParseExplicitHookPayload(t *testing.T) {
 	cases := []struct {
-		name     string
-		explicit string
-		stdin    string
-		nilRead  bool
-		want     bool
+		name    string
+		raw     string
+		wantErr bool
+		want    hookInput
 	}{
-		{"explicit payload", `{"hook_event_name":"SessionStart"}`, "", false, true},
-		{"explicit payload without hook fields", `{"cwd":"/tmp"}`, "", false, true},
-		{"stdin hook payload", "", `{"session_id":"s1"}`, false, true},
-		{"stdin unrelated json", "", `{"cwd":"/tmp"}`, false, false},
-		{"stdin not json", "", "hello", false, false},
-		{"empty stdin", "", "", false, false},
-		{"nil reader", "", "", true, false},
+		{
+			name: "object with hook markers",
+			raw:  `{"hook_event_name":"SessionStart","session_id":"s1"}`,
+			want: hookInput{HookEventName: "SessionStart", SessionID: "s1"},
+		},
+		{name: "empty object is a deliberate hook call", raw: `{}`},
+		{name: "object without hook markers", raw: `{"cwd":"/tmp"}`, want: hookInput{CWD: "/tmp"}},
+		{name: "bare token", raw: "garbage", wantErr: true},
+		{name: "number", raw: "42", wantErr: true},
+		{name: "array", raw: "[]", wantErr: true},
+		{name: "string", raw: `"hello"`, wantErr: true},
+		{name: "null", raw: "null", wantErr: true},
+		{name: "truncated object", raw: "{", wantErr: true},
+		{name: "trailing garbage", raw: `{"cwd":"/tmp"} oops`, wantErr: true},
+		{name: "wrong field type", raw: `{"session_id": 7}`, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseExplicitHookPayload(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("%q: expected an error, got %+v", tc.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%q: unexpected error: %v", tc.raw, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("%q: got %+v want %+v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolvePrewarmPayloadFromStdin pins CR c4#1 from the other side: the
+// stdin path still needs hook_event_name or session_id to count as a payload,
+// so a pipe carrying unrelated JSON stays a read-only invocation.
+func TestResolvePrewarmPayloadFromStdin(t *testing.T) {
+	cases := []struct {
+		name    string
+		stdin   string
+		nilRead bool
+		want    bool
+	}{
+		{"hook payload", `{"session_id":"s1"}`, false, true},
+		{"event only", `{"hook_event_name":"SessionStart"}`, false, true},
+		{"unrelated json", `{"cwd":"/tmp"}`, false, false},
+		{"empty object", `{}`, false, false},
+		{"not json", "hello", false, false},
+		{"empty stdin", "", false, false},
+		{"nil reader", "", true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -474,12 +537,271 @@ func TestHookPayloadFrom(t *testing.T) {
 			if tc.nilRead {
 				stdin = nil
 			}
-			in, detected := hookPayloadFrom(tc.explicit, stdin)
+			in, detected, err := resolvePrewarmPayload(context.Background(), nil, stdin)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if detected != tc.want {
 				t.Fatalf("detected = %v, want %v", detected, tc.want)
 			}
 			if !detected && (in.HookEventName != "" || in.SessionID != "" || in.CWD != "") {
 				t.Fatalf("an undetected payload must be zero, got %+v", in)
+			}
+		})
+	}
+
+	t.Run("explicit payload needs no marker", func(t *testing.T) {
+		in := hookInput{CWD: "/tmp"}
+		got, detected, err := resolvePrewarmPayload(context.Background(), &in, strings.NewReader(""))
+		if err != nil || !detected {
+			t.Fatalf("explicit payload must count: detected=%v err=%v", detected, err)
+		}
+		if got.CWD != "/tmp" {
+			t.Fatalf("explicit payload was not used: %+v", got)
+		}
+	})
+}
+
+// shortStdinTimeout shortens the stdin deadline for one test. It is restored on
+// cleanup, and this package runs its tests sequentially, so the swap is safe.
+func shortStdinTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := hookStdinTimeout
+	hookStdinTimeout = d
+	t.Cleanup(func() { hookStdinTimeout = prev })
+}
+
+// TestReadNonTerminalStdinBounded pins CR c4#5: the old unbounded io.ReadAll
+// could hang on a writer that never closes and could grow without limit on a
+// redirected file. Both bounds are observable here.
+func TestReadNonTerminalStdinBounded(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("exactly at the cap", func(t *testing.T) {
+		data, err := readNonTerminalStdin(ctx, strings.NewReader(strings.Repeat("x", hookStdinLimit)))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(data) != hookStdinLimit {
+			t.Fatalf("read %d bytes, want %d", len(data), hookStdinLimit)
+		}
+	})
+
+	t.Run("over the cap", func(t *testing.T) {
+		data, err := readNonTerminalStdin(ctx, strings.NewReader(strings.Repeat("x", hookStdinLimit+1)))
+		if !errors.Is(err, errHookStdinTooLarge) {
+			t.Fatalf("err = %v, want errHookStdinTooLarge", err)
+		}
+		if data != nil {
+			t.Fatalf("an oversized stream must not be returned: %d bytes", len(data))
+		}
+	})
+
+	t.Run("nil reader", func(t *testing.T) {
+		data, err := readNonTerminalStdin(ctx, nil)
+		if err != nil || data != nil {
+			t.Fatalf("data=%q err=%v, want nothing", data, err)
+		}
+	})
+
+	t.Run("writer that never closes returns", func(t *testing.T) {
+		shortStdinTimeout(t, 100*time.Millisecond)
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("pipe: %v", err)
+		}
+		defer r.Close()
+		defer w.Close() // deliberately left open past the deadline below
+
+		start := time.Now()
+		data, err := readNonTerminalStdin(ctx, r)
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("expected timeout for an open writer")
+		}
+		if len(data) != 0 {
+			t.Fatalf("nothing was written, got %q", data)
+		}
+		if elapsed > 2*time.Second {
+			t.Fatalf("read blocked for %v, want it bounded by the deadline", elapsed)
+		}
+	})
+
+	t.Run("payload from a writer that never closes is discarded", func(t *testing.T) {
+		shortStdinTimeout(t, 300*time.Millisecond)
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("pipe: %v", err)
+		}
+		defer r.Close()
+		defer w.Close()
+
+		payload := `{"hook_event_name":"SessionStart"}`
+		if _, err := w.Write([]byte(payload)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		data, err := readNonTerminalStdin(ctx, r)
+		if err == nil {
+			t.Fatal("expected timeout for an open writer")
+		}
+		if len(data) != 0 {
+			t.Fatalf("incomplete stream returned data %q", data)
+		}
+	})
+}
+
+// TestPrewarm_OpenSessionTristate pins CR c4#2: --open-session is three-state,
+// so an explicit false must veto a payload-carrying invocation.
+func TestPrewarm_OpenSessionTristate(t *testing.T) {
+	payload := hookPayload(t, map[string]any{"hook_event_name": "SessionStart", "session_id": "claude-tristate"})
+	cases := []struct {
+		name     string
+		args     []string
+		stdin    string
+		wantOpen bool
+	}{
+		{"unset follows the payload", []string{"--project", "mnemos"}, payload, true},
+		{"unset without a payload stays read-only", []string{"--project", "mnemos"}, "", false},
+		{"explicit true opens without a payload", []string{"--project", "mnemos", "--open-session"}, "", true},
+		{"explicit true keeps the payload", []string{"--project", "mnemos", "--open-session=true"}, payload, true},
+		{"explicit false vetoes the payload", []string{"--project", "mnemos", "--open-session=false"}, payload, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			homeWithConfig(t, "")
+			ctx := context.Background()
+			before := sessionTotal(t, ctx)
+
+			var out string
+			withStdin(t, tc.stdin, func() {
+				out = captureStdout(t, func() {
+					if err := runPrewarm(ctx, tc.args); err != nil {
+						t.Fatalf("prewarm: %v", err)
+					}
+				})
+			})
+
+			after := sessionTotal(t, ctx)
+			if opened := after == before+1; opened != tc.wantOpen {
+				t.Fatalf("session count %d -> %d, wantOpen=%v", before, after, tc.wantOpen)
+			}
+			if reported := strings.Contains(out, "mnemos_session_id:"); reported != tc.wantOpen {
+				t.Fatalf("session id reported=%v, wantOpen=%v (output %q)", reported, tc.wantOpen, out)
+			}
+		})
+	}
+}
+
+// TestPrewarm_ExplicitEmptyPayloadOpensSession is the other half of CR c4#1:
+// a valid object is an explicit hook call even when it carries no fields, so
+// the strictness added for --payload garbage must not turn {} into a no-op.
+func TestPrewarm_ExplicitEmptyPayloadOpensSession(t *testing.T) {
+	homeWithConfig(t, "")
+	ctx := context.Background()
+	before := sessionTotal(t, ctx)
+
+	var out string
+	withStdin(t, "", func() {
+		out = captureStdout(t, func() {
+			if err := runPrewarm(ctx, []string{"--project", "mnemos", "--payload", "{}"}); err != nil {
+				t.Fatalf("prewarm: %v", err)
+			}
+		})
+	})
+	_ = sessionIDFromOutput(t, out)
+	if after := sessionTotal(t, ctx); after != before+1 {
+		t.Fatalf("an explicit payload is a deliberate hook call: %d -> %d", before, after)
+	}
+}
+
+// TestPrewarm_InvalidPayloadIsUsageError covers CR c4#1 end to end: the
+// invocation exits 2 and, because the decision precedes configuration, writes
+// no user state at all.
+func TestPrewarm_InvalidPayloadIsUsageError(t *testing.T) {
+	cases := []struct{ name, payload string }{
+		{"bare token", "garbage"},
+		{"array", "[]"},
+		{"null", "null"},
+		{"truncated object", "{"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := isolatedHome(t)
+			var stdout, stderr bytes.Buffer
+			code := dispatch(context.Background(), []string{"prewarm", "--payload", tc.payload}, &stdout, &stderr)
+			if code != exitUsage {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, exitUsage, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "invalid --payload") {
+				t.Errorf("stderr should name the offending flag: %q", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("a usage error must not print to stdout: %q", stdout.String())
+			}
+			assertHomeEmpty(t, home)
+		})
+	}
+}
+
+// TestPrewarm_ArgValidationPrecedesConfig pins CR c4#3: a malformed value is a
+// usage error (exit 2) even when the integration is disabled or the config
+// cannot be read, because those conditions used to answer with success.
+func TestPrewarm_ArgValidationPrecedesConfig(t *testing.T) {
+	cases := []struct {
+		name       string
+		config     string
+		args       []string
+		wantExit   int
+		wantStderr string
+	}{
+		{
+			name:       "disabled integration still rejects an invalid mode",
+			config:     "[integration]\ndisabled = true\n",
+			args:       []string{"prewarm", "--mode", "wat"},
+			wantExit:   exitUsage,
+			wantStderr: "invalid mode",
+		},
+		{
+			name:       "disabled integration still rejects an invalid format",
+			config:     "[integration]\ndisabled = true\n",
+			args:       []string{"prewarm", "--format", "xml"},
+			wantExit:   exitUsage,
+			wantStderr: "invalid format",
+		},
+		{
+			name:       "disabled integration still rejects an invalid payload",
+			config:     "[integration]\ndisabled = true\n",
+			args:       []string{"prewarm", "--payload", "garbage"},
+			wantExit:   exitUsage,
+			wantStderr: "invalid --payload",
+		},
+		{
+			name:       "unreadable config still rejects an invalid mode",
+			config:     "[search\n",
+			args:       []string{"prewarm", "--mode", "wat"},
+			wantExit:   exitUsage,
+			wantStderr: "invalid mode",
+		},
+		{
+			name:     "disabled integration stays quiet for a valid invocation",
+			config:   "[integration]\ndisabled = true\n",
+			args:     []string{"prewarm"},
+			wantExit: exitSuccess,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			homeWithConfig(t, tc.config)
+			var stdout, stderr bytes.Buffer
+			code := dispatch(context.Background(), tc.args, &stdout, &stderr)
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, tc.wantExit, stderr.String())
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q: %q", tc.wantStderr, stderr.String())
+			}
+			if tc.wantExit == exitSuccess && stdout.Len() != 0 {
+				t.Errorf("a disabled integration must not compose anything: %q", stdout.String())
 			}
 		})
 	}

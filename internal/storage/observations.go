@@ -183,18 +183,21 @@ func (s *obsStore) Invalidate(ctx context.Context, id string, validUntil time.Ti
 }
 
 // retireIDsPerStatement bounds one retirement IN list. SQLite's host-parameter
-// ceiling is 32766 on current builds and was 999 on older ones, and a wholesale
-// retirement selects every matching live row, so a large store could otherwise
-// fail the command with "too many SQL variables". 900 ids plus the two
-// timestamp parameters stay under the historical 999 limit, and the chunks are
-// statements inside one transaction, so atomicity and the reported count are
-// unaffected.
+// ceiling is 32766 on current builds and was 999 on older ones, and every live
+// row a wholesale retirement selected lands in that list, so a large store could
+// otherwise fail the command with "too many SQL variables". 900 ids plus the
+// handful of timestamp and selector parameters stay under the historical 999
+// limit, and the chunks are statements inside one transaction, so atomicity and
+// the reported count are unaffected.
 const retireIDsPerStatement = 900
 
 // RetireObservations sets valid_until on every listed observation in one
-// transaction and returns how many rows it actually changed. It is the storage
-// half of memory.RetirementStore, the bulk fact-time retirement behind
-// 'mnemos retire'.
+// transaction and returns how many rows it actually changed. It is the narrow
+// half of memory.RetirementStore: it sees ids and a fact-time boundary, so it
+// can re-check the lifecycle columns only. memory.Service.Retire prefers
+// RetireObservationsGuarded, which also re-applies the caller's selectors and
+// names the rows it wrote, and falls back to this method for a store that offers
+// only the narrow form.
 //
 // Retirement writes only valid_until: created_at, invalidated_at, content_hash
 // and the indexed text stay as they were, and no row is deleted, so a query
@@ -202,65 +205,135 @@ const retireIDsPerStatement = 900
 // statement touches no FTS-indexed column, so the selective AFTER UPDATE
 // trigger in migration 0010 never retokenizes the row.
 //
-// The predicate is the live shape, so an id that stopped being live between
-// the service's read-only selection and this write is skipped rather than
-// re-stamped: an already invalidated row is left alone, and a row whose
-// valid_until is already at or before the retirement instant is left alone
-// too. That is what keeps a concurrent supersession or a re-run from
-// overwriting an earlier fact-time boundary. The returned count is the number
-// of rows actually retired, never the number of ids passed in.
+// The predicate is the live shape at the retirement instant, so an id that
+// stopped being live between the service's read-only selection and this write is
+// skipped rather than re-stamped: an already invalidated row is left alone, a
+// row whose valid_until is already at or before the retirement instant is left
+// alone, and a row that was not yet effective is left alone too — stamping
+// valid_until on a row whose valid_from is later would invert the fact-time
+// interval. valid_from is NOT NULL by schema, so the plain comparison is the
+// whole null contract. That is what keeps a concurrent supersession or a re-run
+// from overwriting an earlier fact-time boundary. The returned count is the
+// number of rows actually retired, never the number of ids passed in.
 func (s *obsStore) RetireObservations(ctx context.Context, ids []string, validUntil time.Time) (int64, error) {
+	retired, err := s.retireObservations(ctx, ids, memory.RetireInput{}, validUntil)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(retired)), nil
+}
+
+// RetireObservationsGuarded is the stronger retirement write behind
+// memory.GuardedRetirementStore. It repeats every selector from in inside the
+// UPDATE, so a row that gained an access, rose above the importance threshold,
+// changed project, or fell on the wrong side of the age cutoff between the
+// selection read and this write is skipped instead of stamped: the
+// select-then-write window cannot retire a row the selectors no longer match.
+//
+// It returns the ids it actually wrote, which is what lets the service build the
+// run's count and sample from the write rather than from the earlier read. The
+// ids come back in statement order, which SQLite does not specify; callers that
+// need a stable order re-order against their own selection.
+func (s *obsStore) RetireObservationsGuarded(ctx context.Context, ids []string, in memory.RetireInput, validUntil time.Time) ([]string, error) {
+	return s.retireObservations(ctx, ids, in, validUntil)
+}
+
+// retireObservations is the one retirement write: one transaction, chunked
+// UPDATE ... RETURNING statements, and an id list that is the write's own
+// account of what it changed.
+func (s *obsStore) retireObservations(ctx context.Context, ids []string, in memory.RetireInput, validUntil time.Time) ([]string, error) {
 	if len(ids) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 	at := validUntil.UTC()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("storage: %w", err)
+		return nil, fmt.Errorf("storage: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var retired int64
+	var retired []string
 	for start := 0; start < len(ids); start += retireIDsPerStatement {
 		end := start + retireIDsPerStatement
 		if end > len(ids) {
 			end = len(ids)
 		}
-		chunk := ids[start:end]
-		args := make([]any, 0, len(chunk)+2)
-		args = append(args, at)
-		for _, id := range chunk {
-			args = append(args, id)
-		}
-		args = append(args, at)
-
-		res, err := tx.ExecContext(ctx, `
-			UPDATE observations
-			   SET valid_until = ?
-			 WHERE id IN (`+placeholders(len(chunk))+`)
-			   AND invalidated_at IS NULL
-			   AND (valid_until IS NULL OR valid_until > ?)`, args...)
+		query, args := retireStatement(ids[start:end], in, at)
+		rows, err := tx.QueryContext(ctx, query, args...)
 		if err != nil {
-			return 0, fmt.Errorf("storage: %w", err)
+			return nil, fmt.Errorf("storage: %w", err)
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf("storage: %w", err)
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("storage: scan retired id: %w", err)
+			}
+			retired = append(retired, id)
 		}
-		retired += n
+		scanErr := rows.Err()
+		closeErr := rows.Close()
+		if scanErr != nil {
+			return nil, fmt.Errorf("storage: read retired ids: %w", scanErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("storage: close retired rows: %w", closeErr)
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("storage: %w", err)
+		return nil, fmt.Errorf("storage: %w", err)
 	}
 	return retired, nil
+}
+
+// retireStatement compiles one chunk of the retirement UPDATE. The predicate
+// re-checks the live shape at the retirement instant and then every selector the
+// caller supplied; RETURNING id makes the statement report the rows it actually
+// stamped, so the caller's count and sample come from the write itself.
+func retireStatement(chunk []string, in memory.RetireInput, at time.Time) (string, []any) {
+	var sb strings.Builder
+	sb.WriteString(`UPDATE observations
+		   SET valid_until = ?
+		 WHERE id IN (` + placeholders(len(chunk)) + `)
+		   AND invalidated_at IS NULL
+		   AND (valid_until IS NULL OR valid_until > ?)
+		   AND valid_from <= ?`)
+	args := make([]any, 0, len(chunk)+6)
+	args = append(args, at)
+	for _, id := range chunk {
+		args = append(args, id)
+	}
+	// valid_until and valid_from are compared against the same instant, which is
+	// both the fact-time boundary being written and the clock the selection used.
+	args = append(args, at, at)
+	if in.Project != "" {
+		sb.WriteString(` AND project = ?`)
+		args = append(args, in.Project)
+	}
+	if in.ImportanceMax > 0 {
+		sb.WriteString(` AND importance <= ?`)
+		args = append(args, in.ImportanceMax)
+	}
+	if in.NoAccess {
+		sb.WriteString(` AND access_count = 0`)
+	}
+	if !in.OlderThan.IsZero() {
+		sb.WriteString(` AND created_at < ?`)
+		args = append(args, in.OlderThan.UTC())
+	}
+	sb.WriteString(` RETURNING id`)
+	return sb.String(), args
 }
 
 // RetireObservations is the bulk fact-time retirement capability the
 // maintenance CLI depends on. The assertion keeps a future refactor of
 // obsStore from silently dropping it: memory.Service.Retire refuses a store
-// without it rather than falling back to per-row invalidation.
+// without it rather than falling back to per-row invalidation. The guarded
+// assertion keeps the stronger write — the one that re-checks the selectors and
+// reports the retired ids — from being lost behind the narrow interface.
 var _ memory.RetirementStore = (*obsStore)(nil)
+var _ memory.GuardedRetirementStore = (*obsStore)(nil)
 
 func (s *obsStore) Search(ctx context.Context, in memory.SearchInput) ([]memory.SearchResult, error) {
 	limit := in.Limit

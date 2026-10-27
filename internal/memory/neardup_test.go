@@ -8,25 +8,32 @@ import (
 	"time"
 )
 
-// TestNormalizeContentForHash pins the normalization contract from design D1:
-// letters and digits survive, everything else is dropped, and the surviving
-// runes are case-folded. Anything stronger (stemming, synonyms, locale rules)
-// would be inference, which the memory layer does not do.
+// TestNormalizeContentForHash pins the normalization contract: letters, digits,
+// combining marks and the meaning-bearing signs - + = % survive, whitespace runs
+// collapse to a single space so word boundaries survive, other punctuation is
+// dropped, and the surviving runes are Unicode-lowercased. Anything stronger
+// (stemming, synonyms, locale rules) would be inference, which the memory layer
+// does not do.
 func TestNormalizeContentForHash(t *testing.T) {
 	tests := []struct {
 		name    string
 		content string
 		want    string
 	}{
-		{name: "already normalized", content: "usewalmode", want: "usewalmode"},
-		{name: "case folded", content: "Use WAL Mode", want: "usewalmode"},
-		{name: "punctuation dropped", content: "Use WAL, Mode!", want: "usewalmode"},
-		{name: "whitespace dropped", content: "  use\twal\nmode  ", want: "usewalmode"},
-		{name: "digits kept", content: "sqlite 3.45.1", want: "sqlite3451"},
-		{name: "cjk letters kept", content: "使用 WAL 模式，记得", want: "使用wal模式记得"},
-		{name: "symbols dropped", content: "done ✅ ok → yes", want: "doneokyes"},
-		{name: "accents case-folded not stripped", content: "ÜBER Straße", want: "überstraße"},
-		{name: "punctuation only", content: "...!!! ---", want: ""},
+		{name: "already normalized", content: "use wal mode", want: "use wal mode"},
+		{name: "lowercased", content: "Use WAL Mode", want: "use wal mode"},
+		{name: "punctuation dropped", content: "Use WAL, Mode!", want: "use wal mode"},
+		{name: "whitespace collapsed to one space", content: "  use\twal\nmode  ", want: "use wal mode"},
+		{name: "digits kept", content: "sqlite 3.45.1", want: "sqlite 3451"},
+		{name: "cjk letters kept", content: "使用 WAL 模式，记得", want: "使用 wal 模式记得"},
+		{name: "math symbols kept", content: "done ✅ ok → yes", want: "done ok → yes"},
+		{name: "accents lowercased not stripped", content: "ÜBER Straße", want: "über straße"},
+		{name: "word boundary kept", content: "ab c", want: "ab c"},
+		{name: "minus and assignment signs kept", content: "x=-1", want: "x=-1"},
+		{name: "plus equals percent kept", content: "a+b=c 50%", want: "a+b=c 50%"},
+		{name: "combining mark kept", content: "e\u0301", want: "e\u0301"},
+		{name: "punctuation only", content: "...!!! ???", want: ""},
+		{name: "whitespace only", content: "   ", want: ""},
 		{name: "empty", content: "", want: ""},
 	}
 	for _, tc := range tests {
@@ -38,9 +45,51 @@ func TestNormalizeContentForHash(t *testing.T) {
 	}
 }
 
+// TestNormalizeContentForHashKeepsMeaning is the conservative-equivalence guard:
+// the three collisions the letters-only rule produced must stay distinct — a lost
+// word boundary ("ab c" vs "a bc"), a stripped minus sign ("x=-1" vs "x=1"),
+// and a stripped combining mark ("e" + U+0301 vs "e") — while CJK sentence
+// punctuation still folds away, because dropping punctuation without introducing
+// a boundary is what makes "过期，" and "过期：" the same body.
+func TestNormalizeContentForHashKeepsMeaning(t *testing.T) {
+	distinct := []struct {
+		name string
+		a, b string
+	}{
+		{name: "word boundary", a: "ab c", b: "a bc"},
+		{name: "minus sign", a: "x=-1", b: "x=1"},
+		{name: "comparison", a: "x<1", b: "x>1"},
+		{name: "division", a: "a/b", b: "ab"},
+		{name: "combining mark", a: "e\u0301", b: "e"},
+	}
+	for _, tc := range distinct {
+		t.Run(tc.name, func(t *testing.T) {
+			if NormalizeContentForHash(tc.a) == NormalizeContentForHash(tc.b) {
+				t.Fatalf("NormalizeContentForHash collapsed %q and %q into %q", tc.a, tc.b, NormalizeContentForHash(tc.a))
+			}
+			if hashNormalized(tc.a) == hashNormalized(tc.b) {
+				t.Fatalf("hashNormalized collapsed %q and %q", tc.a, tc.b)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, a, b string }{
+		{name: "cjk comma and colon", a: "过期，", b: "过期："},
+		{name: "trailing period and exclamation", a: "shipped.", b: "shipped!"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if NormalizeContentForHash(tc.a) != NormalizeContentForHash(tc.b) {
+				t.Fatalf("NormalizeContentForHash(%q) = %q differs from NormalizeContentForHash(%q) = %q", tc.a, NormalizeContentForHash(tc.a), tc.b, NormalizeContentForHash(tc.b))
+			}
+		})
+	}
+}
+
 // TestHashNormalizedIgnoresFormattingOnly covers the two ways the normalized
 // key must behave: every formatting-only variant produces the same key, and any
-// change to a letter or digit produces a different one.
+// change to a word boundary, a letter, a digit or a meaning-bearing sign
+// produces a different one. Punctuation adjacent to a space is formatting;
+// gluing two words together with a dropped comma is not, which is why the
+// variants below keep their spaces.
 func TestHashNormalizedIgnoresFormattingOnly(t *testing.T) {
 	base := hashNormalized("Enable WAL for concurrent readers")
 	if base == "" {
@@ -51,7 +100,8 @@ func TestHashNormalizedIgnoresFormattingOnly(t *testing.T) {
 		"enable wal for concurrent readers",
 		"  Enable  WAL\tfor\nconcurrent readers  ",
 		"ENABLE WAL, FOR CONCURRENT READERS!",
-		"...Enable-WAL...for...concurrent...readers...",
+		"...Enable WAL ...for... concurrent readers...",
+		"(Enable WAL) [for] {concurrent} readers",
 	} {
 		if got := hashNormalized(variant); got != base {
 			t.Errorf("hashNormalized(%q) = %q, want the base key %q", variant, got, base)
@@ -61,12 +111,14 @@ func TestHashNormalizedIgnoresFormattingOnly(t *testing.T) {
 		"Enable WAL for concurrent reader",
 		"Enable WAL for concurrent readers 2",
 		"Enable WAL for sequential readers",
+		"Enable-WAL for concurrent readers",
+		"EnableWALforconcurrentreaders",
 	} {
 		if got := hashNormalized(variant); got == base {
-			t.Errorf("hashNormalized(%q) collided with the base key: a changed letter or digit must not merge", variant)
+			t.Errorf("hashNormalized(%q) collided with the base key: a changed boundary, letter or sign must not merge", variant)
 		}
 	}
-	for _, noKey := range []string{"", "...", "!!! ---", "   "} {
+	for _, noKey := range []string{"", "...", "!!! ???", "   "} {
 		if got := hashNormalized(noKey); got != "" {
 			t.Errorf("hashNormalized(%q) = %q, want no key: punctuation-only bodies must not match on nothing", noKey, got)
 		}

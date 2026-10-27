@@ -301,3 +301,67 @@ func TestHandlerHelpIsSideEffectFree(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatchDoubleDashEndsHelpScan pins CR c4#4: "--" ends flag parsing, so
+// an operand spelled --help belongs to the handler rather than to dispatch.
+func TestDispatchDoubleDashEndsHelpScan(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantStderr string
+	}{
+		{
+			// prewarm rejects positionals, which is exactly the point: the
+			// request reached the handler instead of printing usage.
+			name:       "prewarm sees --help as an operand",
+			args:       []string{"prewarm", "--", "--help"},
+			wantExit:   exitUsage,
+			wantStderr: "unexpected positional arguments",
+		},
+		{
+			name:       "import takes --help as a file name",
+			args:       []string{"import", "--", "--help"},
+			wantExit:   exitFailure,
+			wantStderr: "open --",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := isolatedHome(t)
+			var stdout, stderr bytes.Buffer
+			code := dispatch(context.Background(), tc.args, &stdout, &stderr)
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, tc.wantExit, stderr.String())
+			}
+			var usage bytes.Buffer
+			printUsage(&usage)
+			if strings.Contains(stdout.String(), usage.String()) {
+				t.Fatalf("help was intercepted after --: %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q: %q", tc.wantStderr, stderr.String())
+			}
+			assertHomeEmpty(t, home)
+		})
+	}
+}
+
+// TestDispatchHelpWinsOverValuePosition documents the boundary CR c4#4 leaves
+// open: dispatch does not know which flags take a value, so "--help" in value
+// position (--goal --help) is still answered as a help request. Telling the two
+// shapes apart needs per-command grammar, and design D1 — help wins wherever it
+// appears — is the documented answer instead.
+func TestDispatchHelpWinsOverValuePosition(t *testing.T) {
+	home := isolatedHome(t)
+	var stdout, stderr bytes.Buffer
+	if code := dispatch(context.Background(), []string{"prewarm", "--goal", "--help"}, &stdout, &stderr); code != exitSuccess {
+		t.Fatalf("exit = %d, want %d (stderr %q)", code, exitSuccess, stderr.String())
+	}
+	var want bytes.Buffer
+	printUsage(&want)
+	if stdout.String() != want.String() {
+		t.Fatalf("expected the usage text, got %q", stdout.String())
+	}
+	assertHomeEmpty(t, home)
+}

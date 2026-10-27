@@ -40,8 +40,23 @@ func main() {
 // Help is answered here, before a handler runs (design D1): "mnemos prune -h"
 // must print usage and exit 0 without opening a store or pruning anything, and
 // that guarantee cannot depend on every handler remembering it.
+//
+// The scan stops at the "--" terminator, so an operand that happens to be
+// spelled "--help" reaches its handler instead of being answered with usage
+// (CR c4#4): "mnemos import -- --help" imports a file named --help.
+//
+// One boundary is deliberately left unpoliced: "--" only ends flag parsing, it
+// does not make this layer forget which flags take a value, so "mnemos prewarm
+// --goal --help" is still read as a help request even though the handler would
+// have consumed --help as the value of --goal. Telling those two shapes apart
+// needs per-command grammar, which dispatch does not have and must not grow;
+// the design D1 rule (help wins wherever it appears) is the answer instead.
 func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	for _, arg := range args {
+		if arg == "--" {
+			// Everything after -- is an operand, not a flag.
+			break
+		}
 		if arg == "-h" || arg == "--help" {
 			printUsage(stdout)
 			return exitSuccess

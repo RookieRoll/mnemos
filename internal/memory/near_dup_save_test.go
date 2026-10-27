@@ -145,6 +145,30 @@ func TestSaveNearDuplicateDecision(t *testing.T) {
 			wantRows: 2,
 		},
 		{
+			name: "lost word boundary does not merge", window: &window, gap: time.Hour,
+			first:    nearDupNote("ab c"),
+			second:   nearDupNote("a bc"),
+			wantRows: 2,
+		},
+		{
+			name: "stripped minus sign does not merge", window: &window, gap: time.Hour,
+			first:    nearDupNote("x=-1"),
+			second:   nearDupNote("x=1"),
+			wantRows: 2,
+		},
+		{
+			name: "stripped combining mark does not merge", window: &window, gap: time.Hour,
+			first:    nearDupNote("cafe\u0301"),
+			second:   nearDupNote("cafe"),
+			wantRows: 2,
+		},
+		{
+			name: "cjk punctuation variant still merges", window: &window, gap: time.Hour,
+			first:      nearDupNote("过期，"),
+			second:     nearDupNote("过期："),
+			wantMerged: true, wantReason: memory.NearDupReasonContentHash, wantRows: 1,
+		},
+		{
 			name: "different project does not merge", window: &window, gap: time.Hour,
 			first:    nearDupNote("Enable WAL for concurrent readers"),
 			second:   memory.SaveInput{Title: "deploy note", Content: "Enable WAL, for concurrent readers!", Type: memory.TypePattern, Project: "other"},
@@ -366,8 +390,8 @@ func TestNearDupMergeKeepsProvenanceOutOfRetrieval(t *testing.T) {
 	if got := f.count(t, `SELECT COUNT(*) FROM observations`); got != 1 {
 		t.Fatalf("merged save left %d live rows, want 1", got)
 	}
-	// The retained body is recoverable verbatim, so the merge is reversible by
-	// re-saving it.
+	// The retained body is available verbatim. This distinct title avoids the
+	// session/title rule; a repeated original request could merge again.
 	var retained string
 	if err := f.db.SQL().QueryRow(`SELECT incoming_content FROM observation_near_dups WHERE survivor_id = ?`, first.Observation.ID).Scan(&retained); err != nil {
 		t.Fatalf("read provenance: %v", err)
@@ -423,14 +447,16 @@ func TestRestoreKeepsContentHashesVerbatim(t *testing.T) {
 }
 
 // TestSaveStoresNormalizedKeyOnlyForReadableContent covers the defensive edge:
-// a body with no letters or digits stores no derived key, so punctuation-only
-// bodies can never match each other.
+// a body with no significant rune at all stores no derived key, so
+// punctuation-only bodies can never match each other. A body made only of
+// meaning-bearing signs ("---") is deliberately not keyless: the signs survive
+// because stripping them would collapse "x=-1" into "x=1".
 func TestSaveStoresNormalizedKeyOnlyForReadableContent(t *testing.T) {
 	window := memory.DefaultNearDupWindow
 	f := newNearDupFixture(t, &window)
 	f.save(t, nearDupNote("...!!!"))
 	f.advance(time.Minute)
-	f.save(t, nearDupNote("???---"))
+	f.save(t, nearDupNote("???..."))
 
 	if got := f.count(t, `SELECT COUNT(*) FROM observations WHERE content_hash_normalized IS NULL`); got != 2 {
 		t.Fatalf("%d punctuation-only rows stored a derived key, want none", 2-got)

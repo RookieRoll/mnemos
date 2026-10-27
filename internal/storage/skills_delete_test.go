@@ -4,23 +4,38 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/polyxmedia/mnemos/internal/skills"
 )
 
 // TestSkillStoreDelete covers the store-level delete contract: one row goes, the
-// skills_fts mirror follows through the AFTER DELETE trigger, and a repeated or
-// empty delete reports a domain error instead of silently succeeding.
+// skills_fts mirror follows through the table triggers, a repeated or empty
+// delete reports a domain error instead of silently succeeding, and every error
+// the store returns is prefixed with the storage subsystem name.
 func TestSkillStoreDelete(t *testing.T) {
 	cases := []struct {
-		name string
-		id   func(sk *skills.Skill) string
-		want error
+		name     string
+		id       func(sk *skills.Skill) string
+		want     error
+		wantText string
 	}{
-		{name: "existing row is removed", id: func(sk *skills.Skill) string { return sk.ID }},
-		{name: "unknown id reports not found", id: func(*skills.Skill) string { return "01nosuchskill" }, want: skills.ErrNotFound},
-		{name: "empty id is rejected", id: func(*skills.Skill) string { return "" }},
+		{
+			name: "existing row is removed",
+			id:   func(sk *skills.Skill) string { return sk.ID },
+		},
+		{
+			name:     "unknown id reports not found",
+			id:       func(*skills.Skill) string { return "01nosuchskill" },
+			want:     skills.ErrNotFound,
+			wantText: "storage: delete skill",
+		},
+		{
+			name:     "empty id is rejected",
+			id:       func(*skills.Skill) string { return "" },
+			wantText: "storage: delete skill: id required",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -40,6 +55,11 @@ func TestSkillStoreDelete(t *testing.T) {
 			}
 
 			err = store.Delete(ctx, c.id(sk))
+			if c.wantText != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantText) {
+					t.Fatalf("delete error = %v, want one containing %q", err, c.wantText)
+				}
+			}
 			if c.want != nil {
 				if !errors.Is(err, c.want) {
 					t.Fatalf("delete error = %v, want %v", err, c.want)
@@ -67,7 +87,7 @@ func TestSkillStoreDelete(t *testing.T) {
 				t.Fatal(err)
 			}
 			if fts != base {
-				t.Errorf("skills_fts holds %d rows but skills holds %d: orphan index row", fts, base)
+				t.Errorf("skills_fts holds %d rows but skills holds %d: mirror drift", fts, base)
 			}
 		})
 	}

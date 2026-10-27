@@ -28,9 +28,13 @@ type retireStore struct {
 	calls int
 	ids   []string
 	err   error
+	// beforeGuarded runs once, between the service's selection read and the
+	// batch write, so a test can change a row inside the select-then-write window
+	// the guarded capability closes.
+	beforeGuarded func()
 }
 
-// RetireObservations implements memory.RetirementStore for the tests.
+// RetireObservations implements the narrow memory.RetirementStore for the tests.
 func (r *retireStore) RetireObservations(ctx context.Context, ids []string, validUntil time.Time) (int64, error) {
 	r.calls++
 	r.ids = append([]string(nil), ids...)
@@ -69,6 +73,26 @@ func (r *retireStore) RetireObservations(ctx context.Context, ids []string, vali
 		return 0, err
 	}
 	return retired, nil
+}
+
+// RetireObservationsGuarded implements memory.GuardedRetirementStore by
+// delegating to the real storage adapter, so the service tests exercise the same
+// selector re-check and id reporting production uses.
+func (r *retireStore) RetireObservationsGuarded(ctx context.Context, ids []string, in memory.RetireInput, validUntil time.Time) ([]string, error) {
+	r.calls++
+	r.ids = append([]string(nil), ids...)
+	if r.beforeGuarded != nil {
+		r.beforeGuarded()
+		r.beforeGuarded = nil
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	guarded, ok := r.Store.(memory.GuardedRetirementStore)
+	if !ok {
+		return nil, errors.New("embedded store does not offer guarded retirement")
+	}
+	return guarded.RetireObservationsGuarded(ctx, ids, in, validUntil)
 }
 
 // plainRetireStore exposes only the memory.Store surface, so the service sees
@@ -716,5 +740,51 @@ func TestSelectRetireOlderThan(t *testing.T) {
 			}
 			assertRetireRowsUnchanged(t, before, snapshotRetireRows(t, f.store))
 		})
+	}
+}
+
+// TestRetireReportReflectsTheActualWrite pins the count-and-sample contract
+// against the select-then-write window: a row that gains an access after the
+// selection read stops matching --no-access, the guarded UPDATE skips it, and it
+// must vanish from both the count and the sample. A report built from the
+// pre-write selection would still name it.
+func TestRetireReportReflectsTheActualWrite(t *testing.T) {
+	f := newRetireFixture(t)
+	ctx := context.Background()
+	var ids []string
+	for i := 0; i < 3; i++ {
+		ids = append(ids, f.seed(t, retireRow{
+			key: fmt.Sprintf("race-%d", i), project: "alpha", importance: 2,
+		}))
+	}
+	skipped := ids[0]
+	f.store.beforeGuarded = func() {
+		if err := f.store.BumpAccess(ctx, skipped); err != nil {
+			t.Errorf("bump access inside the select-then-write window: %v", err)
+		}
+	}
+
+	report, err := f.svc.Retire(ctx, memory.RetireInput{Project: "alpha", NoAccess: true})
+	if err != nil {
+		t.Fatalf("Retire: %v", err)
+	}
+	if report.Count != 2 {
+		t.Fatalf("count = %d, want the two rows the write actually retired", report.Count)
+	}
+	if len(report.Sample) != 2 {
+		t.Fatalf("sample length = %d, want 2", len(report.Sample))
+	}
+	var retired int
+	if err := f.store.sql.QueryRow(
+		`SELECT COUNT(*) FROM observations WHERE project = 'alpha' AND valid_until IS NOT NULL`).Scan(&retired); err != nil {
+		t.Fatal(err)
+	}
+	if retired != report.Count {
+		t.Fatalf("report count = %d, but %d rows carry valid_until", report.Count, retired)
+	}
+	for _, sample := range report.Sample {
+		if sample.ID == skipped {
+			t.Fatalf("sample names %s, a row the write skipped", skipped)
+		}
 	}
 }

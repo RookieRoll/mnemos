@@ -54,12 +54,20 @@ type RetireSample struct {
 }
 
 // RetireReport is the count-and-sample outcome shared by a dry-run preview and
-// a real retirement, so the two paths print identical output.
+// a real retirement, so the two paths print the same report for an unchanged
+// store.
 //
 // Count is the number of observations matched by the selection in a preview,
 // and the number of rows the store actually retired in a run. Sample holds at
-// most five selected observations ordered by CreatedAt then ID, which keeps
-// the preview deterministic regardless of store scan order.
+// most five of those same rows ordered by CreatedAt then ID, which keeps the
+// report deterministic regardless of store scan order.
+//
+// On the run path both fields are drawn from the rows the store reported as
+// written, so a row that stopped matching between the selection read and the
+// write is neither counted nor sampled. A store that offers only
+// RetirementStore returns no ids; for it Count is still the rows actually
+// written, but Sample falls back to the pre-write selection and can name a row
+// the write skipped.
 type RetireReport struct {
 	Count  int
 	Sample []RetireSample
@@ -67,21 +75,43 @@ type RetireReport struct {
 
 // RetirementStore is the transactional bulk-write capability the retirement
 // flow consumes. The adapter is expected to set valid_until on every id in one
-// transaction and to skip ids that stopped being live (already invalidated or
-// already retired), so a concurrent supersession is never re-stamped with a
-// retirement timestamp. It is deliberately separate from Writer: retirement is
-// fact-time housekeeping, not a per-row supersession, and must not set
-// invalidated_at.
+// transaction and to skip ids that stopped being live (already invalidated, not
+// yet effective, or already retired), so a concurrent supersession is never
+// re-stamped with a retirement timestamp. It is deliberately separate from
+// Writer: retirement is fact-time housekeeping, not a per-row supersession, and
+// must not set invalidated_at.
+//
+// The capability is deliberately narrow: it sees ids and a timestamp, so it can
+// re-check only the lifecycle columns. A store that can also re-check the
+// selectors should implement GuardedRetirementStore, which the service prefers.
 type RetirementStore interface {
 	RetireObservations(ctx context.Context, ids []string, validUntil time.Time) (int64, error)
 }
 
+// GuardedRetirementStore is the stronger bulk-write capability: it re-applies
+// the caller's selectors inside the retirement UPDATE and returns the ids it
+// actually stamped.
+//
+// Retirement reads the candidates and then writes them, and those are separate
+// statements, so a row can change in between: a read bumps its access counter,
+// the dream pass lowers its importance, a supersession invalidates it. This
+// capability closes that window by repeating every selector in the same
+// statement as the write — a row that stopped matching is skipped instead of
+// stamped — and by naming the retired rows so the caller can report what the
+// write really did rather than what the earlier read selected.
+type GuardedRetirementStore interface {
+	RetirementStore
+	RetireObservationsGuarded(ctx context.Context, ids []string, in RetireInput, validUntil time.Time) ([]string, error)
+}
+
 // SelectRetire returns the read-only half of retirement: the exact rows a
 // --dry-run preview would print. It never writes and never bumps access
-// counts, so a preview and the run that follows it select the same ids.
+// counts, so a preview and a run that follows it over an unchanged store filter
+// the same rows.
 //
 // Selection is fact-time retirement eligibility: the observation must not be
-// system-invalidated (invalidated_at IS NULL), its valid_until must be unset or
+// system-invalidated (invalidated_at IS NULL), it must already be effective
+// (valid_from is not after the service clock), its valid_until must be unset or
 // in the future at the service clock, and, when RetireInput.OlderThan is set,
 // its created_at must be strictly before that instant. TTL expiry (expires_at)
 // is prune's concern, not retirement's. Selection reads the full export because
@@ -96,8 +126,9 @@ func (s *Service) SelectRetire(ctx context.Context, in RetireInput) (RetireRepor
 	return newRetireReport(selected), nil
 }
 
-// Retire sets valid_until = now on every observation selected by in, in one
-// batch write, and reports the affected count with a bounded sample.
+// Retire sets valid_until = now, in one batch write, on the observations
+// selected by in that still match at write time, and reports the affected count
+// with a bounded sample.
 //
 // Retirement only touches valid_until: created_at, invalidated_at,
 // content_hash, and the indexed text stay as they were, no row is deleted, and
@@ -105,32 +136,47 @@ func (s *Service) SelectRetire(ctx context.Context, in RetireInput) (RetireRepor
 // (SearchInput.AsOf before the retirement instant) returning the observation
 // while a current query no longer does.
 //
-// The selection is the same read SelectRetire performs, and the write is
-// delegated to the store's RetirementStore capability with the selected ids, so
-// preview and execution cannot diverge. A store without that capability returns
-// an error instead of falling back to per-row system-time invalidation.
+// The selection is the same read SelectRetire performs, so the run retires the
+// rows the preview would have printed. The read and the write are separate
+// statements, though, so a row can change in between: a read can bump its
+// access count, the dream pass can lower its importance, a supersession can
+// invalidate it. A store offering GuardedRetirementStore re-checks every
+// selector inside the retirement UPDATE and names the rows it stamped, so a row
+// that stopped matching is skipped and the report is built from the write
+// itself (see RetireReport). A store offering only RetirementStore can re-check
+// nothing but the lifecycle columns: the count stays exact, but the sample comes
+// from the pre-write selection and may name a row the write skipped. A store
+// without either capability returns an error instead of falling back to
+// per-row system-time invalidation.
 func (s *Service) Retire(ctx context.Context, in RetireInput) (RetireReport, error) {
 	now := s.clock().UTC()
 	selected, err := s.selectRetire(ctx, in, now)
 	if err != nil {
 		return RetireReport{}, err
 	}
-	report := newRetireReport(selected)
 	if len(selected) == 0 {
-		return report, nil
-	}
-	store, ok := s.store.(RetirementStore)
-	if !ok {
-		return RetireReport{}, fmt.Errorf("memory: store does not support bulk fact-time retirement")
+		return newRetireReport(selected), nil
 	}
 	ids := make([]string, len(selected))
 	for i := range selected {
 		ids[i] = selected[i].ID
 	}
+	if store, ok := s.store.(GuardedRetirementStore); ok {
+		retired, err := store.RetireObservationsGuarded(ctx, ids, in, now)
+		if err != nil {
+			return RetireReport{}, fmt.Errorf("memory: %w", err)
+		}
+		return newRetireReportRetired(selected, retired), nil
+	}
+	store, ok := s.store.(RetirementStore)
+	if !ok {
+		return RetireReport{}, fmt.Errorf("memory: store does not support bulk fact-time retirement")
+	}
 	retired, err := store.RetireObservations(ctx, ids, now)
 	if err != nil {
 		return RetireReport{}, fmt.Errorf("memory: %w", err)
 	}
+	report := newRetireReport(selected)
 	report.Count = int(retired)
 	return report, nil
 }
@@ -164,11 +210,20 @@ func (s *Service) selectRetire(ctx context.Context, in RetireInput, now time.Tim
 }
 
 // retireEligible is the single predicate behind preview and write: a live
-// observation (not system-invalidated, fact-time validity unset or in the
-// future) inside the requested project and below the importance and access
-// thresholds, created before the optional age cutoff.
+// observation (not system-invalidated, already effective, fact-time validity
+// unset or in the future) inside the requested project and below the importance
+// and access thresholds, created before the optional age cutoff.
+//
+// "Already effective" is ValidFrom at or before now. Retiring a row that is not
+// yet effective would stamp valid_until before valid_from and leave an inverted
+// fact-time interval, so a future-effective observation is not eligible until
+// its instant arrives; ValidFrom is NOT NULL by schema, so the zero value is
+// simply year one and never excludes a real row.
 func retireEligible(o Observation, in RetireInput, now time.Time) bool {
 	if o.InvalidatedAt != nil {
+		return false
+	}
+	if o.ValidFrom.After(now) {
 		return false
 	}
 	if o.ValidUntil != nil && !o.ValidUntil.After(now) {
@@ -198,6 +253,26 @@ func newRetireReport(selected []Observation) RetireReport {
 	}
 	report.Sample = make([]RetireSample, 0, limit)
 	for i := 0; i < limit; i++ {
+		report.Sample = append(report.Sample, RetireSample{ID: selected[i].ID, Title: selected[i].Title})
+	}
+	return report
+}
+
+// newRetireReportRetired builds a report from the ids the store reported as
+// stamped, keeping the selection's CreatedAt-then-ID order so a run's sample is
+// as deterministic as a preview's. Count comes from the store, not from the
+// intersection: the store is the authority on what it wrote, while the sample
+// can only name rows the selection described.
+func newRetireReportRetired(selected []Observation, retiredIDs []string) RetireReport {
+	retired := make(map[string]struct{}, len(retiredIDs))
+	for _, id := range retiredIDs {
+		retired[id] = struct{}{}
+	}
+	report := RetireReport{Count: len(retiredIDs), Sample: make([]RetireSample, 0, retireSampleLimit)}
+	for i := 0; i < len(selected) && len(report.Sample) < retireSampleLimit; i++ {
+		if _, ok := retired[selected[i].ID]; !ok {
+			continue
+		}
 		report.Sample = append(report.Sample, RetireSample{ID: selected[i].ID, Title: selected[i].Title})
 	}
 	return report

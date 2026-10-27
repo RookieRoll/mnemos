@@ -96,18 +96,8 @@ func (s *skillStore) upsert(ctx context.Context, fence *maintenance.Fence, in sk
 	case err != nil:
 		return nil, fmt.Errorf("lookup skill: %w", err)
 	default:
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE skills SET
-				description     = ?,
-				procedure       = ?,
-				pitfalls        = ?,
-				tags            = ?,
-				source_sessions = ?,
-				version         = ?,
-				updated_at      = ?
-			WHERE id = ?`,
-			in.Description, in.Procedure, nullableStr(in.Pitfalls),
-			string(tags), string(sources), existingVersion+1, now, existingID); err != nil {
+		if _, err := updateSkillContentTx(ctx, tx, existingID, existingVersion,
+			in.Description, in.Procedure, in.Pitfalls, string(tags), string(sources), now); err != nil {
 			return nil, fmt.Errorf("update skill: %w", err)
 		}
 		if fence != nil {
@@ -122,7 +112,152 @@ func (s *skillStore) upsert(ctx context.Context, fence *maintenance.Fence, in sk
 	}
 }
 
+// Merge applies a skill merge transactionally: the keeper's rewritten content and
+// the removal of every superseded row commit together, guarded by the versions
+// the caller observed when it selected the rows. Any mismatch — a keeper that
+// moved on, a superseded row that changed or vanished — aborts with
+// skills.ErrMergeConflict before a single write becomes visible, so a concurrent
+// writer wins instead of being silently overwritten, and a failed attempt leaves
+// nothing behind for a retry to double-apply.
+//
+// A payload whose content already matches what the keeper holds skips the keeper
+// rewrite (no version bump) and only removes the superseded rows, so repeating a
+// merge is a no-op rather than a version treadmill.
+func (s *skillStore) Merge(ctx context.Context, in skills.MergeWriteInput) (*skills.Skill, error) {
+	if in.KeeperID == "" {
+		return nil, fmt.Errorf("storage: merge skills: keeper required")
+	}
+	if in.Procedure == "" {
+		return nil, fmt.Errorf("storage: merge skills: procedure required")
+	}
+	if len(in.Losers) == 0 {
+		return nil, fmt.Errorf("storage: merge skills: at least one superseded skill required")
+	}
+	tags, err := json.Marshal(coalesceSlice(in.Tags))
+	if err != nil {
+		return nil, fmt.Errorf("storage: merge skills: marshal tags: %w", err)
+	}
+	sources, err := json.Marshal(coalesceSlice(in.SourceSessions))
+	if err != nil {
+		return nil, fmt.Errorf("storage: merge skills: marshal sources: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("storage: merge skills: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	keeper, err := scanSkill(tx.QueryRowContext(ctx, selectSkillSQL+` WHERE id = ?`, in.KeeperID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("storage: merge skills: keeper %q gone: %w", in.KeeperID, skills.ErrMergeConflict)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: merge skills: read keeper: %w", err)
+	}
+	if keeper.Version != in.KeeperVersion {
+		return nil, fmt.Errorf("storage: merge skills: keeper %q at v%d, selection saw v%d: %w",
+			in.KeeperID, keeper.Version, in.KeeperVersion, skills.ErrMergeConflict)
+	}
+	for _, ref := range in.Losers {
+		var version int
+		err := tx.QueryRowContext(ctx, `SELECT version FROM skills WHERE id = ?`, ref.ID).Scan(&version)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return nil, fmt.Errorf("storage: merge skills: superseded skill %q gone: %w", ref.ID, skills.ErrMergeConflict)
+		case err != nil:
+			return nil, fmt.Errorf("storage: merge skills: read superseded skill %q: %w", ref.ID, err)
+		case version != ref.Version:
+			return nil, fmt.Errorf("storage: merge skills: superseded skill %q at v%d, selection saw v%d: %w",
+				ref.ID, version, ref.Version, skills.ErrMergeConflict)
+		}
+	}
+
+	if !sameSkillContent(keeper, in) {
+		now := time.Now().UTC()
+		n, err := updateSkillContentTx(ctx, tx, keeper.ID, keeper.Version,
+			in.Description, in.Procedure, in.Pitfalls, string(tags), string(sources), now)
+		if err != nil {
+			return nil, fmt.Errorf("storage: merge skills: update keeper: %w", err)
+		}
+		if n == 0 {
+			return nil, fmt.Errorf("storage: merge skills: keeper %q changed: %w", in.KeeperID, skills.ErrMergeConflict)
+		}
+	}
+	for _, ref := range in.Losers {
+		res, err := tx.ExecContext(ctx, `DELETE FROM skills WHERE id = ? AND version = ?`, ref.ID, ref.Version)
+		if err != nil {
+			return nil, fmt.Errorf("storage: delete skill: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("storage: delete skill: rows affected: %w", err)
+		}
+		if n == 0 {
+			return nil, fmt.Errorf("storage: delete skill %q: %w", ref.ID, skills.ErrMergeConflict)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("storage: merge skills: commit: %w", err)
+	}
+	return s.Get(ctx, keeper.ID)
+}
+
+// updateSkillContentTx rewrites the content half of one skill row and bumps its
+// version by one. Upsert and Merge both version a skill through this single
+// statement, so the two write paths cannot drift on what a version bump means.
+func updateSkillContentTx(ctx context.Context, tx *sql.Tx, id string, currentVersion int,
+	description, procedure, pitfalls, tagsJSON, sourcesJSON string, now time.Time) (int64, error) {
+	res, err := tx.ExecContext(ctx, `
+		UPDATE skills SET
+			description     = ?,
+			procedure       = ?,
+			pitfalls        = ?,
+			tags            = ?,
+			source_sessions = ?,
+			version         = ?,
+			updated_at      = ?
+		WHERE id = ?`,
+		description, procedure, nullableStr(pitfalls),
+		tagsJSON, sourcesJSON, currentVersion+1, now, id)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// sameSkillContent reports whether a merge payload matches what the keeper
+// already holds. Tags and provenance compare as sets: a re-ordered list is not a
+// content change, so it must not force a version bump.
+func sameSkillContent(keeper *skills.Skill, in skills.MergeWriteInput) bool {
+	return keeper.Description == in.Description &&
+		keeper.Procedure == in.Procedure &&
+		keeper.Pitfalls == in.Pitfalls &&
+		sameStrings(keeper.Tags, in.Tags) &&
+		sameStrings(keeper.SourceSessions, in.SourceSessions)
+}
+
+// sameStrings reports whether two lists hold the same values with the same
+// multiplicity, ignoring order.
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, v := range a {
+		counts[v]++
+	}
+	for _, v := range b {
+		if counts[v] == 0 {
+			return false
+		}
+		counts[v]--
+	}
+	return true
+}
+
 var _ skills.FencedStore = (*skillStore)(nil)
+var _ skills.MergingStore = (*skillStore)(nil)
 
 // Restore inserts a skill verbatim, preserving its ID, version, effectiveness,
 // use/success counts, and timestamps exactly as exported. Unlike Upsert (which
@@ -289,25 +424,25 @@ func (s *skillStore) RecordUse(ctx context.Context, in skills.FeedbackInput) err
 	return nil
 }
 
-// Delete removes one skill row by ID. The statement is the store's own delete,
-// which is the only supported path: skills_fts is an external-content FTS5 table
-// whose AFTER DELETE trigger issues the matching 'delete' command, so a caller
-// that ran DELETE itself would leave an orphan index row that search keeps
-// returning. Returns skills.ErrNotFound when the ID is unknown.
+// Delete removes one skill row by ID. Skill writes are funnelled through the
+// store, and the skills_fts mirror stays in step with the table through its
+// triggers on every INSERT, UPDATE, and DELETE, so the row and its index entries
+// move together wherever the DELETE is issued from. Returns skills.ErrNotFound
+// (wrapped) when the ID is unknown.
 func (s *skillStore) Delete(ctx context.Context, id string) error {
 	if id == "" {
-		return fmt.Errorf("skill delete: id required")
+		return fmt.Errorf("storage: delete skill: id required")
 	}
 	res, err := s.db.ExecContext(ctx, `DELETE FROM skills WHERE id = ?`, id)
 	if err != nil {
-		return fmt.Errorf("delete skill: %w", err)
+		return fmt.Errorf("storage: delete skill: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("rows affected: %w", err)
+		return fmt.Errorf("storage: delete skill: rows affected: %w", err)
 	}
 	if n == 0 {
-		return skills.ErrNotFound
+		return fmt.Errorf("storage: delete skill %q: %w", id, skills.ErrNotFound)
 	}
 	return nil
 }

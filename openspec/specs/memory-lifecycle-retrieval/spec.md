@@ -164,8 +164,9 @@ The capability document SHALL report `pinned_memory` and `graph_retrieval` only 
 ### Requirement: Near-duplicate save merge
 
 The memory layer SHALL store a normalized form of each observation's content —
-case-folded with whitespace and punctuation removed — and SHALL use it to merge
-observations that differ only in case, whitespace or punctuation, within the same
+using Unicode simple lowercase, collapsed whitespace, preserved letters, digits,
+combining marks and mathematical signs, and otherwise removed punctuation and
+symbols — and SHALL use equal normalized forms to merge observations within the same
 `(agent_id, project)` and inside a configurable time window whose default is 24
 hours. Every merge SHALL retain the merged-away content verbatim in a provenance
 record. The exact content hash SHALL keep its current definition and value, and
@@ -173,7 +174,7 @@ SHALL NOT be recomputed for existing rows.
 
 #### Scenario: punctuation, case or whitespace variant merges
 
-- **WHEN** an observation is saved in an `(agent_id, project)` that already holds a live observation whose content differs only in case, whitespace or punctuation, and that observation was last touched inside the near-duplicate window
+- **WHEN** an observation is saved in an `(agent_id, project)` that already holds a live observation with the same normalized content, and that observation was last touched inside the near-duplicate window
 - **THEN** no second live observation is created, the existing observation's access signal is incremented, a provenance record retains the merged-away content, and the save returns the existing observation's id
 
 #### Scenario: same session and title inside the window merges
@@ -196,10 +197,10 @@ SHALL NOT be recomputed for existing rows.
 - **WHEN** a near-duplicate merge occurs
 - **THEN** a provenance record links the survivor to the merged-away save and holds both its verbatim content and its content hash (plus the normalized hash and the merge reason), and this record does not alter retrieval scores
 
-#### Scenario: a merge is auditable and reversible
+#### Scenario: a merge is auditable
 
 - **WHEN** an operator inspects a provenance record for a merge
-- **THEN** the merged-away content is available verbatim and can be restored by saving it again, with no dedicated undo command required
+- **THEN** the merged-away content is available verbatim for audit and manual recovery; a repeated save can be merged again
 
 #### Scenario: pre-existing rows are not backfilled
 

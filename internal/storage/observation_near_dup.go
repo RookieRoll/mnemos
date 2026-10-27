@@ -29,9 +29,15 @@ type nearDupHit struct {
 // nearDupLivePredicate is the live-row shape every near-duplicate probe shares,
 // plus the evidence exclusion: a candidate that carries evidence references is a
 // versioned assertion with locators of its own, and folding into it would mix
-// two version identities. Callers bind it with two timestamp parameters (the
-// "now" that decides validity).
+// two version identities. Callers bind it with three timestamp parameters, all
+// the same "now": the candidate must already be effective (valid_from <= now),
+// must not be retired (valid_until unset or later than now), and must not have
+// expired (expires_at unset or later than now). A future-effective row is never
+// a survivor: folding into it would hide the incoming save behind an
+// observation the retrieval filters cannot see yet. valid_from is NOT NULL by
+// schema, so the plain comparison carries the whole null contract.
 const nearDupLivePredicate = `invalidated_at IS NULL
+	   AND valid_from <= ?
 	   AND (valid_until IS NULL OR valid_until > ?)
 	   AND (expires_at IS NULL OR expires_at > ?)
 	   AND NOT EXISTS (SELECT 1 FROM observation_evidence e WHERE e.observation_id = observations.id)`
@@ -109,7 +115,7 @@ func nearDupByNormalizedHashTx(ctx context.Context, tx *sql.Tx, o *memory.Observ
 		   AND COALESCE(last_accessed_at, created_at) >= ?
 		 ORDER BY COALESCE(last_accessed_at, created_at) DESC, created_at DESC, id DESC
 		 LIMIT 1`,
-		o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), o.ContentHashNormalized, now.UTC(), now.UTC(), cutoff.UTC())
+		o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), o.ContentHashNormalized, now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("storage: probe near-duplicate content: %w", err)
 	}
@@ -122,15 +128,23 @@ func nearDupByNormalizedHashTx(ctx context.Context, tx *sql.Tx, o *memory.Observ
 // is kept verbatim in the provenance record. It is scoped by session and title
 // only, exactly as the design states, so a second save for the same task in the
 // same session folds into the first.
+//
+// The probe also requires a non-NULL content_hash_normalized. That column is the
+// near-duplicate key, and NULL means "written before the rule existed": the
+// migration adds it without backfilling, so a pre-existing row must never become
+// a survivor by any route. The content-hash rule excludes those rows on its own
+// (NULL never equals a digest); this guard gives the session/title rule — which
+// never looks at the key — the same guarantee.
 func nearDupBySessionTitleTx(ctx context.Context, tx *sql.Tx, o *memory.Observation, cutoff, now time.Time) (*memory.Observation, error) {
 	rows, err := tx.QueryContext(ctx, selectObsSQL+` WHERE session_id = ?
 		   AND title = ?
 		   AND trust_tier = ?
+		   AND content_hash_normalized IS NOT NULL
 		   AND `+nearDupLivePredicate+`
 		   AND created_at >= ?
 		 ORDER BY created_at DESC, id DESC
 		 LIMIT 1`,
-		o.SessionID, o.Title, string(o.TrustTier), now.UTC(), now.UTC(), cutoff.UTC())
+		o.SessionID, o.Title, string(o.TrustTier), now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("storage: probe near-duplicate session title: %w", err)
 	}
@@ -156,7 +170,7 @@ func nearDupOutsideWindowTx(ctx context.Context, tx *sql.Tx, o *memory.Observati
 		   AND COALESCE(last_accessed_at, created_at) < ?
 		 ORDER BY created_at DESC, id DESC
 		 LIMIT 1`,
-		o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), o.ContentHashNormalized, now.UTC(), now.UTC(), cutoff.UTC())
+		o.AgentID, o.Project, o.TopicKey, string(o.TrustTier), o.ContentHashNormalized, now.UTC(), now.UTC(), now.UTC(), cutoff.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("storage: probe out-of-window near-duplicate: %w", err)
 	}
@@ -183,7 +197,7 @@ func firstObs(rows *sql.Rows, what string) (*memory.Observation, error) {
 
 // foldNearDupTx performs the merge: bump the survivor's access signal and write
 // one provenance row that carries the merged-away body verbatim, so the fold is
-// auditable and reversible (re-saving the retained text restores it). Nothing
+// auditable and available for manual recovery. Nothing
 // here touches the survivor's content, hashes, timestamps or trust tier: a fold
 // is an access signal plus a record, never an edit.
 //

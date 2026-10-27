@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -25,10 +26,15 @@ func retirementStore(t *testing.T, db *storage.DB) memory.RetirementStore {
 }
 
 // retireSeed is one observation to insert before a retirement attempt: how it
-// looked when the retirement started.
+// looked when the retirement started. project and importance default to projX
+// and 3; validFrom defaults to the row's created_at, 24h before the retirement
+// instant.
 type retireSeed struct {
 	id          string
+	project     string
+	importance  int
 	access      int
+	validFrom   *time.Time
 	validUntil  *time.Time
 	invalidated bool
 }
@@ -49,17 +55,29 @@ func seedRetireObservations(t *testing.T, store memory.Store, at time.Time, seed
 	ctx := context.Background()
 	for _, seed := range seeds {
 		created := at.Add(-24 * time.Hour)
+		validFrom := created
+		if seed.validFrom != nil {
+			validFrom = *seed.validFrom
+		}
+		project := seed.project
+		if project == "" {
+			project = "projX"
+		}
+		importance := seed.importance
+		if importance == 0 {
+			importance = 3
+		}
 		o := &memory.Observation{
 			ID:            seed.id,
 			AgentID:       "agentX",
-			Project:       "projX",
+			Project:       project,
 			Title:         "retire " + seed.id,
 			Content:       "retirement fixture " + seed.id,
 			Type:          memory.TypePattern,
-			Importance:    3,
+			Importance:    importance,
 			AccessCount:   seed.access,
 			CreatedAt:     created,
-			ValidFrom:     created,
+			ValidFrom:     validFrom,
 			ValidUntil:    seed.validUntil,
 			ContentHash:   "hash-" + seed.id,
 			InvalidatedAt: nilIfNot(seed.invalidated, at.Add(-time.Hour)),
@@ -107,9 +125,9 @@ func sameRetireInstant(a, b *time.Time) bool {
 
 // TestRetireObservations pins the storage adapter contract: one write sets
 // valid_until on exactly the listed live rows, skips rows that stopped being
-// live (system-invalidated, or already retired at or before the retirement
-// instant), counts only rows it actually wrote, treats an empty id list as a
-// no-op, and leaves every other column alone.
+// live (system-invalidated, already retired at or before the retirement instant,
+// or not yet effective), counts only rows it actually wrote, treats an empty id
+// list as a no-op, and leaves every other column alone.
 func TestRetireObservations(t *testing.T) {
 	at := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	earlier := at.Add(-2 * time.Hour)
@@ -149,6 +167,20 @@ func TestRetireObservations(t *testing.T) {
 			ids:     []string{"future"},
 			want:    1,
 			retired: []string{"future"},
+		},
+		{
+			name:    "row not yet effective is skipped",
+			seeds:   []retireSeed{{id: "live"}, {id: "not-yet", validFrom: &later}},
+			ids:     []string{"live", "not-yet"},
+			want:    1,
+			retired: []string{"live"},
+		},
+		{
+			name:    "row effective at the retirement instant is retired",
+			seeds:   []retireSeed{{id: "boundary", validFrom: &at}},
+			ids:     []string{"boundary"},
+			want:    1,
+			retired: []string{"boundary"},
 		},
 		{
 			name:    "system-invalidated rows are skipped",
@@ -293,4 +325,101 @@ func TestRetireObservationsLargeBatch(t *testing.T) {
 	if live != 0 {
 		t.Errorf("%d bulk rows are still live after retirement", live)
 	}
+}
+
+// TestRetireObservationsGuardedRechecksSelectors pins the stronger write the
+// service prefers: every selector is re-applied inside the retirement UPDATE,
+// and the returned ids are the rows the statement actually stamped. A row that
+// stopped matching after the selection read is skipped instead of retired, and a
+// skipped row never appears in the returned list.
+func TestRetireObservationsGuardedRechecksSelectors(t *testing.T) {
+	at := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		seeds []retireSeed
+		in    memory.RetireInput
+		ids   []string
+		want  []string
+	}{
+		{
+			name:  "matching rows are retired and returned",
+			seeds: []retireSeed{{id: "a"}, {id: "b"}},
+			in:    memory.RetireInput{Project: "projX", ImportanceMax: 3, NoAccess: true},
+			ids:   []string{"a", "b"},
+			want:  []string{"a", "b"},
+		},
+		{
+			name:  "row above the importance threshold is skipped",
+			seeds: []retireSeed{{id: "low", importance: 1}, {id: "high", importance: 4}},
+			in:    memory.RetireInput{ImportanceMax: 2},
+			ids:   []string{"low", "high"},
+			want:  []string{"low"},
+		},
+		{
+			name:  "accessed row is skipped by no-access",
+			seeds: []retireSeed{{id: "fresh"}, {id: "touched", access: 1}},
+			in:    memory.RetireInput{NoAccess: true},
+			ids:   []string{"fresh", "touched"},
+			want:  []string{"fresh"},
+		},
+		{
+			name:  "row outside the project is skipped",
+			seeds: []retireSeed{{id: "here"}, {id: "there", project: "other"}},
+			in:    memory.RetireInput{Project: "projX"},
+			ids:   []string{"here", "there"},
+			want:  []string{"here"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			store := db.Observations()
+			seedRetireObservations(t, store, at, tc.seeds)
+			before := snapshotRetireObservations(t, store)
+
+			guarded, ok := retirementStore(t, db).(memory.GuardedRetirementStore)
+			if !ok {
+				t.Fatal("the storage retirement adapter must offer the guarded write")
+			}
+			got, err := guarded.RetireObservationsGuarded(context.Background(), tc.ids, tc.in, at)
+			if err != nil {
+				t.Fatalf("RetireObservationsGuarded: %v", err)
+			}
+			want := append([]string(nil), tc.want...)
+			sort.Strings(got)
+			sort.Strings(want)
+			if !sameStringList(got, want) {
+				t.Fatalf("retired ids = %v, want %v", got, want)
+			}
+
+			after := snapshotRetireObservations(t, store)
+			stamped := make(map[string]bool, len(got))
+			for _, id := range got {
+				stamped[id] = true
+			}
+			for id, was := range before {
+				if stamped[id] {
+					if !sameRetireInstant(&at, after[id].validUntil) {
+						t.Errorf("%s: valid_until = %v, want the retirement instant %v", id, after[id].validUntil, at)
+					}
+					continue
+				}
+				if !sameRetireInstant(was.validUntil, after[id].validUntil) {
+					t.Errorf("%s: a skipped row was stamped (%v)", id, after[id].validUntil)
+				}
+			}
+		})
+	}
+}
+
+func sameStringList(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

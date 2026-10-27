@@ -3,6 +3,7 @@ package skills_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,8 +62,8 @@ func (f *skillFixture) bump(t *testing.T, versions int, in skills.SaveInput) *sk
 
 // ftsRowCount reports how many rows the skills full-text mirror and the skills
 // table each hold. The mirror is an external-content FTS5 table fed by the
-// skills triggers, so a mismatch is an orphan index row — the exact failure a
-// raw SQL DELETE would cause.
+// skills triggers, so the two counts must always agree: a mismatch means the
+// mirror and the table have drifted apart.
 func (f *skillFixture) ftsRowCount(t *testing.T) (fts, base int) {
 	t.Helper()
 	if err := f.db.SQL().QueryRow(`SELECT count(*) FROM skills_fts`).Scan(&fts); err != nil {
@@ -481,5 +482,146 @@ func TestSkillSelectOrdersByVersion(t *testing.T) {
 	}
 	if rows[0].ID != v3.ID || rows[1].ID != v2.ID {
 		t.Errorf("selection order = [%d, %d], want the v3 row first", rows[0].Version, rows[1].Version)
+	}
+}
+
+// TestSkillMergeValidatesKeepVersion is the c3#5 contract: KeepVersion is
+// validated before and independently of the selection. A negative value is a
+// usage error and a version that cannot match is a no-match error, so a caller
+// that asked for a specific version never gets a silent success — including when
+// the name itself matched nothing.
+func TestSkillMergeValidatesKeepVersion(t *testing.T) {
+	cases := []struct {
+		name    string
+		seed    bool
+		in      skills.MergeInput
+		wantErr string
+	}{
+		{
+			name:    "negative keep version is rejected before selecting",
+			in:      skills.MergeInput{Name: "deploy-checklist", KeepVersion: -1},
+			wantErr: "keep version must be positive",
+		},
+		{
+			name:    "negative keep version is rejected with matches present",
+			seed:    true,
+			in:      skills.MergeInput{Name: "deploy-checklist", KeepVersion: -3},
+			wantErr: "keep version must be positive",
+		},
+		{
+			name:    "named version with no match is an error",
+			in:      skills.MergeInput{Name: "ghost-skill", KeepVersion: 2},
+			wantErr: "no match at version 2",
+		},
+		{
+			name:    "named version missing from the matches is an error",
+			seed:    true,
+			in:      skills.MergeInput{Name: "deploy-checklist", KeepVersion: 99},
+			wantErr: "no match at version 99",
+		},
+		{
+			name: "no match without a named version stays a no-op",
+			in:   skills.MergeInput{Name: "ghost-skill"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newSkillFixture(t)
+			if c.seed {
+				f.seedDuplicateName(t)
+			}
+			res, err := f.svc.Merge(f.ctx, c.in)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("merge error = %v, want one containing %q", err, c.wantErr)
+				}
+				if res != nil {
+					t.Errorf("failed merge returned a result: %+v", res)
+				}
+			} else if err != nil {
+				t.Fatalf("merge: %v", err)
+			}
+
+			// Validation happens before any write: the store is exactly as seeded.
+			list, err := f.svc.List(f.ctx, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if c.seed {
+				want = 2
+			}
+			if len(list) != want {
+				t.Fatalf("store holds %d skills, want %d", len(list), want)
+			}
+			for _, sk := range list {
+				if sk.Version != 2 && sk.Version != 3 {
+					t.Errorf("failed merge bumped %q to v%d", sk.Name, sk.Version)
+				}
+			}
+		})
+	}
+}
+
+// TestSkillMergeRollsBackWhenDeleteFails is the atomicity contract c3#3 asked
+// for: the keeper rewrite and the superseded-row deletes commit together, so a
+// delete that fails leaves the store exactly as it was — no bumped keeper, no
+// missing row — and the retry still versions the keeper exactly once.
+func TestSkillMergeRollsBackWhenDeleteFails(t *testing.T) {
+	f := newSkillFixture(t)
+	v2, v3 := f.seedDuplicateName(t)
+
+	// Abort the delete of the superseded row: the merge cannot finish, and with a
+	// multi-step write it would have left the keeper already bumped.
+	block := fmt.Sprintf(
+		"CREATE TRIGGER test_block_merge_delete BEFORE DELETE ON skills WHEN OLD.id = '%s' BEGIN SELECT RAISE(ABORT, 'merge delete blocked'); END",
+		v2.ID)
+	if _, err := f.db.SQL().Exec(block); err != nil {
+		t.Fatalf("install delete blocker: %v", err)
+	}
+
+	if _, err := f.svc.Merge(f.ctx, skills.MergeInput{Name: "deploy-checklist"}); err == nil {
+		t.Fatal("merge must fail when the superseded row cannot be deleted")
+	}
+
+	kept, err := f.svc.Get(f.ctx, v3.ID)
+	if err != nil {
+		t.Fatalf("keeper unreadable after a failed merge: %v", err)
+	}
+	if kept.Version != v3.Version {
+		t.Errorf("failed merge bumped the keeper to v%d, want v%d", kept.Version, v3.Version)
+	}
+	if kept.Procedure != v3.Procedure {
+		t.Errorf("failed merge rewrote the keeper body:\n%s", kept.Procedure)
+	}
+	if _, err := f.svc.Get(f.ctx, v2.ID); err != nil {
+		t.Errorf("failed merge removed the superseded row: %v", err)
+	}
+
+	// With the obstacle gone the retry lands, and it versions the keeper once —
+	// a rollback leaves no bump behind for the retry to repeat.
+	if _, err := f.db.SQL().Exec("DROP TRIGGER test_block_merge_delete"); err != nil {
+		t.Fatalf("drop delete blocker: %v", err)
+	}
+	res, err := f.svc.Merge(f.ctx, skills.MergeInput{Name: "deploy-checklist"})
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if res.Keeper == nil || res.Keeper.ID != v3.ID {
+		t.Fatalf("retry keeper = %v, want %q", res.Keeper, v3.ID)
+	}
+	if want := v3.Version + 1; res.Keeper.Version != want {
+		t.Errorf("retry produced v%d, want v%d (the failed attempt must not have bumped anything)",
+			res.Keeper.Version, want)
+	}
+	list, err := f.svc.List(f.ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != v3.ID {
+		t.Fatalf("skills after the retry = %v, want only the keeper", skillNames(list))
+	}
+	if fts, base := f.ftsRowCount(t); fts != base {
+		t.Errorf("skills_fts holds %d rows but skills holds %d after merge", fts, base)
 	}
 }

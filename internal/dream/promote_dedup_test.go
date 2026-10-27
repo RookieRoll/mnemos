@@ -3,6 +3,7 @@ package dream
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -286,10 +287,13 @@ func TestPromotionMergesIntoExistingSameProjectLabelSkill(t *testing.T) {
 	}
 }
 
-// TestPromotionPreservesForeignOriginTag: when the matching row already carries a
-// promoted-origin tag, that identity survives the merge and the new group's tag
-// is not stamped alongside it.
-func TestPromotionPreservesForeignOriginTag(t *testing.T) {
+// TestPromotionSkipsForeignOriginTarget is the c3#1 defence: when the matching
+// row already carries a promoted-origin tag for a different group, the promotion
+// stands down instead of rewriting another group's skill. With an agent-scoped
+// lookup and a hash over (agent, project, label) the pairing should be
+// unreachable — it takes a hand-edited tag — so this test pins the guard that
+// keeps a double-origin cycle from ever starting rather than a live path.
+func TestPromotionSkipsForeignOriginTarget(t *testing.T) {
 	f := newPromoteFixture(t)
 	ctx := context.Background()
 	name := promotedSkillName(correctionGroup{project: "api", label: "oauth"})
@@ -306,34 +310,159 @@ func TestPromotionPreservesForeignOriginTag(t *testing.T) {
 	}
 
 	seedCorrectionGroup(t, f, "api", "oauth", "oauth retry")
-	if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	merged := f.onlySkill(t)
-	if merged.ID != existing.ID {
-		t.Fatalf("promotion wrote a second row: %q -> %q", existing.ID, merged.ID)
+	if j.Promoted != 0 {
+		t.Errorf("promotion must stand down for a foreign-origin target, got %d promotions", j.Promoted)
 	}
-	if got := originTagOf(t, merged); got != foreign {
+
+	after := f.onlySkill(t)
+	if after.ID != existing.ID {
+		t.Fatalf("promotion wrote a second row: %q -> %q", existing.ID, after.ID)
+	}
+	if after.Version != existing.Version {
+		t.Errorf("skipped promotion bumped the version %d -> %d", existing.Version, after.Version)
+	}
+	if after.Procedure != existing.Procedure {
+		t.Errorf("skipped promotion rewrote the body:\n%s", after.Procedure)
+	}
+	if got := originTagOf(t, after); got != foreign {
 		t.Errorf("origin tag = %q, want the pre-existing %q", got, foreign)
 	}
-	if tagPresent(merged.Tags, originPrefix+groupHash("default", "api", "oauth")) {
-		t.Errorf("merge stamped a second origin tag: %v", merged.Tags)
+	if tagPresent(after.Tags, originPrefix+groupHash("default", "api", "oauth")) {
+		t.Errorf("skipped promotion stamped this group's origin tag: %v", after.Tags)
 	}
-	if !strings.Contains(merged.Procedure, "## Avoid") {
-		t.Errorf("merged procedure missing the synthesised body: %s", merged.Procedure)
+	if len(after.Tags) != len(existing.Tags) {
+		t.Errorf("skipped promotion changed tags: %v -> %v", existing.Tags, after.Tags)
 	}
 
-	// The merged row stays stable across a rerun: no new tag, no version bump.
+	// Standing down is stable: the next pass skips again rather than promoting late.
 	if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
 		t.Fatal(err)
 	}
 	stable := f.onlySkill(t)
-	if stable.Version != merged.Version {
-		t.Errorf("rerun bumped version %d -> %d", merged.Version, stable.Version)
+	if stable.Version != existing.Version || len(stable.Tags) != len(existing.Tags) {
+		t.Errorf("rerun changed the foreign-origin row: v%d %v", stable.Version, stable.Tags)
 	}
-	if len(stable.Tags) != len(merged.Tags) {
-		t.Errorf("rerun changed tags: %v -> %v", merged.Tags, stable.Tags)
+}
+
+// TestPromotionKeepsMergedSections is the c3#2 guarantee: promotion rewrites a
+// skill body with its deterministic synthesis, but the sections a skills.Merge
+// absorbed into that body belong to another skill, so they survive the rewrite.
+// Hand-written prose is still replaced — that documented trade-off is unchanged.
+func TestPreservePromotedDescription(t *testing.T) {
+	generated := "Auto-promoted from 4 corrections in api: oauth"
+	existing := "Auto-promoted from 3 corrections in api: oauth\n\nabsorbed description"
+	got := preservePromotedDescription(generated, existing)
+	if !strings.Contains(got, "absorbed description") {
+		t.Fatalf("lost merged description: %q", got)
+	}
+	if again := preservePromotedDescription(generated, got); again != got {
+		t.Fatalf("description changed on repeat: %q -> %q", got, again)
+	}
+}
+
+func TestPromotionKeepsMergedSections(t *testing.T) {
+	f := newPromoteFixture(t)
+	ctx := context.Background()
+	name := promotedSkillName(correctionGroup{project: "api", label: "oauth"})
+
+	save := func(in skills.SaveInput, versions int) *skills.Skill {
+		var sk *skills.Skill
+		for i := 0; i < versions; i++ {
+			var err error
+			if sk, err = f.sk.Save(ctx, in); err != nil {
+				t.Fatalf("save %q: %v", in.Name, err)
+			}
+		}
+		return sk
+	}
+
+	// The keeper is hand-written and at v2 so it outranks the duplicate it will
+	// absorb. It carries the project tag the promotion lookup matches on.
+	keeper := save(skills.SaveInput{
+		AgentID:     "default",
+		Name:        name,
+		Description: "hand-written runbook",
+		Procedure:   "hand step: refresh the token first",
+		Pitfalls:    "hand pitfall: never retry a 401",
+		Tags:        []string{"project:api", "runbook"},
+	}, 2)
+	// A same-name skill can only exist under another agent, because (agent_id,
+	// name) is unique — that is the duplicate shape a merge folds together.
+	loser := save(skills.SaveInput{
+		AgentID:     "other",
+		Name:        name,
+		Description: "absorbed runbook",
+		Procedure:   "absorbed step: rotate the secret",
+		Pitfalls:    "absorbed pitfall",
+		Tags:        []string{"project:api", "team:other"},
+	}, 1)
+
+	merged, err := f.sk.Merge(ctx, skills.MergeInput{Name: name})
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if merged.Keeper == nil || merged.Keeper.ID != keeper.ID {
+		t.Fatalf("merge keeper = %v, want %q", merged.Keeper, keeper.ID)
+	}
+	section := fmt.Sprintf("%s other v%d", skills.MergeSectionHeader, loser.Version)
+	if !strings.Contains(merged.Keeper.Procedure, section) {
+		t.Fatalf("setup: keeper missing the merge section %q:\n%s", section, merged.Keeper.Procedure)
+	}
+
+	seedCorrectionGroup(t, f, "api", "oauth", "oauth retry")
+	j, err := runFencedTestPass(t, ctx, f.ds, f.db, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Promoted != 1 {
+		t.Fatalf("want 1 promotion into the merged row, got %d", j.Promoted)
+	}
+
+	promoted := f.onlySkill(t)
+	if promoted.ID != keeper.ID {
+		t.Errorf("promotion wrote a new row: %q -> %q", keeper.ID, promoted.ID)
+	}
+	for _, want := range []string{"## Avoid", section, "absorbed step: rotate the secret"} {
+		if !strings.Contains(promoted.Procedure, want) {
+			t.Errorf("promoted procedure missing %q:\n%s", want, promoted.Procedure)
+		}
+	}
+	if !strings.Contains(promoted.Procedure, "hand step: refresh the token first") {
+		t.Errorf("hand-written prose lost during promotion:\n%s", promoted.Procedure)
+	}
+	if !strings.Contains(promoted.Description, "hand-written runbook") || !strings.Contains(promoted.Description, "absorbed runbook") {
+		t.Errorf("merged descriptions lost during promotion: %s", promoted.Description)
+	}
+	if !strings.Contains(promoted.Pitfalls, "hand pitfall: never retry a 401") {
+		t.Errorf("hand-written pitfalls lost during promotion: %s", promoted.Pitfalls)
+	}
+	for _, want := range []string{section, "absorbed pitfall"} {
+		if !strings.Contains(promoted.Pitfalls, want) {
+			t.Errorf("promoted pitfalls missing %q:\n%s", want, promoted.Pitfalls)
+		}
+	}
+	for _, want := range []string{tagPromoted, "project:api", "runbook", "team:other"} {
+		if !tagPresent(promoted.Tags, want) {
+			t.Errorf("promoted tags %v missing %q", promoted.Tags, want)
+		}
+	}
+
+	// The preserved tail is part of the composed body, so the unchanged set is
+	// still a no-op rather than a version treadmill.
+	before := promoted.Version
+	if _, err := runFencedTestPass(t, ctx, f.ds, f.db, false); err != nil {
+		t.Fatal(err)
+	}
+	stable := f.onlySkill(t)
+	if stable.Version != before {
+		t.Errorf("rerun bumped the merged skill %d -> %d", before, stable.Version)
+	}
+	if !strings.Contains(stable.Procedure, section) {
+		t.Errorf("rerun dropped the merged section:\n%s", stable.Procedure)
 	}
 }
 

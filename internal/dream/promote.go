@@ -118,6 +118,21 @@ func (s *Service) promoteSkillsFromCorrections(ctx context.Context, fence mainte
 				return promoted, deferred, fmt.Errorf("find promoted skill %s/%s: %w", g.project, g.label, err)
 			}
 			if existing != nil {
+				if foreign, ok := foreignOriginTag(existing.Tags, g.hash); ok {
+					// The name and project match, but the row is already owned by
+					// a different promotion group. Merging would rewrite another
+					// group's skill with this group's corrections, so the promotion
+					// stands down and says why; a hand-written row (no origin tag)
+					// still merges. With an agent-scoped lookup and a hash over
+					// (agent, project, label) this pairing should be unreachable —
+					// it would take a hand-edited tag — so this guard exists to
+					// keep a double-origin cycle from ever starting, not to serve a
+					// live code path.
+					s.log.Info("skill promotion skipped: existing skill owns a different promoted origin",
+						"label", g.label, "project", g.project, "skill", existing.Name,
+						"existing_origin", foreign, "group_origin", originPrefix+g.hash)
+					continue
+				}
 				s.log.Info("skill promotion merging into existing skill",
 					"label", g.label, "project", g.project,
 					"skill", existing.Name, "version", existing.Version)
@@ -365,13 +380,15 @@ func defaultAgent(id string) string {
 // in place. existing is the row the promotion owns: either the skill already
 // carrying this group's origin tag, or a skill that already owns the same
 // (project, label) identity (nil on first promotion). The caller already
-// resolved and gated it.
+// resolved and gated it, and never passes a row owned by a different promotion
+// group — that case stands down before the write.
 //
 // Merging is the whole point: a promotion never inserts a second skill with the
 // same name. When a row exists its identity survives — name, tags (including the
 // promoted-origin tag that keys it), and source sessions are preserved and
 // unioned — while the synthesised procedure refreshes through the store's normal
-// Upsert, which bumps the version.
+// Upsert, which bumps the version. Manual prose and sections absorbed by
+// skills.Merge survive later synthesis updates.
 //
 // Returns true when the skill was created or updated (version went up), false
 // when the existing skill already matched exactly, so a pass with no membership
@@ -398,9 +415,21 @@ func (s *Service) upsertPromotedSkill(ctx context.Context, fence maintenance.Fen
 		name = existing.Name
 		tags = mergePromotedTags(existing.Tags, g)
 		sources = unionStrings(existing.SourceSessions, sources)
+		if !hasOriginTag(existing.Tags) {
+			// Preserve the manually authored text as an attributed section before
+			// the first promotion takes ownership of the synthesized portion.
+			procedure = preserveManualPromotionText(procedure, existing.Procedure)
+			pitfalls = preserveManualPromotionText(pitfalls, existing.Pitfalls)
+			description = preserveManualPromotionText(description, existing.Description)
+		} else {
+			description = preservePromotedDescription(description, existing.Description)
+			procedure = withMergeSections(procedure, existing.Procedure)
+			pitfalls = withMergeSections(pitfalls, existing.Pitfalls)
+		}
 		// The body is the deterministic synthesis of the live correction set, so
 		// it is rewritten rather than appended: the same set re-renders the same
 		// text, and a changed set replaces it instead of accumulating history.
+		// Preserved manual and absorbed sections survive subsequent rewrites.
 		//
 		// A pass with no new corrections since last run is a no-op — skip the
 		// upsert so we don't bump the version needlessly.
@@ -426,6 +455,29 @@ func (s *Service) upsertPromotedSkill(ctx context.Context, fence maintenance.Fen
 		return false, fmt.Errorf("save skill: %w", err)
 	}
 	return true, nil
+}
+
+func preserveManualPromotionText(generated, manual string) string {
+	if strings.TrimSpace(manual) == "" {
+		return generated
+	}
+	return generated + "\n\n" + skills.MergeSectionHeader + " manual skill\n\n" + strings.TrimSpace(manual)
+}
+
+// Descriptions merged by skills.Merge predate section markers, so retain their
+// appended paragraphs as well as explicitly marked sections on later passes.
+func preservePromotedDescription(generated, existing string) string {
+	if strings.HasPrefix(existing, "Auto-promoted from ") {
+		_, rest, found := strings.Cut(existing, "\n\n")
+		if !found {
+			return generated
+		}
+		if strings.HasPrefix(rest, skills.MergeSectionHeader) {
+			return generated + "\n\n" + rest
+		}
+		return preserveManualPromotionText(generated, rest)
+	}
+	return preserveManualPromotionText(generated, existing)
 }
 
 // promotedSkillName is derived once, at first synthesis. Keeping it in one
@@ -602,6 +654,60 @@ func hasOriginTag(tags []string) bool {
 		}
 	}
 	return false
+}
+
+// foreignOriginTag reports the promoted-origin tag on a row when it belongs to a
+// different group than the one being promoted. A row carrying this group's own
+// tag is ours by definition, whatever else a hand edit left on it, and a row with
+// no origin tag at all (hand-written, or promoted before the tag existed) is free
+// to adopt this group's identity; neither counts as foreign.
+func foreignOriginTag(tags []string, hash string) (string, bool) {
+	want := originPrefix + hash
+	foreign := ""
+	for _, t := range tags {
+		if t == want {
+			return "", false
+		}
+		if foreign == "" && strings.HasPrefix(t, originPrefix) {
+			foreign = t
+		}
+	}
+	return foreign, foreign != ""
+}
+
+// withMergeSections carries the sections a skills.Merge appended to a body across
+// a promotion rewrite: the synthesised text replaces the prose the promotion
+// owns, while the labelled "## Merged from ..." tail is content absorbed from
+// another skill and must survive. A body with no such section is returned
+// unchanged. Manual text is marked as a section on its first promotion.
+func withMergeSections(synthesised, existing string) string {
+	preserved := mergedSectionTail(existing)
+	switch {
+	case preserved == "":
+		return synthesised
+	case synthesised == "":
+		return preserved
+	default:
+		return synthesised + "\n\n" + preserved
+	}
+}
+
+// mergedSectionTail returns everything from the first "## Merged from ..." heading
+// to the end of body, or "" when the body carries none. skills.Merge only ever
+// appends its sections after the keeper's own text, so the tail is exactly the
+// absorbed content — including any headings inside an absorbed body, which is why
+// this looks for the first marker line instead of splitting on every heading.
+func mergedSectionTail(body string) string {
+	if body == "" {
+		return ""
+	}
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), skills.MergeSectionHeader) {
+			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		}
+	}
+	return ""
 }
 
 // unionStrings returns base followed by every extra value not already present,

@@ -124,8 +124,9 @@ func (s *Service) HybridEnabled() bool {
 //     hash, topic, evidence identity) already live bumps that row.
 //  2. Near-duplicate fold, bounded by the configured window: a live row in the
 //     same (agent, project) whose content normalizes identically — differing
-//     only in case, whitespace or punctuation — or a live row sharing the
-//     save's session id and non-empty title is folded in. The survivor's access
+//     only in case, spacing or removable punctuation, with word boundaries and
+//     the signs - + = % preserved — or a live row sharing the save's session id
+//     and non-empty title is folded in. The survivor's access
 //     count is bumped, the merged-away body is retained verbatim in a
 //     provenance record, and no second live row is created.
 //

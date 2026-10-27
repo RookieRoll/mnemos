@@ -139,8 +139,8 @@ func TestSkillMergeKeepsHighestVersion(t *testing.T) {
 	if rows[0].AgentID != "one" {
 		t.Fatalf("keeper agent = %q, want one (highest version)", rows[0].AgentID)
 	}
-	if rows[0].Version <= 3 {
-		t.Fatalf("keeper version = %d, want the versioning path to bump it above 3", rows[0].Version)
+	if rows[0].Version != 3 {
+		t.Fatalf("keeper version = %d, want 3 for identical content", rows[0].Version)
 	}
 }
 
