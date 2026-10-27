@@ -214,7 +214,7 @@ compares both plugin copies byte-for-byte, and checks their version agreement:
 | `.agents/skills/mnemos/SKILL.md` | frontmatter `version:` |
 | `pi/skills/mnemos/SKILL.md` | frontmatter `version:` |
 
-All eight distribution files are currently unified at `0.17.0`. Release flow is
+All eight distribution files are currently unified at `0.18.0`. Release flow is
 `make release V=vX.Y.Z` (tags + pushes; GitHub Actions + goreleaser does the rest) —
 never hand-build release artifacts. A local development installation is not a
 release; keep the release workflow for published artifacts.
